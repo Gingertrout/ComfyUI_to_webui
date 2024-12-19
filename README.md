@@ -1,6 +1,5 @@
 # ComfyUI_hua_boy
 ![预览image](https://github.com/kungful/ComfyUI_to_webui/blob/1cedadad061e5a0353ae9b21ad91ab4bb8b98eb4/Sample_preview/%E5%89%8D%E7%AB%AF.png)
-![预览image](https://github.com/kungful/ComfyUI_to_webui/blob/1cedadad061e5a0353ae9b21ad91ab4bb8b98eb4/Sample_preview/%E4%BD%BF%E7%94%A8%E6%96%B9%E6%B3%95.png)
 ## 概述
 <span style="color:blue;">**示例工作流在**</span> Sample_preview 文件夹里面
 <span style="color:blue;">**`ComfyUI_hua_boy` 是一个为 ComfyUI工作流变成webui的项目**</span>
@@ -41,6 +40,7 @@
 ![预览image](https://github.com/kungful/ComfyUI_hua_boy/blob/470abc9bc95fc410815eb61deb43d0590abf92d3/Sample_preview/%E5%89%8D%E7%AB%AF.png)
 ### 搭建需要封装的工作流
 需要使用本插件的节点才可以与gradio前端交互。随机种输入输出等
+![预览image](https://github.com/kungful/ComfyUI_to_webui/blob/1cedadad061e5a0353ae9b21ad91ab4bb8b98eb4/Sample_preview/%E4%BD%BF%E7%94%A8%E6%96%B9%E6%B3%95.png)
 ![预览image](https://github.com/kungful/ComfyUI_hua_boy/blob/c4176cc896378e4745925c1d528cb910f6f6fa11/Sample_preview/484b25201870c5e8105a6ee08e6370d.png)
 ### 思维导图节点
 不可推理
