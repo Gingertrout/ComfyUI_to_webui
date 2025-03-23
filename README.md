@@ -1,5 +1,6 @@
-# ComfyUI_hua_boy
-![预览image](https://github.com/kungful/ComfyUI_to_webui/blob/1cedadad061e5a0353ae9b21ad91ab4bb8b98eb4/Sample_preview/%E5%89%8D%E7%AB%AF.png)
+
+![前后端原理image](https://github.com/kungful/ComfyUI_to_webui/blob/4af4203a114cef054bf31287f1f191fa8b0f5742/Sample_preview/%E5%89%8D%E5%90%8E%E7%AB%AF%E5%AF%B9%E6%8E%A5%E5%8E%9F%E7%90%86.png)
+![image](https://github.com/user-attachments/assets/85867dab-ded0-46f3-b0f7-a1e3e0843600)# ComfyUI_hua_boy
 ## 概述
 <span style="color:blue;">**示例工作流在**</span> Sample_preview 文件夹里面
 <span style="color:blue;">**`ComfyUI_hua_boy` 是一个为 ComfyUI工作流变成webui的项目**</span>
@@ -44,8 +45,8 @@
 ![预览image](https://github.com/kungful/ComfyUI_hua_boy/blob/c4176cc896378e4745925c1d528cb910f6f6fa11/Sample_preview/484b25201870c5e8105a6ee08e6370d.png)
 ### 思维导图节点
 不可推理
-![预览image](https://github.com/kungful/ComfyUI_hua_boy/blob/c4176cc896378e4745925c1d528cb910f6f6fa11/Sample_preview/6b8564af2dbb2b75185f0bcc7cf5cd5.png)
+![预览image](https://github.com/kungful/ComfyUI_to_webui/blob/4af4203a114cef054bf31287f1f191fa8b0f5742/Sample_preview/6b8564af2dbb2b75185f0bcc7cf5cd5.png)
 
 ### 这是检索多提示词字符串判断图片是否传递哪个模型和图片的布尔节点，为的是跳过puilid的报错
-![预览image](https://github.com/kungful/ComfyUI_hua_boy/blob/a58958bcd59ec3c44130a8f72ea061b08d6a555a/Sample_preview/image.png)
-![预览model](https://github.com/kungful/ComfyUI_hua_boy/blob/e662eb157599db53d5efca70d481a1ad59ea53bb/Sample_preview/model.png)
+![预览image](https://github.com/kungful/ComfyUI_to_webui/blob/4af4203a114cef054bf31287f1f191fa8b0f5742/Sample_preview/image.png)
+![预览model](https://github.com/kungful/ComfyUI_to_webui/blob/4af4203a114cef054bf31287f1f191fa8b0f5742/Sample_preview/model.png)
