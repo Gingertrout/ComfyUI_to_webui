@@ -1,6 +1,6 @@
 
 ![前后端原理image](https://github.com/kungful/ComfyUI_to_webui/blob/4af4203a114cef054bf31287f1f191fa8b0f5742/Sample_preview/%E5%89%8D%E5%90%8E%E7%AB%AF%E5%AF%B9%E6%8E%A5%E5%8E%9F%E7%90%86.png)
-![image](https://github.com/user-attachments/assets/85867dab-ded0-46f3-b0f7-a1e3e0843600)# ComfyUI_hua_boy
+
 ## 概述
 <span style="color:blue;">**示例工作流在**</span> Sample_preview 文件夹里面
 <span style="color:blue;">**`ComfyUI_hua_boy` 是一个为 ComfyUI工作流变成webui的项目**</span>
@@ -44,3 +44,4 @@
 ### 这是检索多提示词字符串判断图片是否传递哪个模型和图片的布尔节点，为的是跳过puilid的报错
 ![预览image](https://github.com/kungful/ComfyUI_to_webui/blob/4af4203a114cef054bf31287f1f191fa8b0f5742/Sample_preview/image.png)
 ![预览model](https://github.com/kungful/ComfyUI_to_webui/blob/4af4203a114cef054bf31287f1f191fa8b0f5742/Sample_preview/model.png)
+![image](https://github.com/user-attachments/assets/85867dab-ded0-46f3-b0f7-a1e3e0843600)
