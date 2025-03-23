@@ -36,13 +36,7 @@
        │   └── ...
      
 
-### gradio前端效果
-后续会开发更多功能
-![预览image](https://github.com/kungful/ComfyUI_hua_boy/blob/470abc9bc95fc410815eb61deb43d0590abf92d3/Sample_preview/%E5%89%8D%E7%AB%AF.png)
-### 搭建需要封装的工作流
-需要使用本插件的节点才可以与gradio前端交互。随机种输入输出等
-![预览image](https://github.com/kungful/ComfyUI_to_webui/blob/1cedadad061e5a0353ae9b21ad91ab4bb8b98eb4/Sample_preview/%E4%BD%BF%E7%94%A8%E6%96%B9%E6%B3%95.png)
-![预览image](https://github.com/kungful/ComfyUI_hua_boy/blob/c4176cc896378e4745925c1d528cb910f6f6fa11/Sample_preview/484b25201870c5e8105a6ee08e6370d.png)
+
 ### 思维导图节点
 不可推理
 ![预览image](https://github.com/kungful/ComfyUI_to_webui/blob/4af4203a114cef054bf31287f1f191fa8b0f5742/Sample_preview/6b8564af2dbb2b75185f0bcc7cf5cd5.png)
