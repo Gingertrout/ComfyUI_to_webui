@@ -292,42 +292,54 @@ def fuck(json_file):
         return None 
     image_input_key = find_key_by_name(prompt, "☀️gradio前端传入图像")
     if image_input_key is None:
+        image_accordion: gr.update(visible=False)
         return gr.update(visible=False)
     else:
+        image_accordion: gr.update(visible=True)
         return gr.update(visible=True)
+        
 
-
-# 创建Gradio界面3
+# 创建Gradio界面
 with gr.Blocks() as demo:
-    gr.Markdown("# [封装comfyUI工作流](https://github.com/kungful/ComfyUI_hua_boy.git)")
+    gr.Markdown("# [封装comfyUI工作流](https://github.com/kungful/ComfyUI_to_webui.git)")
+    # 将输入和输出图像放在同一行
     with gr.Row():
-        input_image = gr.Image(type="pil", label="上传图像", height=256, width=256)
+        # 可折叠的上传图像区域 - 现在整个Accordion会根据返回值动态显示/隐藏
+        image_accordion = gr.Accordion("上传图像 (折叠,有gradio传入图像节点才会显示上传)", 
+                                     visible=True,  # 默认隐藏
+                                     open=True)  # 但一旦显示，默认是展开的
+        with image_accordion:  # 将内容放在Accordion内部
+            input_image = gr.Image(type="pil", label="上传图像", height=156, width=156)
+            
+        output_image = gr.Image(
+            type="filepath",
+            label="生成的图像",
+            height=256,
+            width=256,            
+            show_download_button=True,
+            format="png"
+        )
+    
     with gr.Row():
         with gr.Column():
             prompt_positive = gr.Textbox(label="正向提示文本")
         with gr.Column():
             prompt_negative = gr.Textbox(label="负向提示文本")
+    
     with gr.Row():
         with gr.Column(scale=3):
-            json_dropdown = gr.Dropdown(choices=get_json_files(), label="JSON文件")
+            json_dropdown = gr.Dropdown(choices=get_json_files(), label="选择工作流")
         with gr.Column(scale=1):
             refresh_button = gr.Button("刷新工作流")
+    
     with gr.Row():
         run_button = gr.Button("开始跑图")
-    with gr.Row():
-        output_image = gr.Image(
-            type="filepath",
-            label="生成的图像",
-            height=512,
-            width=512,
-            show_download_button=True,
-            format="png"
-        )    
+        
     # 绑定事件
     refresh_button.click(refresh_json_files, inputs=[], outputs=json_dropdown)
 
-    # 绑定change事件
-    json_dropdown.change(fuck, inputs=json_dropdown, outputs=input_image)
+    # 绑定change事件      # 修改change事件绑定到整个Accordion而不是input_image
+    json_dropdown.change(fuck, inputs=json_dropdown, outputs=image_accordion)
 
     run_button.click(generate_image, inputs=[input_image, prompt_positive, prompt_negative, json_dropdown], outputs=output_image)
 
