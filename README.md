@@ -21,7 +21,7 @@
 1. **克隆仓库**：
    ```bash
    git clone https://github.com/yourusername/ComfyUI_hua_boy.git
-   cd ComfyUI_hua_boy
+   cd ComfyUI_to_webui
    ..\..\..\python_embeded\python.exe -m pip install -r requirements.txt
 ## 使用方法
 你的comfyui搭建好工作流后不需要手动保存api格式json文件，只需要运行一遍跑通后就可以了，在输出端接入"☀️gradio前端传入图像这个节点就行
