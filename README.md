@@ -1,5 +1,5 @@
 
-![前后端原理image](https://github.com/kungful/ComfyUI_to_webui/blob/4af4203a114cef054bf31287f1f191fa8b0f5742/Sample_preview/%E5%89%8D%E5%90%8E%E7%AB%AF%E5%AF%B9%E6%8E%A5%E5%8E%9F%E7%90%86.png)
+![前后端原理image](https://github.com/kungful/ComfyUI_to_webui/blob/f3b459882f6f9961559f166f21719d662a575584/Sample_preview/%E5%89%8D%E5%90%8E%E7%AB%AF%E5%AF%B9%E6%8E%A5%E5%8E%9F%E7%90%862.png)
 
 ## 概述
 <span style="color:blue;">**示例工作流在**</span> Sample_preview 文件夹里面
