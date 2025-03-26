@@ -20,6 +20,23 @@ import os
 import webbrowser
 import glob
 from datetime import datetime
+
+def find_key_by_name(prompt, name):
+    for key, value in prompt.items():
+        if isinstance(value, dict) and value.get("_meta", {}).get("title") == name:
+            return key
+    return None
+
+def check_seed_node(json_file):
+    json_path = os.path.join(OUTPUT_DIR, json_file)
+    with open(json_path, "r", encoding="utf-8") as file_json:
+        prompt = json.load(file_json)
+    seed_key = find_key_by_name(prompt, "🧙hua_gradio随机种")
+    if seed_key is None:
+        return gr.update(visible=False)
+    else:
+        return gr.update(visible=True)
+        
 current_dir = os.path.dirname(os.path.abspath(__file__))# 获取当前文件的目录
 parent_dir = os.path.dirname(os.path.dirname(current_dir))# 获取上两级目录
 sys.path.append(parent_dir)# 将上两级目录添加到 sys.path
@@ -179,10 +196,39 @@ def start_queue(prompt_workflow):
     p = {"prompt": prompt_workflow}
     data = json.dumps(p).encode('utf-8')
     URL = "http://127.0.0.1:8188/prompt"
-    try:
-        requests.post(URL, data=data)
-    except requests.RequestException as e:
-        print(f"网络请求失败: {e}")
+    
+    max_retries = 5  # 增加重试次数到5次
+    retry_delay = 10  # 增加重试延迟到10秒
+    request_timeout = 60  # 增加请求超时到60秒
+    
+    for attempt in range(max_retries):
+        try:
+            # 先检查服务器是否可用
+            try:
+                requests.get("http://127.0.0.1:8188", timeout=5)
+            except requests.exceptions.RequestException as e:
+                print(f"服务器连接检查失败 (尝试 {attempt + 1}/{max_retries}): {str(e)}")
+                raise
+            
+            # 发送实际请求
+            response = requests.post(URL, data=data, timeout=request_timeout)
+            response.raise_for_status()  # 检查HTTP错误状态
+            print(f"请求成功 (尝试 {attempt + 1}/{max_retries})")
+            return  # 成功则直接返回
+            
+        except requests.exceptions.RequestException as e:
+            error_type = type(e).__name__
+            print(f"请求失败 (尝试 {attempt + 1}/{max_retries}, 错误类型: {error_type}): {str(e)}")
+            if attempt < max_retries - 1:
+                print(f"{retry_delay}秒后重试...")
+                time.sleep(retry_delay)
+            else:
+                print("达到最大重试次数，放弃请求，一个工作流json数据如果随机种seed没有变化，comfyui监听地址就会不鸟你，不进行推理")
+                print("可能原因:一个工作流json数据如果随机种seed没有变化，comfyui监听地址就会不鸟你，不进行推理")
+                print("- 服务器未运行")
+                print("- 网络连接问题") 
+                print("- 服务器过载，一个工作流json数据如果随机种seed没有变化，comfyui监听地址就会不鸟你，不进行推理")
+                raise  # 抛出最后一个异常
 
 # 检索指定路径的JSON文件
 def get_json_files():
@@ -198,7 +244,7 @@ def refresh_json_files():
 
 
 # 开始生成图像，前端UI定义所需变量传递给json
-def generate_image(inputimage1,prompt_text_positive, prompt_text_negative, json_file):
+def generate_image(inputimage1, prompt_text_positive, prompt_text_negative, json_file,):
 
 #--------------------------------------------------------------------获取json文件
 
@@ -249,7 +295,9 @@ def generate_image(inputimage1,prompt_text_positive, prompt_text_negative, json_
     if image_input_key:
         prompt[image_input_key]["inputs"]["image"] = inputfilename  # 指定第一张图像的文件名    
     if seed_key:
-        prompt[seed_key]["inputs"]["seed"] = random.randint(0, 0xffffffffffffffff)  # 定义种子随机数0到0xffffffffffffffff，json的参数传递给comfyUI
+        seed = random.randint(0, 0xffffffff)
+        print(f"生成的随机种子值: {seed}")  #  一个工作流json数据如果随机种seed没有变化，comfyui监听地址就会不鸟你，不进行推理
+        prompt[seed_key]["inputs"]["seed"] = seed
     # prompt["3"]["inputs"]["seed"] = random.randint(1, 1500000000000000)  # 定义种子随机数1到1500000，json的参数传递给comfyUI
     if text_ok_key:
         prompt[text_ok_key]["inputs"]["string"] = f"{prompt_text_positive}" #字典中的键[]的值是字符串，f代表字符串，占位符{}里是变量的函数的参数prompt_text_positive，就是gradio前端传入的字符串
@@ -272,14 +320,70 @@ def generate_image(inputimage1,prompt_text_positive, prompt_text_negative, json_
     previous_image = get_latest_image(OUTPUT_DIR)
     
     
-    while True:   # 这是一个循环获取指定路径的最新图像，休眠一秒钟后继续循环       
-        latest_image = get_latest_image(OUTPUT_DIR)
-        if latest_image != previous_image:
-            print("打印一下旧的图像:", previous_image)
-            print("打印一下检测到新的图像:", latest_image)
-            return latest_image
+    max_attempts = 30  # 进一步增加最大尝试次数到30次
+    attempt = 0
+    check_interval = 5  # 检查间隔保持5秒
+    total_timeout = 300  # 总超时时间增加到300秒
+    
+    start_time = time.time()
+    
+    # 先检查ComfyUI服务是否可用
+    try:
+        requests.get("http://127.0.0.1:8188", timeout=5)
+    except requests.exceptions.RequestException as e:
+        error_msg = f"无法连接到ComfyUI服务: {str(e)}"
+        print(error_msg)
+        raise ConnectionError(error_msg)
+    
+    # 检查输出目录权限
+    if not os.access(OUTPUT_DIR, os.W_OK):
+        error_msg = f"输出目录没有写入权限: {OUTPUT_DIR}"
+        print(error_msg)
+        raise PermissionError(error_msg)
+    
+    while attempt < max_attempts and (time.time() - start_time) < total_timeout:
+        try:
+            latest_image = get_latest_image(OUTPUT_DIR)
+            if latest_image != previous_image:
+                print(f"检测到新图像 (尝试 {attempt + 1}/{max_attempts}, 耗时: {time.time() - start_time:.1f}秒):")
+                print("旧图像路径:", previous_image)
+                print("新图像路径:", latest_image)
+                return latest_image
+                
+            remaining_time = total_timeout - (time.time() - start_time)
+            print(f"等待新图像中... (尝试 {attempt + 1}/{max_attempts}, 剩余时间: {remaining_time:.1f}秒)")
+            
+            # 每5次尝试检查一次服务状态
+            if attempt % 5 == 0:
+                try:
+                    requests.get("http://127.0.0.1:8188", timeout=5)
+                except requests.exceptions.RequestException as e:
+                    print(f"服务状态检查失败 (尝试 {attempt + 1}/{max_attempts}): {str(e)}")
+            
+            time.sleep(check_interval)
+            attempt += 1
+            
+        except Exception as e:
+            print(f"检测新图像时出错 (尝试 {attempt + 1}/{max_attempts}): {str(e)}")
+            time.sleep(check_interval)
+            attempt += 1
+    
+    error_msg = f"达到最大尝试次数 {max_attempts} 或总超时 {total_timeout}秒，未检测到新图像"
+    print(error_msg)
+    print("可能原因:")
+    print("- 图像生成服务未正常运行")
+    print("- 输出目录权限问题")
+    print("- 网络连接问题")
+    print("- 工作流执行时间过长")
+    print("建议检查:")
+    print("1. 确保ComfyUI服务正在运行")
+    print("2. 检查输出目录权限")
+    print("3. 检查网络连接")
+    print("4. 简化工作流或增加超时时间")
+    raise TimeoutError(error_msg)
 
-        time.sleep(3)# 休眠3秒钟
+
+
 
 def fuck(json_file):
     json_path = os.path.join(OUTPUT_DIR, json_file)
@@ -302,6 +406,7 @@ def fuck(json_file):
 # 创建Gradio界面
 with gr.Blocks() as demo:
     gr.Markdown("# [封装comfyUI工作流](https://github.com/kungful/ComfyUI_to_webui.git)")
+
     # 将输入和输出图像放在同一行
     with gr.Row():
         # 可折叠的上传图像区域 - 现在整个Accordion会根据返回值动态显示/隐藏
@@ -325,6 +430,8 @@ with gr.Blocks() as demo:
             prompt_positive = gr.Textbox(label="正向提示文本")
         with gr.Column():
             prompt_negative = gr.Textbox(label="负向提示文本")
+
+
     
     with gr.Row():
         with gr.Column(scale=3):
@@ -332,20 +439,49 @@ with gr.Blocks() as demo:
         with gr.Column(scale=1):
             refresh_button = gr.Button("刷新工作流")
     
-    with gr.Row():
-        run_button = gr.Button("开始跑图")
-        
-    # 绑定事件
+    Random_Seed = gr.HTML("""
+    <div style='text-align: center; margin-bottom: 5px;'>
+        <h2 style="font-size: 12px; margin: 0; color: #00ff00; font-style: italic;">
+            已添加gradio随机种节点
+        </h2>
+    </div>
+    """)
+
+
+    #   选择工作流  绑定change事件,  # 修改change事件绑定到整个Accordion而不是input_image
+    json_dropdown.change(
+        lambda x: (fuck(x), check_seed_node(x)),
+        inputs=json_dropdown,
+        outputs=[image_accordion, Random_Seed] 
+    )
+    # 绑定事件,刷新工作流按钮
     refresh_button.click(refresh_json_files, inputs=[], outputs=json_dropdown)
 
-    # 绑定change事件      # 修改change事件绑定到整个Accordion而不是input_image
-    json_dropdown.change(fuck, inputs=json_dropdown, outputs=image_accordion)
 
-    run_button.click(generate_image, inputs=[input_image, prompt_positive, prompt_negative, json_dropdown], outputs=output_image)
+    with gr.Row():
+        run_button = gr.Button("开始跑图")
+    
+        
+    run_button.click(generate_image, inputs=[input_image, prompt_positive, prompt_negative, json_dropdown,], outputs=output_image)
+
+    # 初始加载时检查工作流
+    def on_load():
+        json_files = get_json_files()
+        if not json_files:
+            return (gr.update(visible=False), gr.update(visible=False))
+        default_json = json_files[0]
+        return (fuck(default_json), check_seed_node(default_json))
+    
+    # 在 Blocks 上下文中添加加载事件
+    demo.load(
+        on_load,
+        inputs=[],
+        outputs=[image_accordion, Random_Seed]
+    )
 
 # 启动 Gradio 界面，并创建一个公共链接
 def luanch_gradio(demo):
-     demo.launch(share=True)
+    demo.launch(share=True)
 
 #使用多线程启动gradio界面
 gradio_thread = threading.Thread(target=luanch_gradio, args=(demo,))
