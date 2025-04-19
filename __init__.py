@@ -1,8 +1,11 @@
 from .hua_word_image import Huaword
 from .hua_word_models import Modelhua
-from .gradio_workflow import GradioInputImage, Hua_Output, GradioTextOk, GradioTextBad
+# Removed GradioInputImage, Hua_Output, GradioTextOk, GradioTextBad from gradio_workflow import
 from .mind_map import Go_to_image
-from .hua_nodes import Hua_gradio_Seed, Hua_gradio_jsonsave
+from .gradio_workflow import GradioInputImage, Hua_Output, GradioTextOk, GradioTextBad
+# Added GradioInputImage, Hua_Output, GradioTextOk, GradioTextBad to hua_nodes import
+from .hua_nodes import Hua_gradio_Seed, Hua_gradio_jsonsave, Hua_gradio_resolution
+from .hua_nodes import Hua_LoraLoader, Hua_LoraLoaderModelOnly,Hua_CheckpointLoaderSimple,Hua_UNETLoader
 
 NODE_CLASS_MAPPINGS = {
     "ComfyUI_hua_boy": Huaword,
@@ -13,6 +16,11 @@ NODE_CLASS_MAPPINGS = {
     "hua_textok": GradioTextOk,
     "hua_textbad": GradioTextBad,
     "hua_gradio_seed": Hua_gradio_Seed,
+    "Hua_gradio_resolution": Hua_gradio_resolution,
+    "Hua_LoraLoader": Hua_LoraLoader,
+    "Hua_LoraLoaderModelOnly": Hua_LoraLoaderModelOnly,
+    "Hua_CheckpointLoaderSimple": Hua_CheckpointLoaderSimple,
+    "Hua_UNETLoader": Hua_UNETLoader,
     "hua_gradio_jsonsave": Hua_gradio_jsonsave
 }
 
@@ -25,7 +33,14 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "hua_textok": "💧gradio正向提示词",
     "hua_textbad": "🔥gradio负向提示词",
     "hua_gradio_seed": "🧙hua_gradio随机种",
+    "Hua_gradio_resolution": "📜hua_gradio分辨率",
+    "Hua_LoraLoader": "🌊hua_gradio_Lora加载器",
+    "Hua_LoraLoaderModelOnly": "🌊hua_gradio_Lora仅模型",
+    "Hua_CheckpointLoaderSimple": "🌊hua_gradio检查点加载器",
+    "Hua_UNETLoader": "🌊hua_gradio_UNET加载器",
     "hua_gradio_jsonsave": "📁hua_gradio_json保存"
+
+    
 }
 
 jie = """
@@ -87,4 +102,3 @@ print(jie)
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", ]
 
 WEB_DIRECTORY = "./js"
-
