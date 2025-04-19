@@ -20,6 +20,7 @@ import os
 import webbrowser
 import glob
 from datetime import datetime
+from math import gcd
 
 def find_key_by_name(prompt, name):
     for key, value in prompt.items():
@@ -38,6 +39,7 @@ def check_seed_node(json_file):
         return gr.update(visible=True)
         
 current_dir = os.path.dirname(os.path.abspath(__file__))# 获取当前文件的目录
+print("当前hua插件文件的目录为：", current_dir)
 parent_dir = os.path.dirname(os.path.dirname(current_dir))# 获取上两级目录
 sys.path.append(parent_dir)# 将上两级目录添加到 sys.path
 from comfy.cli_args import args
@@ -191,6 +193,17 @@ class Hua_Output:
 INPUT_DIR = folder_paths.get_input_directory()
 OUTPUT_DIR = folder_paths.get_output_directory()
 
+# 分辨率预设列表 (格式: "宽x高|比例")
+resolution_presets = [
+    "512x512|1:1", "1024x1024|1:1", "1152x896|9:7", "1216x832|19:13",
+    "1344x768|7:4", "1536x640|12:5", "704x1408|1:2", "704x1344|11:21",
+    "768x1344|4:7", "768x1280|3:5", "832x1216|13:19", "832x1152|13:18",
+    "896x1152|7:9", "896x1088|14:17", "960x1088|15:17", "960x1024|15:16",
+    "1024x960|16:15", "1088x960|17:15", "1088x896|17:14", "1152x832|18:13",
+    "1280x768|5:3", "1344x704|21:11", "1408x704|2:1", "1472x704|23:11",
+    "1600x640|5:2", "1664x576|26:9", "1728x576|3:1", "custom"
+]
+
 # 把json传递给正在监听的地址
 def start_queue(prompt_workflow):
     p = {"prompt": prompt_workflow}
@@ -240,11 +253,110 @@ def refresh_json_files():
     new_choices = get_json_files()
     return gr.update(choices=new_choices)
 
+# --- 分辨率相关函数 ---
+def parse_resolution(resolution_str):
+    """解析分辨率字符串，返回宽高元组和比例"""
+    if resolution_str == "custom":
+        return None, None, "自定义"
+    
+    parts = resolution_str.split("|")
+    if len(parts) != 2:
+        return None, None, "无效格式"
+    
+    width, height = map(int, parts[0].split("x"))
+    ratio = parts[1]
+    return width, height, ratio
 
+def calculate_aspect_ratio(width, height):
+    """计算并简化宽高比"""
+    if width is None or height is None or width == 0 or height == 0:
+        return "0:0"
+    common_divisor = gcd(int(width), int(height)) # 确保是整数
+    return f"{int(width)//common_divisor}:{int(height)//common_divisor}"
+
+def find_closest_preset(width, height):
+    """根据宽高找到最接近的预设"""
+    if width is None or height is None:
+        return "custom"
+    
+    # 先尝试匹配完全相同的分辨率
+    for preset in resolution_presets:
+        if preset == "custom":
+            continue
+        preset_width, preset_height, _ = parse_resolution(preset)
+        if preset_width == width and preset_height == height:
+            return preset
+    
+    # 再尝试匹配相同比例
+    aspect = calculate_aspect_ratio(width, height)
+    for preset in resolution_presets:
+        if preset == "custom":
+            continue
+        _, _, preset_aspect = parse_resolution(preset)
+        if preset_aspect == aspect:
+            return preset
+    
+    return "custom"
+
+def update_from_preset(resolution_str):
+    """当下拉菜单改变时更新其他字段"""
+    if resolution_str == "custom":
+        # 当选择 custom 时，不改变现有的宽高输入值，只更新比例显示
+        return "custom", gr.update(), gr.update(), "当前比例: 自定义"
+    
+    width, height, ratio = parse_resolution(resolution_str)
+    return (
+        resolution_str,
+        width,
+        height,
+        f"当前比例: {ratio}"
+    )
+
+def update_from_inputs(width, height):
+    """当宽高输入改变时更新其他字段"""
+    if width is None or height is None:
+        # 如果输入为空，保持 custom 状态，比例显示为 0:0
+        return "custom", "当前比例: 0:0"
+    
+    ratio = calculate_aspect_ratio(width, height)
+    closest_preset = find_closest_preset(width, height)
+    # 返回最接近的预设值和计算出的比例
+    return (
+        closest_preset,
+        f"当前比例: {ratio}"
+    )
+
+def flip_resolution(width, height):
+    """切换宽高"""
+    if width is None or height is None:
+        return None, None
+    
+    return height, width
+# --- 分辨率相关函数结束 ---
+
+# 获取模型列表
+try:
+    lora_list = ["None"] + folder_paths.get_filename_list("loras") # 添加 "None" 选项，允许不选择
+except Exception as e:
+    print(f"获取 Lora 列表时出错: {e}")
+    lora_list = ["None"]
+
+try:
+    checkpoint_list = ["None"] + folder_paths.get_filename_list("checkpoints") # 添加 "None" 选项
+except Exception as e:
+    print(f"获取 Checkpoint 列表时出错: {e}")
+    checkpoint_list = ["None"]
+
+try:
+    # 假设 UNet 模型在 'diffusion_models' 目录，如果不是请修改
+    unet_list = ["None"] + folder_paths.get_filename_list("diffusion_models") # 添加 "None" 选项
+except Exception as e:
+    print(f"获取 UNet 列表时出错: {e}")
+    unet_list = ["None"]
 
 
 # 开始生成图像，前端UI定义所需变量传递给json
-def generate_image(inputimage1, prompt_text_positive, prompt_text_negative, json_file,):
+def generate_image(inputimage1, prompt_text_positive, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_checkpoint, hua_unet):
 
 #--------------------------------------------------------------------获取json文件
 
@@ -269,11 +381,19 @@ def generate_image(inputimage1, prompt_text_positive, prompt_text_negative, json
     image_input_key = find_key_by_name(prompt, "☀️gradio前端传入图像")
     seed_key = find_key_by_name(prompt, "🧙hua_gradio随机种") # 如果comfyui中文界面保存api格式工作流，那么是检索不到的。所以要用英文界面保存api格式工作流。
     text_ok_key = find_key_by_name(prompt, "💧gradio正向提示词")    
-    text_bad_key = find_key_by_name(prompt, "🔥gradio负向提示词")   
+    text_bad_key = find_key_by_name(prompt, "🔥gradio负向提示词")
+    fenbianlv_key = find_key_by_name(prompt, "📜hua_gradio分辨率")
+    lora_key = find_key_by_name(prompt, "🌊hua_gradio_Lora仅模型")
+    checkpoint_key = find_key_by_name(prompt, "🌊hua_gradio检查点加载器")
+    unet_key = find_key_by_name(prompt, "🌊hua_gradio_UNET加载器")
+
     
     print("输入图像节点的数字键:", image_input_key)
-    print("正向提示词节点的数字键:", text_ok_key)  
-    print("随机种子节点的数字键:", seed_key)  
+    print("正向提示词节点的数字键:", text_ok_key)
+    print("随机种子节点的数字键:", seed_key)
+    print(f"--- Debug: 查找 '📜hua_gradio分辨率' 节点的 Key: {fenbianlv_key}") # 添加调试信息
+    print(f"--- Debug: 传入的 hua_width: {hua_width}, 类型: {type(hua_width)}") # 添加调试信息
+    print(f"--- Debug: 传入的 hua_height: {hua_height}, 类型: {type(hua_height)}") # 添加调试信息
 
     '''双引号里是字符串哦。在 Python 中，字典的键和值可以是字符串、数字、布尔值、列表、字典等类型。
     当你使用变量名来访问字典中的键时，Python 会自动处理这些类型，包括字符串中的双引号。'''
@@ -303,7 +423,28 @@ def generate_image(inputimage1, prompt_text_positive, prompt_text_negative, json
         prompt[text_ok_key]["inputs"]["string"] = f"{prompt_text_positive}" #字典中的键[]的值是字符串，f代表字符串，占位符{}里是变量的函数的参数prompt_text_positive，就是gradio前端传入的字符串
     if text_bad_key:
         prompt[text_bad_key]["inputs"]["string"] = f"{prompt_text_negative}"
-    
+    if fenbianlv_key:
+        print(f"--- Debug: 找到分辨率 Key ({fenbianlv_key})，准备更新宽高...") # 添加调试信息
+        # 确保值是数字类型，Gradio Number 组件默认返回 float 或 int
+        try:
+            width_val = int(hua_width)
+            height_val = int(hua_height)
+            prompt[fenbianlv_key]["inputs"]["custom_width"] = width_val # 直接使用数字类型
+            prompt[fenbianlv_key]["inputs"]["custom_height"] = height_val # 直接使用数字类型
+            print(f"--- Debug: 更新后 prompt[{fenbianlv_key}]['inputs']: {prompt[fenbianlv_key]['inputs']}") # 添加调试信息
+        except (ValueError, TypeError) as e:
+             print(f"--- Debug: 转换宽高为整数时出错: {e}. hua_width={hua_width}, hua_height={hua_height}") # 添加错误处理
+        except KeyError as e:
+             print(f"--- Debug: 更新 prompt 时出现 KeyError: {e}. 检查 prompt[{fenbianlv_key}] 结构.") # 添加错误处理
+    else:
+        print("--- Debug: 未找到分辨率 Key，无法更新宽高。请检查 JSON 文件中是否存在标题为 '📜hua_gradio分辨率' 的节点。") # 添加调试信息
+
+    if lora_key:
+        prompt[lora_key]["inputs"]["lora_name"] = f"{hua_lora}"
+    if checkpoint_key:
+        prompt[checkpoint_key]["inputs"]["ckpt_name"] = f"{hua_checkpoint}"
+    if unet_key:
+        prompt[unet_key]["inputs"]["unet_name"] = f"{hua_unet}"
 
     
     start_queue(prompt)
@@ -323,7 +464,7 @@ def generate_image(inputimage1, prompt_text_positive, prompt_text_negative, json
     max_attempts = 30  # 进一步增加最大尝试次数到30次
     attempt = 0
     check_interval = 5  # 检查间隔保持5秒
-    total_timeout = 300  # 总超时时间增加到300秒
+    total_timeout = 1000  # 总超时时间增加到1000秒
     
     start_time = time.time()
     
@@ -386,21 +527,54 @@ def generate_image(inputimage1, prompt_text_positive, prompt_text_negative, json
 
 
 def fuck(json_file):
+    # 检查文件是否存在且有效
+    if not json_file or not os.path.exists(os.path.join(OUTPUT_DIR, json_file)):
+        print(f"JSON 文件无效或不存在: {json_file}")
+        # 返回所有组件都不可见的状态 (顺序: image, pos_prompt, neg_prompt, res, lora, ckpt, unet)
+        return (gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False))
+
     json_path = os.path.join(OUTPUT_DIR, json_file)
-    with open(json_path, "r", encoding="utf-8") as file_json:
-        prompt = json.load(file_json)  #加载到一个名为 prompt 的字典中。     
+    try:
+        with open(json_path, "r", encoding="utf-8") as file_json:
+            prompt = json.load(file_json)
+    except FileNotFoundError:
+        print(f"JSON 文件未找到: {json_path}")
+        return (gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False))
+    except json.JSONDecodeError:
+        print(f"JSON 文件解析错误: {json_path}")
+        return (gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False))
+
+    # 内部辅助函数，保持不变
     def find_key_by_name(prompt, name):
         for key, value in prompt.items():
+            # 确保 value 是字典再进行 get 操作
             if isinstance(value, dict) and value.get("_meta", {}).get("title") == name:
                 return key
-        return None 
-    image_input_key = find_key_by_name(prompt, "☀️gradio前端传入图像")
-    if image_input_key is None:
-        image_accordion: gr.update(visible=False)
-        return gr.update(visible=False)
-    else:
-        image_accordion: gr.update(visible=True)
-        return gr.update(visible=True)
+        return None
+
+    # 检查各个节点是否存在
+    has_image_input = find_key_by_name(prompt, "☀️gradio前端传入图像") is not None
+    has_pos_prompt = find_key_by_name(prompt, "💧gradio正向提示词") is not None
+    has_neg_prompt = find_key_by_name(prompt, "🔥gradio负向提示词") is not None
+    has_resolution = find_key_by_name(prompt, "📜hua_gradio分辨率") is not None
+    has_lora = find_key_by_name(prompt, "🌊hua_gradio_Lora仅模型") is not None
+    has_checkpoint = find_key_by_name(prompt, "🌊hua_gradio检查点加载器") is not None
+    has_unet = find_key_by_name(prompt, "🌊hua_gradio_UNET加载器") is not None
+
+    print(f"检查结果 for {json_file}: Image={has_image_input}, PosP={has_pos_prompt}, NegP={has_neg_prompt}, Res={has_resolution}, Lora={has_lora}, Ckpt={has_checkpoint}, Unet={has_unet}")
+
+    # 根据检查结果返回 gr.update 对象元组
+    # 顺序必须与 demo.load 和 json_dropdown.change 的 outputs 列表对应（除了 Random_Seed）
+    # 顺序: image_accordion, positive_prompt_col, negative_prompt_col, resolution_row, hua_lora_dropdown, hua_checkpoint_dropdown, hua_unet_dropdown
+    return (
+        gr.update(visible=has_image_input),
+        gr.update(visible=has_pos_prompt),
+        gr.update(visible=has_neg_prompt),
+        gr.update(visible=has_resolution),
+        gr.update(visible=has_lora),
+        gr.update(visible=has_checkpoint),
+        gr.update(visible=has_unet)
+    )
         
 
 # 创建Gradio界面
@@ -409,75 +583,167 @@ with gr.Blocks() as demo:
 
     # 将输入和输出图像放在同一行
     with gr.Row():
-        # 可折叠的上传图像区域 - 现在整个Accordion会根据返回值动态显示/隐藏
-        image_accordion = gr.Accordion("上传图像 (折叠,有gradio传入图像节点才会显示上传)", 
-                                     visible=True,  # 默认隐藏
-                                     open=True)  # 但一旦显示，默认是展开的
-        with image_accordion:  # 将内容放在Accordion内部
-            input_image = gr.Image(type="pil", label="上传图像", height=156, width=156)
-            
-        output_image = gr.Image(
-            type="filepath",
-            label="生成的图像",
-            height=256,
-            width=256,            
-            show_download_button=True,
-            format="png"
-        )
-    
-    with gr.Row():
-        with gr.Column():
-            prompt_positive = gr.Textbox(label="正向提示文本")
-        with gr.Column():
-            prompt_negative = gr.Textbox(label="负向提示文本")
-
-
-    
-    with gr.Row():
-        with gr.Column(scale=3):
-            json_dropdown = gr.Dropdown(choices=get_json_files(), label="选择工作流")
-        with gr.Column(scale=1):
-            refresh_button = gr.Button("刷新工作流")
-    
-    Random_Seed = gr.HTML("""
-    <div style='text-align: center; margin-bottom: 5px;'>
-        <h2 style="font-size: 12px; margin: 0; color: #00ff00; font-style: italic;">
-            已添加gradio随机种节点
-        </h2>
-    </div>
-    """)
-
-
-    #   选择工作流  绑定change事件,  # 修改change事件绑定到整个Accordion而不是input_image
-    json_dropdown.change(
-        lambda x: (fuck(x), check_seed_node(x)),
-        inputs=json_dropdown,
-        outputs=[image_accordion, Random_Seed] 
-    )
-    # 绑定事件,刷新工作流按钮
-    refresh_button.click(refresh_json_files, inputs=[], outputs=json_dropdown)
-
-
-    with gr.Row():
-        run_button = gr.Button("开始跑图")
-    
-        
-    run_button.click(generate_image, inputs=[input_image, prompt_positive, prompt_negative, json_dropdown,], outputs=output_image)
-
-    # 初始加载时检查工作流
-    def on_load():
-        json_files = get_json_files()
-        if not json_files:
-            return (gr.update(visible=False), gr.update(visible=False))
-        default_json = json_files[0]
-        return (fuck(default_json), check_seed_node(default_json))
-    
-    # 在 Blocks 上下文中添加加载事件
-    demo.load(
-        on_load,
-        inputs=[],
-        outputs=[image_accordion, Random_Seed]
-    )
+       with gr.Column():  # 左侧列
+           # 可折叠的上传图像区域 - 现在整个Accordion会根据返回值动态显示/隐藏
+           image_accordion = gr.Accordion("上传图像 (折叠,有gradio传入图像节点才会显示上传)", 
+                                        visible=True,  # 默认隐藏
+                                        open=True)  # 但一旦显示，默认是展开的
+           with image_accordion:  # 将内容放在Accordion内部
+               input_image = gr.Image(type="pil", label="上传图像", height=156, width=156)
+                   
+   
+           
+           with gr.Row():
+               # 为正向提示词容器添加变量名
+               with gr.Column() as positive_prompt_col:
+                   prompt_positive = gr.Textbox(label="正向提示文本")
+                   # 为负向提示词容器添加变量名
+                   with gr.Column() as negative_prompt_col:
+                       prompt_negative = gr.Textbox(label="负向提示文本")
+   
+           # --- 分辨率选择器 ---
+           # 将整个分辨率设置区域包裹在一个 Row 中，并分配变量名
+           with gr.Row() as resolution_row: # <--- 添加变量名
+               with gr.Column(scale=1): # 左侧列
+                   resolution_dropdown = gr.Dropdown(
+                       choices=resolution_presets,
+                       label="分辨率预设",
+                       value=resolution_presets[0] # 默认第一个
+                   )
+                   flip_btn = gr.Button("↔ 切换宽高 (横向/纵向)")
+                 
+               with gr.Accordion("宽度和高度设置", open=False): # <--- 添加 Accordion 并默认折叠
+                   with gr.Column(scale=1): # 右侧列，包含宽高输入 (保持原有 Column 结构)
+                       # 注意：这里将组件命名为 hua_width 和 hua_height
+                       hua_width = gr.Number(label="宽度", value=512, minimum=64, step=64, elem_id="hua_width_input")
+                       hua_height = gr.Number(label="高度", value=512, minimum=64, step=64, elem_id="hua_height_input")
+                       ratio_display = gr.Markdown("当前比例: 1:1") # 初始比例 
+           # --- 分辨率选择器结束 ---
+   
+           with gr.Row():
+               with gr.Column(scale=3):
+                   json_dropdown = gr.Dropdown(choices=get_json_files(), label="选择工作流")
+                   with gr.Column(scale=1):
+                       refresh_button = gr.Button("刷新工作流")  
+           # --- 模型选择器 ---
+           with gr.Row():
+               with gr.Column(scale=1):
+                   hua_lora_dropdown = gr.Dropdown(choices=lora_list, label="选择 Lora 模型", value="None", elem_id="hua_lora_dropdown")
+               with gr.Column(scale=1):
+                   hua_checkpoint_dropdown = gr.Dropdown(choices=checkpoint_list, label="选择 Checkpoint 模型", value="None", elem_id="hua_checkpoint_dropdown")
+               with gr.Column(scale=1):
+                   hua_unet_dropdown = gr.Dropdown(choices=unet_list, label="选择 UNet 模型", value="None", elem_id="hua_unet_dropdown")
+           # --- 模型选择器结束 ---
+   
+           Random_Seed = gr.HTML("""
+           <div style='text-align: center; margin-bottom: 5px;'>
+               <h2 style="font-size: 12px; margin: 0; color: #00ff00; font-style: italic;">
+                   已添加gradio随机种节点
+               </h2>
+           </div>
+           """)
+   
+           # --- 分辨率事件处理 ---
+           # 当下拉菜单改变时
+           resolution_dropdown.change(
+               fn=update_from_preset,
+               inputs=resolution_dropdown,
+               outputs=[resolution_dropdown, hua_width, hua_height, ratio_display],
+               # queue=False # 尝试禁用队列以提高响应速度
+           )
+           
+           # 当宽高输入改变时
+           hua_width.change(
+               fn=update_from_inputs,
+               inputs=[hua_width, hua_height],
+               outputs=[resolution_dropdown, ratio_display],
+               # queue=False # 尝试禁用队列以提高响应速度
+           )
+           
+           hua_height.change(
+               fn=update_from_inputs,
+               inputs=[hua_width, hua_height],
+               outputs=[resolution_dropdown, ratio_display],
+               # queue=False # 尝试禁用队列以提高响应速度
+           )
+           
+           # 当点击切换按钮时
+           flip_btn.click(
+               fn=flip_resolution,
+               inputs=[hua_width, hua_height],
+               outputs=[hua_width, hua_height],
+               # queue=False # 尝试禁用队列以提高响应速度
+           )
+           # --- 分辨率事件处理结束 ---
+   
+           #   选择工作流  绑定change事件
+           json_dropdown.change(
+               lambda x: (*fuck(x), check_seed_node(x)), # 使用 * 解包 fuck 返回的元组 (7个元素)，并附加 check_seed_node 的结果
+               inputs=json_dropdown,
+               # 更新 outputs 列表，顺序要严格对应 lambda 返回值的顺序 (8个元素)
+               outputs=[image_accordion, positive_prompt_col, negative_prompt_col, resolution_row, hua_lora_dropdown, hua_checkpoint_dropdown, hua_unet_dropdown, Random_Seed]
+           )
+           # 绑定事件,刷新工作流按钮 (保持不变)
+           refresh_button.click(refresh_json_files, inputs=[], outputs=json_dropdown)
+   
+   
+           with gr.Row():
+               run_button = gr.Button("开始跑图")
+       
+       with gr.Column():
+           output_image = gr.Image(
+           type="filepath",
+           label="生成的图像",
+           height=760, # 恢复固定高度
+           width=760,  # 恢复固定宽度
+           # object_fit 参数在此 Gradio 版本不受支持，已移除
+           show_download_button=True,
+           format="png"
+           
+       )    
+           gr.Markdown('我要打十个')
+   
+               
+           # 修改这里，添加 hua_width, hua_height, 以及新的模型下拉列表到 inputs
+           run_button.click(
+               generate_image,
+               inputs=[
+                   input_image,
+                   prompt_positive,
+                   prompt_negative,
+                   json_dropdown,
+                   hua_width,
+                   hua_height,
+                   hua_lora_dropdown,         # 添加 Lora 下拉列表
+                   hua_checkpoint_dropdown,   # 添加 Checkpoint 下拉列表
+                   hua_unet_dropdown          # 添加 UNet 下拉列表
+               ],
+               outputs=output_image
+           )
+   
+           # 初始加载时检查工作流
+           def on_load():
+               json_files = get_json_files()
+               if not json_files:
+                   print("未找到 JSON 文件，隐藏所有动态组件")
+                   # 返回所有组件都不可见的状态 (顺序: image, pos_prompt, neg_prompt, res, lora, ckpt, unet, seed) - 8个元素
+                   return (gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False))
+   
+               default_json = json_files[0]
+               print(f"初始加载，检查默认 JSON: {default_json}")
+               # 调用 fuck 和 check_seed_node 并组合结果
+               fuck_results = fuck(default_json) # fuck 返回一个包含7个更新对象的元组
+               seed_result = check_seed_node(default_json) # check_seed_node 返回一个更新对象
+               # 返回组合后的元组 (8个元素)
+               return (*fuck_results, seed_result) # 解包 fuck 的结果并附加 seed_result
+   
+           # 在 Blocks 上下文中添加加载事件
+           demo.load(
+               on_load,
+               inputs=[],
+               # 更新 outputs 列表，顺序要严格对应 on_load 返回值的顺序 (8个元素)
+               outputs=[image_accordion, positive_prompt_col, negative_prompt_col, resolution_row, hua_lora_dropdown, hua_checkpoint_dropdown, hua_unet_dropdown, Random_Seed]
+           )
 
 # 启动 Gradio 界面，并创建一个公共链接
 def luanch_gradio(demo):
