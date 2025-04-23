@@ -690,8 +690,8 @@ with gr.Blocks() as demo:
                    prompt_positive_2 = gr.Textbox(label="正向提示文本 2", elem_id="prompt_positive_2")
                    prompt_positive_3 = gr.Textbox(label="正向提示文本 3", elem_id="prompt_positive_3")
                    prompt_positive_4 = gr.Textbox(label="正向提示文本 4", elem_id="prompt_positive_4")
-               with gr.Column() as negative_prompt_col:
-                   prompt_negative = gr.Textbox(label="负向提示文本", elem_id="prompt_negative")
+           with gr.Column() as negative_prompt_col:
+               prompt_negative = gr.Textbox(label="负向提示文本", elem_id="prompt_negative")
 
            with gr.Row() as resolution_row:
                with gr.Column(scale=1):
