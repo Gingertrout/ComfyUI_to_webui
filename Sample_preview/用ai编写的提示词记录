@@ -1,0 +1,84 @@
+output_image_to_gradio.py，这hua_output的类增加一个更能获取到的图片发送到gradio前端界面如何操作，
+也支持·1多张，让gradio_workflow.py中的gradio前端能多图显示，
+不再是盲目检测新图，而是更精确拿图去传递到gradio前端
+
+在with gr.Column():中增加一个预览所有图片OUTPUT_DIR的视窗，符合逻辑，加一个事件，点击后就触发遍历路径下的图获取到gradio前端
+
+gradio_workflow.py中增加一个队列功能，让多次点击开始跑图按钮排队，运行完成后自动继续执行下一个队列以此类推直到队列全部完成。需要添加一个计算单次队列是否推理结束的函数，
+再加一个清楚队列按钮，点击后清除当前队列，重新开始新的队列。 如果是多个队列在排队那么推理完成后根据队列数量显示累计图片在显示窗口，
+可以再增加一个清除图像历史的功能
+
+——————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+
+gradio_workflow.py中的封装comfyUI工作流右边添加一个赞助按钮，点击后出现赞助码，如何更改这段代码将这里面的赞助码传递到gradio上
+以下是js目录下的icon.js文件，主要是设置图标的部分，你不需要读取这个文件太大了，我摘抄了关键代码给你：
+import { app } from "/scripts/app.js"
+
+// 加载图像的函数
+function loadImage(base64) {
+    const image = new Image();
+    image.src = base64;
+    return image;
+}
+// 加载两个图标
+const canvasIcon = loadImage("data:image/webp;base64,xxxxxxxxs省略......................); )");// 替换为你的Base64编码的图像数据
+
+
+// 设置图标的函数
+function setIconImage(nodeType, image, size, padRows, padCols) {
+    // 保存原始的 onAdded 方法
+    const onAdded = nodeType.prototype.onAdded;
+    // 重写 onAdded 方法
+    nodeType.prototype.onAdded = function () {
+        // 调用原始的 onAdded 方法
+        onAdded?.apply(this, arguments);
+        // 设置节点的大小
+        this.size = size;
+    };
+
+    // 保存原始的 onDrawBackground 方法
+    const onDrawBackground = nodeType.prototype.onDrawBackground;
+    // 重写 onDrawBackground 方法
+    nodeType.prototype.onDrawBackground = function(ctx) {
+        // 调用原始的 onDrawBackground 方法
+        onDrawBackground?.apply(this, arguments);
+
+        // 计算图标的偏移量和可用空间
+        const pad = [padCols * 20, LiteGraph.NODE_SLOT_HEIGHT * padRows + 8];
+        if(this.flags.collapsed || pad[1] + 32 > this.size[1] || image.width === 0) {
+            return;
+        }
+        const avail = [this.size[0] - pad[0], this.size[1] - pad[1]];
+        const scale = Math.min(1.0, avail[0] / image.width, avail[1] / image.height);
+        const size = [Math.floor(image.width * scale), Math.floor(image.height * scale)];
+        const offset = [Math.max(0, (avail[0] - size[0]) / 2), Math.max(0, (avail[1] - size[1]) / 2)];
+
+        // 绘制图标
+        ctx.drawImage(image, offset[0], pad[1] + offset[1], size[0], size[1]);
+    };
+}
+
+// 注册扩展
+app.registerExtension({ //这是一个方法，用于注册一个扩展。扩展通常用于在应用程序中添加自定义功能或行为。
+    name: "icon",//这是扩展的名称，用于标识这个扩展。在这个例子中，扩展的名称为
+
+    beforeRegisterNodeDef(nodeType, nodeData, app) { //这是一个回调函数，在节点类型注册之前执行。beforeRegisterNodeDef 是这个回调函数的名称，nodeType、nodeData 和 app 是传递给这个函数的参数。
+        if (nodeData.name === "hua_gradioinput") {// 为特定节点类型设置图标
+            setIconImage(nodeType, canvasIcon, [200, 100], 0, 2);
+        } else if (nodeData.name === "hua_gradiooutput") {
+            setIconImage(nodeType, outputIcon, [200, 100], 1, 0);
+        }
+    }
+});
+
+——————————————————————————————————————————————————————————————————————————————————————————————————————————————————————
+
+
+
+gradio_workflow.py
+当用户连续点击开始跑图按钮时，队列会自动增加，通过这里面获取图片的逻辑临时json获取推理是否结束，，然后前端代码依次发送工作流给api，通过精确图像获取逻辑获取是否完成每一次的队列推理，
+ok现在血量进度条会被图片覆盖还有，
+
+在开始跑图旁边增加手动队列数量数值，大于1那么就积累图像到生成结果，生成结束后，再次点击就自动清空图片历史大于1再次重新积累。
+ok，现在队列数量大于1并不会触发图片累计在生成结果，当队列数量等于1进行跑图时取消累计图像
+应该是队列数量大于一就累计之前的图，比如设置了2个队列，那么之前的一个队列的图就累计，设置了3就累计之前的两个队列的图，设置等于一的时候不累计之前的图。以此类推
