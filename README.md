@@ -1,4 +1,4 @@
-
+可在我的镜像中直接使用，直接使用本插件的云端算力桌面程序：https://github.com/kungful/xiangongyun_GUI.git
 ![前后端原理image](https://github.com/kungful/ComfyUI_to_webui/blob/f3b459882f6f9961559f166f21719d662a575584/Sample_preview/%E5%89%8D%E5%90%8E%E7%AB%AF%E5%AF%B9%E6%8E%A5%E5%8E%9F%E7%90%862.png)
 
 ## 概述
