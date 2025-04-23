@@ -3,24 +3,35 @@ import time
 import random
 import requests
 import shutil
-from collections import Counter
+from collections import Counter, deque # 导入 deque
 from PIL import Image, ImageSequence, ImageOps
 import re
 import gradio as gr
 import numpy as np
 import torch
 import threading
+from threading import Lock, Event # 导入 Lock 和 Event
 import folder_paths
-import node_helpers 
-from pathlib import Path  # 用于处理文件路径
-from server import PromptServer  # 用于处理与服务器相关的操作
-from server import BinaryEventTypes  # 用于处理二进制事件类型
+import node_helpers
+from pathlib import Path
+from server import PromptServer
+from server import BinaryEventTypes
 import sys
-import os 
+import os
 import webbrowser
 import glob
 from datetime import datetime
 from math import gcd
+import uuid
+import fnmatch
+
+# --- 全局状态变量 ---
+task_queue = deque()
+queue_lock = Lock()
+accumulated_results = []
+results_lock = Lock()
+processing_event = Event() # False: 空闲, True: 正在处理
+# --- 全局状态变量结束 ---
 
 def find_key_by_name(prompt, name):
     for key, value in prompt.items():
@@ -29,171 +40,55 @@ def find_key_by_name(prompt, name):
     return None
 
 def check_seed_node(json_file):
-    json_path = os.path.join(OUTPUT_DIR, json_file)
-    with open(json_path, "r", encoding="utf-8") as file_json:
-        prompt = json.load(file_json)
-    seed_key = find_key_by_name(prompt, "🧙hua_gradio随机种")
-    if seed_key is None:
+    if not json_file or not os.path.exists(os.path.join(OUTPUT_DIR, json_file)):
+        print(f"JSON 文件无效或不存在: {json_file}")
         return gr.update(visible=False)
-    else:
-        return gr.update(visible=True)
-        
-current_dir = os.path.dirname(os.path.abspath(__file__))# 获取当前文件的目录
-print("当前hua插件文件的目录为：", current_dir)
-parent_dir = os.path.dirname(os.path.dirname(current_dir))# 获取上两级目录
-sys.path.append(parent_dir)# 将上两级目录添加到 sys.path
-from comfy.cli_args import args
-from .hua_icons import icons
+    json_path = os.path.join(OUTPUT_DIR, json_file)
+    try:
+        with open(json_path, "r", encoding="utf-8") as file_json:
+            prompt = json.load(file_json)
+        seed_key = find_key_by_name(prompt, "🧙hua_gradio随机种")
+        return gr.update(visible=seed_key is not None)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"读取或解析 JSON 文件时出错 ({json_file}): {e}")
+        return gr.update(visible=False)
 
+current_dir = os.path.dirname(os.path.abspath(__file__))
+print("当前hua插件文件的目录为：", current_dir)
+parent_dir = os.path.dirname(os.path.dirname(current_dir))
+sys.path.append(parent_dir)
+try:
+    from comfy.cli_args import args
+except ImportError:
+    print("无法导入 comfy.cli_args，某些功能可能受限。")
+    args = None # 提供一个默认值以避免 NameError
+
+# 尝试导入图标，如果失败则使用默认值
+try:
+    from .hua_icons import icons
+except ImportError:
+    print("无法导入 .hua_icons，将使用默认分类名称。")
+    icons = {"hua_boy_one": "Gradio"} # 提供一个默认值
 
 class GradioTextOk:
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "string": ("STRING", {"multiline": True, "dynamicPrompts": True, "tooltip": "The text to be encoded."}), 
-
+                "string": ("STRING", {"multiline": True, "dynamicPrompts": True, "tooltip": "The text to be encoded."}),
             }
         }
     RETURN_TYPES = ("STRING",)
-    OUTPUT_TOOLTIPS = ("A conditioning containing the embedded text used to guide the diffusion model.",)
     FUNCTION = "encode"
-
-    CATEGORY = icons.get("hua_boy_one")
-    DESCRIPTION = "Encodes a text prompt using a CLIP model into an embedding that can be used to guide the diffusion model towards generating specific images."
-
+    CATEGORY = icons.get("hua_boy_one", "Gradio") # 使用 get 提供默认值
+    DESCRIPTION = "Encodes a text prompt..."
     def encode(self,string):
         return (string,)
 
-
-class GradioTextBad:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "string": ("STRING", {"multiline": True, "dynamicPrompts": True, "tooltip": "The text to be encoded."}), 
-
-            }
-        }
-    RETURN_TYPES = ("STRING",)
-    OUTPUT_TOOLTIPS = ("A conditioning containing the embedded text used to guide the diffusion model.",)
-    FUNCTION = "encode"
-
-    CATEGORY = icons.get("hua_boy_one")
-    DESCRIPTION = "Encodes a text prompt using a CLIP model into an embedding that can be used to guide the diffusion model towards generating specific images."
-
-    def encode(self,string):
-        return (string,)
-
-class GradioInputImage:
-    @classmethod
-    def INPUT_TYPES(s):
-        input_dir = folder_paths.get_input_directory()
-        files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
-        return {"required":
-                    {"image": (sorted(files), {"image_upload": True})},
-                }
-
-    OUTPUT_TOOLTIPS = ("这是一个gradio输入图片的节点",)
-    FUNCTION = "load_image"
-    OUTPUT_NODE = True
-    CATEGORY = icons.get("hua_boy_one")
-    RETURN_TYPES = ("IMAGE", "MASK")
-
-
-
-    def load_image(self, image):
-        image_path = folder_paths.get_annotated_filepath(image)
-        print("laodimage函数读取图像路径为：", image_path)
-        
-        img = node_helpers.pillow(Image.open, image_path)
-        
-        output_images = [] #用于存储处理后的图像的列表。
-        output_masks = [] #用于存储对应掩码的列表。
-        w, h = None, None # 用于存储图像的宽度和高度，初始值为 None。
-
-        excluded_formats = ['MPO']  #这里只排除了 'MPO' 格式
-        
-        for i in ImageSequence.Iterator(img):
-            i = node_helpers.pillow(ImageOps.exif_transpose, i)#根据 EXIF 数据纠正图像方向
-
-            if i.mode == 'I': #如果图像模式为 'I'（32 位有符号整数像素），则将像素值缩放到 [0, 1] 范围。
-                i = i.point(lambda i: i * (1 / 255))
-            image = i.convert("RGB")#将图像转换为 RGB 模式
-
-            if len(output_images) == 0: #如果是第一帧，则设置图像的宽度和高度。
-                w = image.size[0]
-                h = image.size[1]
-            
-            if image.size[0] != w or image.size[1] != h: #如果不等于那么跳过不匹配初始宽度和高度的帧。
-                continue
-            
-            image = np.array(image).astype(np.float32) / 255.0 #将图像转换为 NumPy 数组，并将像素值归一化到 [0, 1] 范围。
-            image = torch.from_numpy(image)[None,] #将 NumPy 数组转换为 PyTorch 张量。
-            if 'A' in i.getbands(): #检查图像是否有 alpha 通道。
-                mask = np.array(i.getchannel('A')).astype(np.float32) / 255.0 #提取 alpha 通道并将其归一化。
-                mask = 1. - torch.from_numpy(mask)#反转掩码（假设 alpha 通道表示透明度）
-            else:
-                mask = torch.zeros((64,64), dtype=torch.float32, device="cpu") #如果没有 alpha 通道，则创建一个大小为 (64, 64) 的零掩码。
-            output_images.append(image) #将处理后的图像添加到列表中。
-            output_masks.append(mask.unsqueeze(0)) #将掩码添加到列表中。
-          
-        if len(output_images) > 1 and img.format not in excluded_formats:#检查处理后的图像帧数量是否大于 1。如果大于 1，说明图像包含多个帧（例如 GIF 或多帧图像）。 检查图像格式是否不在排除的格式列表中。
-            output_image = torch.cat(output_images, dim=0)# 将所有处理后的图像沿批次维度（dim=0）连接起来。假设 output_images 是一个包含多个图像张量的列表，torch.cat 会将这些张量在批次维度上拼接成一个大的张量。
-            output_mask = torch.cat(output_masks, dim=0)#将所有掩码沿批次维度（dim=0）连接起来。假设 output_masks 是一个包含多个掩码张量的列表，torch.cat 会将这些张量在批次维度上拼接成一个大的张量。
-        else:
-            # 单帧情况：
-            output_image = output_images[0] #如果图像只有一个帧或格式在排除列表中，则直接使用第一个帧作为输出图像。
-            output_mask = output_masks[0]#同样，使用第一个帧的掩码作为输出掩码。
-
-        return (output_image, output_mask) #返回一个包含处理后的图像及其对应掩码的元组。
-
-
-#传递到gradio前端的导出节点
-class Hua_Output:
-    def __init__(self):
-        self.output_dir = folder_paths.get_output_directory() # 获取输出目录
-        self.type = "output"  # 设置输出类型为 "output"
-        self.prefix_append = "" # 前缀附加字符串，默认为空
-        self.compress_level = 4 # 设置 PNG 压缩级别，默认为 4
-    
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "images": ("IMAGE", {"tooltip": "The images to save."}),  # 需要输入的图像
-            }
-        }
-
-    RETURN_TYPES = () # 返回类型为空，因为不需要返回任何内容到前端
-    FUNCTION = "output_gradio" # 定义函数名
-    OUTPUT_NODE = True
-    CATEGORY = icons.get("hua_boy_one")
-
-    def output_gradio(self, images):
-        
-        filename_prefix = "ComfyUI" + self.prefix_append # 使用固定前缀 "ComfyUI"
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")  # 获取当前时间戳，用于生成唯一的文件名               
-        full_output_folder, _, _, subfolder, _ = folder_paths.get_save_image_path(  # 获取完整的输出文件夹路径、文件名、计数器、子文件夹和文件名前缀
-            filename_prefix, self.output_dir, images[0].shape[1], images[0].shape[0]
-        )
-                
-        for (batch_number, image) in enumerate(images):# 遍历所有图像            
-            i = 255. * image.cpu().numpy() # 将图像数据从 PyTorch 张量转换为 NumPy 数组，并缩放到 0-255 范围                        
-            img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8)) # 将 NumPy 数组转换为 PIL 图像对象                        
-            file = f"output_{timestamp}_{batch_number:05}.png" # 固定文件名，使用时间戳生成唯一的文件名  
-            image_path_gradio = os.path.join(full_output_folder, file)  # 生成图像路径                      
-            img.save(os.path.join(full_output_folder, file), compress_level=self.compress_level) # 保存图像到指定路径，并设置压缩级别
-            print(f"打印 output_gradio节点路径及文件名: {image_path_gradio}")  # 打印路径和文件名到终端
-        return image_path_gradio   # 返回路径和文件名
-
-
-# 定义图像输入输出保存路径
 INPUT_DIR = folder_paths.get_input_directory()
 OUTPUT_DIR = folder_paths.get_output_directory()
+TEMP_DIR = folder_paths.get_temp_directory()
 
-# 分辨率预设列表 (格式: "宽x高|比例")
 resolution_presets = [
     "512x512|1:1", "1024x1024|1:1", "1152x896|9:7", "1216x832|19:13",
     "1344x768|7:4", "1536x640|12:5", "704x1408|1:2", "704x1344|11:21",
@@ -204,31 +99,21 @@ resolution_presets = [
     "1600x640|5:2", "1664x576|26:9", "1728x576|3:1", "custom"
 ]
 
-# 把json传递给正在监听的地址
 def start_queue(prompt_workflow):
     p = {"prompt": prompt_workflow}
     data = json.dumps(p).encode('utf-8')
     URL = "http://127.0.0.1:8188/prompt"
-    
-    max_retries = 5  # 增加重试次数到5次
-    retry_delay = 10  # 增加重试延迟到10秒
-    request_timeout = 60  # 增加请求超时到60秒
-    
+    max_retries = 5
+    retry_delay = 10
+    request_timeout = 60
+
     for attempt in range(max_retries):
         try:
-            # 先检查服务器是否可用
-            try:
-                requests.get("http://127.0.0.1:8188", timeout=5)
-            except requests.exceptions.RequestException as e:
-                print(f"服务器连接检查失败 (尝试 {attempt + 1}/{max_retries}): {str(e)}")
-                raise
-            
-            # 发送实际请求
+            # 简化服务器检查，直接尝试 POST
             response = requests.post(URL, data=data, timeout=request_timeout)
-            response.raise_for_status()  # 检查HTTP错误状态
+            response.raise_for_status()
             print(f"请求成功 (尝试 {attempt + 1}/{max_retries})")
-            return  # 成功则直接返回
-            
+            return True # 返回成功状态
         except requests.exceptions.RequestException as e:
             error_type = type(e).__name__
             print(f"请求失败 (尝试 {attempt + 1}/{max_retries}, 错误类型: {error_type}): {str(e)}")
@@ -236,396 +121,594 @@ def start_queue(prompt_workflow):
                 print(f"{retry_delay}秒后重试...")
                 time.sleep(retry_delay)
             else:
-                print("达到最大重试次数，放弃请求，一个工作流json数据如果随机种seed没有变化，comfyui监听地址就会不鸟你，不进行推理")
-                print("可能原因:一个工作流json数据如果随机种seed没有变化，comfyui监听地址就会不鸟你，不进行推理")
-                print("- 服务器未运行")
-                print("- 网络连接问题") 
-                print("- 服务器过载，一个工作流json数据如果随机种seed没有变化，comfyui监听地址就会不鸟你，不进行推理")
-                raise  # 抛出最后一个异常
+                print("达到最大重试次数，放弃请求。")
+                print("可能原因: 服务器未运行、网络问题、工作流问题（如种子未变）。")
+                return False # 返回失败状态
 
-# 检索指定路径的JSON文件
 def get_json_files():
-    json_files = [f for f in os.listdir(OUTPUT_DIR) if f.endswith('.json')]
-    return json_files
+    try:
+        json_files = [f for f in os.listdir(OUTPUT_DIR) if f.endswith('.json') and os.path.isfile(os.path.join(OUTPUT_DIR, f))]
+        return json_files
+    except FileNotFoundError:
+        print(f"警告: 输出目录 {OUTPUT_DIR} 未找到。")
+        return []
+    except Exception as e:
+        print(f"获取 JSON 文件列表时出错: {e}")
+        return []
 
-# 刷新JSON文件列表
 def refresh_json_files():
     new_choices = get_json_files()
     return gr.update(choices=new_choices)
 
-# --- 分辨率相关函数 ---
 def parse_resolution(resolution_str):
-    """解析分辨率字符串，返回宽高元组和比例"""
     if resolution_str == "custom":
         return None, None, "自定义"
-    
-    parts = resolution_str.split("|")
-    if len(parts) != 2:
+    try:
+        parts = resolution_str.split("|")
+        if len(parts) != 2: return None, None, "无效格式"
+        width, height = map(int, parts[0].split("x"))
+        ratio = parts[1]
+        return width, height, ratio
+    except ValueError:
         return None, None, "无效格式"
-    
-    width, height = map(int, parts[0].split("x"))
-    ratio = parts[1]
-    return width, height, ratio
 
 def calculate_aspect_ratio(width, height):
-    """计算并简化宽高比"""
-    if width is None or height is None or width == 0 or height == 0:
+    if width is None or height is None or width <= 0 or height <= 0:
         return "0:0"
-    common_divisor = gcd(int(width), int(height)) # 确保是整数
-    return f"{int(width)//common_divisor}:{int(height)//common_divisor}"
+    try:
+        w, h = int(width), int(height)
+        common_divisor = gcd(w, h)
+        return f"{w//common_divisor}:{h//common_divisor}"
+    except (ValueError, TypeError):
+        return "无效输入"
+
 
 def find_closest_preset(width, height):
-    """根据宽高找到最接近的预设"""
-    if width is None or height is None:
+    if width is None or height is None or width <= 0 or height <= 0:
         return "custom"
-    
-    # 先尝试匹配完全相同的分辨率
+    try:
+        w, h = int(width), int(height)
+    except (ValueError, TypeError):
+        return "custom"
+
     for preset in resolution_presets:
-        if preset == "custom":
-            continue
+        if preset == "custom": continue
         preset_width, preset_height, _ = parse_resolution(preset)
-        if preset_width == width and preset_height == height:
+        if preset_width == w and preset_height == h:
             return preset
-    
-    # 再尝试匹配相同比例
-    aspect = calculate_aspect_ratio(width, height)
+
+    aspect = calculate_aspect_ratio(w, h)
     for preset in resolution_presets:
-        if preset == "custom":
-            continue
+        if preset == "custom": continue
         _, _, preset_aspect = parse_resolution(preset)
         if preset_aspect == aspect:
+            # 找到相同比例的第一个预设
+            # 可以在这里添加逻辑选择最接近面积的预设，但目前保持简单
             return preset
-    
+
     return "custom"
 
 def update_from_preset(resolution_str):
-    """当下拉菜单改变时更新其他字段"""
     if resolution_str == "custom":
-        # 当选择 custom 时，不改变现有的宽高输入值，只更新比例显示
+        # 返回空更新，让用户手动输入
         return "custom", gr.update(), gr.update(), "当前比例: 自定义"
-    
     width, height, ratio = parse_resolution(resolution_str)
-    return (
-        resolution_str,
-        width,
-        height,
-        f"当前比例: {ratio}"
-    )
+    if width is None: # 处理无效格式的情况
+        return "custom", gr.update(), gr.update(), "当前比例: 无效格式"
+    return resolution_str, width, height, f"当前比例: {ratio}"
 
 def update_from_inputs(width, height):
-    """当宽高输入改变时更新其他字段"""
-    if width is None or height is None:
-        # 如果输入为空，保持 custom 状态，比例显示为 0:0
-        return "custom", "当前比例: 0:0"
-    
     ratio = calculate_aspect_ratio(width, height)
     closest_preset = find_closest_preset(width, height)
-    # 返回最接近的预设值和计算出的比例
-    return (
-        closest_preset,
-        f"当前比例: {ratio}"
-    )
+    return closest_preset, f"当前比例: {ratio}"
 
 def flip_resolution(width, height):
-    """切换宽高"""
     if width is None or height is None:
         return None, None
-    
-    return height, width
-# --- 分辨率相关函数结束 ---
+    try:
+        # 确保返回的是数字类型
+        return int(height), int(width)
+    except (ValueError, TypeError):
+        return width, height # 如果转换失败，返回原值
 
-# 获取模型列表
-try:
-    lora_list = ["None"] + folder_paths.get_filename_list("loras") # 添加 "None" 选项，允许不选择
-except Exception as e:
-    print(f"获取 Lora 列表时出错: {e}")
-    lora_list = ["None"]
+# --- 模型列表获取 ---
+def get_model_list(model_type):
+    try:
+        # 添加 "None" 选项，允许不选择
+        return ["None"] + folder_paths.get_filename_list(model_type)
+    except Exception as e:
+        print(f"获取 {model_type} 列表时出错: {e}")
+        return ["None"]
 
-try:
-    checkpoint_list = ["None"] + folder_paths.get_filename_list("checkpoints") # 添加 "None" 选项
-except Exception as e:
-    print(f"获取 Checkpoint 列表时出错: {e}")
-    checkpoint_list = ["None"]
+lora_list = get_model_list("loras")
+checkpoint_list = get_model_list("checkpoints")
+unet_list = get_model_list("unet") # 假设 UNet 模型在 'unet' 目录
 
-try:
-    # 假设 UNet 模型在 'diffusion_models' 目录，如果不是请修改
-    unet_list = ["None"] + folder_paths.get_filename_list("diffusion_models") # 添加 "None" 选项
-except Exception as e:
-    print(f"获取 UNet 列表时出错: {e}")
-    unet_list = ["None"]
+def get_output_images():
+    image_files = []
+    supported_formats = ['*.png', '*.jpg', '*.jpeg', '*.gif', '*.webp', '*.bmp']
+    if not os.path.exists(OUTPUT_DIR):
+        print(f"警告: 输出目录 {OUTPUT_DIR} 不存在。")
+        return []
+    try:
+        for fmt in supported_formats:
+            pattern = os.path.join(OUTPUT_DIR, fmt)
+            image_files.extend(glob.glob(pattern))
+        image_files.sort(key=os.path.getmtime, reverse=True)
+        print(f"在 {OUTPUT_DIR} 中找到 {len(image_files)} 张图片。")
+        # 返回绝对路径
+        return [os.path.abspath(f) for f in image_files]
+    except Exception as e:
+        print(f"扫描输出目录时出错: {e}")
+        return []
 
+# 修改 generate_image 函数
+def generate_image(inputimage1, prompt_text_positive, prompt_text_positive_2, prompt_text_positive_3, prompt_text_positive_4, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_checkpoint, hua_unet):
+    execution_id = str(uuid.uuid4())
+    print(f"[{execution_id}] 开始生成任务...")
 
-# 开始生成图像，前端UI定义所需变量传递给json
-def generate_image(inputimage1, prompt_text_positive, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_checkpoint, hua_unet):
+    if not json_file:
+        print(f"[{execution_id}] 错误: 未选择工作流 JSON 文件。")
+        return None
 
-#--------------------------------------------------------------------获取json文件
-
-    # 构建完整的JSON文件路径
     json_path = os.path.join(OUTPUT_DIR, json_file)
+    if not os.path.exists(json_path):
+        print(f"[{execution_id}] 错误: 工作流 JSON 文件不存在: {json_path}")
+        return None
 
-    with open(json_path, "r", encoding="utf-8") as file_json:
-        prompt = json.load(file_json)  #加载到一个名为 prompt 的字典中。  
-        
+    try:
+        with open(json_path, "r", encoding="utf-8") as file_json:
+            prompt = json.load(file_json)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"[{execution_id}] 读取或解析 JSON 文件时出错 ({json_path}): {e}")
+        return None
 
-#----------------------------------------------------------------------
-
-    #这个函数的意义就是通过类名称定位出数字key，后续自动填写到api节点里，gradio就能方便的传递变量了。参数没写self就不会自动执行，需要调用才会执行
-    def find_key_by_name(prompt, name):#这行代码定义了一个名为 find_key_by_name 的函数。prompt：一个字典，表示 JSON 数据。name：一个字符串，表示你要查找的字典名称。
-        for key, value in prompt.items():#使用 for 循环遍历 prompt字典中的每一项 。key 是字典的键，value 是字典的值。 
-            if isinstance(value, dict) and value.get("_meta", {}).get("title") == name:#字典-键-值；检查一个变量value是否是一个字典，并且该字典中是否包含一个键为"_meta"的子字典，且该子字典中是否包含一个键为"title"的值，并且这个值等于变量name。
-                return key#相等就返回一个key数字键
-        return None  # 如果遍历完所有项都没有找到匹配的值，返回 None。
-
-   
-    # 调用 find_key_by_name 函数，并将返回值赋给左边一个变量。
+    # --- 节点查找 ---
     image_input_key = find_key_by_name(prompt, "☀️gradio前端传入图像")
-    seed_key = find_key_by_name(prompt, "🧙hua_gradio随机种") # 如果comfyui中文界面保存api格式工作流，那么是检索不到的。所以要用英文界面保存api格式工作流。
-    text_ok_key = find_key_by_name(prompt, "💧gradio正向提示词")    
+    seed_key = find_key_by_name(prompt, "🧙hua_gradio随机种")
+    text_ok_key = find_key_by_name(prompt, "💧gradio正向提示词")
+    text_ok_key_2 = find_key_by_name(prompt, "💧gradio正向提示词2")
+    text_ok_key_3 = find_key_by_name(prompt, "💧gradio正向提示词3")
+    text_ok_key_4 = find_key_by_name(prompt, "💧gradio正向提示词4")
     text_bad_key = find_key_by_name(prompt, "🔥gradio负向提示词")
     fenbianlv_key = find_key_by_name(prompt, "📜hua_gradio分辨率")
     lora_key = find_key_by_name(prompt, "🌊hua_gradio_Lora仅模型")
     checkpoint_key = find_key_by_name(prompt, "🌊hua_gradio检查点加载器")
     unet_key = find_key_by_name(prompt, "🌊hua_gradio_UNET加载器")
+    hua_output_key = find_key_by_name(prompt, "🌙图像输出到gradio前端")
 
-    
-    print("输入图像节点的数字键:", image_input_key)
-    print("正向提示词节点的数字键:", text_ok_key)
-    print("随机种子节点的数字键:", seed_key)
-    print(f"--- Debug: 查找 '📜hua_gradio分辨率' 节点的 Key: {fenbianlv_key}") # 添加调试信息
-    print(f"--- Debug: 传入的 hua_width: {hua_width}, 类型: {type(hua_width)}") # 添加调试信息
-    print(f"--- Debug: 传入的 hua_height: {hua_height}, 类型: {type(hua_height)}") # 添加调试信息
-
-    '''双引号里是字符串哦。在 Python 中，字典的键和值可以是字符串、数字、布尔值、列表、字典等类型。
-    当你使用变量名来访问字典中的键时，Python 会自动处理这些类型，包括字符串中的双引号。'''
-    
-
-    # 检查 inputimage1 是否为空图像
-    if inputimage1 is None or (isinstance(inputimage1, Image.Image) and inputimage1.size == (0, 0)):
-        print("inputimage1 is empty or invalid. Skipping the process.")
-    else:            
-        # 假设 inputimage1 是一个 PIL.Image 对象# 直接使用 PIL 的 Image 类来保存图像 gradio前端传入的图像
-        if isinstance(inputimage1, Image.Image):
-            inputimage1 = np.array(inputimage1)
-        img = Image.fromarray(inputimage1)   
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")   # 生成时间戳      
-        inputfilename = f"jieinput_{timestamp}.png" # 生成文件名
-        img.save(os.path.join(INPUT_DIR, inputfilename))
-
-    # # 使用变量名来访问字典中的键
+    # --- 更新 Prompt ---
+    inputfilename = None # 初始化
     if image_input_key:
-        prompt[image_input_key]["inputs"]["image"] = inputfilename  # 指定第一张图像的文件名    
+        if inputimage1 is not None:
+            try:
+                # 确保 inputimage1 是 PIL Image 对象
+                if isinstance(inputimage1, np.ndarray):
+                    img = Image.fromarray(inputimage1)
+                elif isinstance(inputimage1, Image.Image):
+                    img = inputimage1
+                else:
+                    print(f"[{execution_id}] 警告: 未知的输入图像类型: {type(inputimage1)}。尝试跳过图像输入。")
+                    img = None
+
+                if img:
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    inputfilename = f"gradio_input_{timestamp}_{random.randint(100, 999)}.png"
+                    save_path = os.path.join(INPUT_DIR, inputfilename)
+                    img.save(save_path)
+                    prompt[image_input_key]["inputs"]["image"] = inputfilename
+                    print(f"[{execution_id}] 输入图像已保存到: {save_path}")
+            except Exception as e:
+                print(f"[{execution_id}] 保存输入图像时出错: {e}")
+                # 不设置图像输入，让工作流使用默认值（如果存在）
+                if "image" in prompt[image_input_key]["inputs"]:
+                    del prompt[image_input_key]["inputs"]["image"] # 或者设置为 None，取决于节点如何处理
+        else:
+             # 如果没有输入图像，确保节点输入中没有残留的文件名
+             if "image" in prompt.get(image_input_key, {}).get("inputs", {}):
+                 # 尝试移除或设置为空，取决于节点期望
+                 # prompt[image_input_key]["inputs"]["image"] = None
+                 print(f"[{execution_id}] 无输入图像提供，清除节点 {image_input_key} 的 image 输入。")
+                 # 或者如果节点必须有输入，则可能需要报错或使用默认图像
+                 # return None # 如果图生图节点必须有输入
+
     if seed_key:
         seed = random.randint(0, 0xffffffff)
-        print(f"生成的随机种子值: {seed}")  #  一个工作流json数据如果随机种seed没有变化，comfyui监听地址就会不鸟你，不进行推理
         prompt[seed_key]["inputs"]["seed"] = seed
-    # prompt["3"]["inputs"]["seed"] = random.randint(1, 1500000000000000)  # 定义种子随机数1到1500000，json的参数传递给comfyUI
-    if text_ok_key:
-        prompt[text_ok_key]["inputs"]["string"] = f"{prompt_text_positive}" #字典中的键[]的值是字符串，f代表字符串，占位符{}里是变量的函数的参数prompt_text_positive，就是gradio前端传入的字符串
-    if text_bad_key:
-        prompt[text_bad_key]["inputs"]["string"] = f"{prompt_text_negative}"
+        print(f"[{execution_id}] 设置随机种子: {seed}")
+
+    # 更新文本提示词 (如果节点存在)
+    if text_ok_key: prompt[text_ok_key]["inputs"]["string"] = prompt_text_positive
+    if text_ok_key_2: prompt[text_ok_key_2]["inputs"]["string"] = prompt_text_positive_2
+    if text_ok_key_3: prompt[text_ok_key_3]["inputs"]["string"] = prompt_text_positive_3
+    if text_ok_key_4: prompt[text_ok_key_4]["inputs"]["string"] = prompt_text_positive_4
+    if text_bad_key: prompt[text_bad_key]["inputs"]["string"] = prompt_text_negative
+
     if fenbianlv_key:
-        print(f"--- Debug: 找到分辨率 Key ({fenbianlv_key})，准备更新宽高...") # 添加调试信息
-        # 确保值是数字类型，Gradio Number 组件默认返回 float 或 int
         try:
             width_val = int(hua_width)
             height_val = int(hua_height)
-            prompt[fenbianlv_key]["inputs"]["custom_width"] = width_val # 直接使用数字类型
-            prompt[fenbianlv_key]["inputs"]["custom_height"] = height_val # 直接使用数字类型
-            print(f"--- Debug: 更新后 prompt[{fenbianlv_key}]['inputs']: {prompt[fenbianlv_key]['inputs']}") # 添加调试信息
-        except (ValueError, TypeError) as e:
-             print(f"--- Debug: 转换宽高为整数时出错: {e}. hua_width={hua_width}, hua_height={hua_height}") # 添加错误处理
-        except KeyError as e:
-             print(f"--- Debug: 更新 prompt 时出现 KeyError: {e}. 检查 prompt[{fenbianlv_key}] 结构.") # 添加错误处理
+            prompt[fenbianlv_key]["inputs"]["custom_width"] = width_val
+            prompt[fenbianlv_key]["inputs"]["custom_height"] = height_val
+            print(f"[{execution_id}] 设置分辨率: {width_val}x{height_val}")
+        except (ValueError, TypeError, KeyError) as e:
+             print(f"[{execution_id}] 更新分辨率时出错: {e}. 使用默认值或跳过。")
+
+    # 更新模型选择 (如果节点存在且选择了模型)
+    if lora_key and hua_lora != "None": prompt[lora_key]["inputs"]["lora_name"] = hua_lora
+    if checkpoint_key and hua_checkpoint != "None": prompt[checkpoint_key]["inputs"]["ckpt_name"] = hua_checkpoint
+    if unet_key and hua_unet != "None": prompt[unet_key]["inputs"]["unet_name"] = hua_unet
+
+    if hua_output_key:
+        prompt[hua_output_key]["inputs"]["unique_id"] = execution_id
+        print(f"[{execution_id}] 已将 unique_id 设置给节点 {hua_output_key}")
     else:
-        print("--- Debug: 未找到分辨率 Key，无法更新宽高。请检查 JSON 文件中是否存在标题为 '📜hua_gradio分辨率' 的节点。") # 添加调试信息
+        print(f"[{execution_id}] 警告: 未找到 '🌙图像输出到gradio前端' 节点，可能无法获取结果。")
+        # return None # 如果必须有输出节点才能工作，则返回失败
 
-    if lora_key:
-        prompt[lora_key]["inputs"]["lora_name"] = f"{hua_lora}"
-    if checkpoint_key:
-        prompt[checkpoint_key]["inputs"]["ckpt_name"] = f"{hua_checkpoint}"
-    if unet_key:
-        prompt[unet_key]["inputs"]["unet_name"] = f"{hua_unet}"
-
-    
-    start_queue(prompt)
-
-    # 定义获取最新图像的逻辑方法，不调用的话是不执行的
-    def get_latest_image(folder):
-        files = os.listdir(folder)
-        # 过滤出以 "output" 为前缀且后缀为图片格式的文件
-        image_files = [f for f in files if f.startswith('output') and f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-        image_files.sort(key=lambda x: os.path.getmtime(os.path.join(folder, x)))
-        latest_image = os.path.join(folder, image_files[-1]) if image_files else None
-        return latest_image
-        
-    previous_image = get_latest_image(OUTPUT_DIR)
-    
-    
-    max_attempts = 30  # 进一步增加最大尝试次数到30次
-    attempt = 0
-    check_interval = 5  # 检查间隔保持5秒
-    total_timeout = 1000  # 总超时时间增加到1000秒
-    
-    start_time = time.time()
-    
-    # 先检查ComfyUI服务是否可用
+    # --- 发送请求并等待结果 ---
     try:
-        requests.get("http://127.0.0.1:8188", timeout=5)
-    except requests.exceptions.RequestException as e:
-        error_msg = f"无法连接到ComfyUI服务: {str(e)}"
-        print(error_msg)
-        raise ConnectionError(error_msg)
-    
-    # 检查输出目录权限
-    if not os.access(OUTPUT_DIR, os.W_OK):
-        error_msg = f"输出目录没有写入权限: {OUTPUT_DIR}"
-        print(error_msg)
-        raise PermissionError(error_msg)
-    
-    while attempt < max_attempts and (time.time() - start_time) < total_timeout:
-        try:
-            latest_image = get_latest_image(OUTPUT_DIR)
-            if latest_image != previous_image:
-                print(f"检测到新图像 (尝试 {attempt + 1}/{max_attempts}, 耗时: {time.time() - start_time:.1f}秒):")
-                print("旧图像路径:", previous_image)
-                print("新图像路径:", latest_image)
-                return latest_image
-                
-            remaining_time = total_timeout - (time.time() - start_time)
-            print(f"等待新图像中... (尝试 {attempt + 1}/{max_attempts}, 剩余时间: {remaining_time:.1f}秒)")
-            
-            # 每5次尝试检查一次服务状态
-            if attempt % 5 == 0:
+        print(f"[{execution_id}] 调用 start_queue 发送请求...")
+        success = start_queue(prompt) # 发送请求到 ComfyUI
+        if not success:
+             print(f"[{execution_id}] 请求发送失败。")
+             return None
+        print(f"[{execution_id}] 请求已发送，开始等待结果...")
+    except Exception as e:
+        print(f"[{execution_id}] 调用 start_queue 时发生意外错误: {e}")
+        return None
+
+    # --- 精确图像获取逻辑 ---
+    temp_file_path = os.path.join(TEMP_DIR, f"{execution_id}.json")
+    print(f"[{execution_id}] 开始等待临时文件: {temp_file_path}")
+
+    start_time = time.time()
+    wait_timeout = 1000
+    check_interval = 1
+
+    while time.time() - start_time < wait_timeout:
+        if os.path.exists(temp_file_path):
+            print(f"[{execution_id}] 检测到临时文件 (耗时: {time.time() - start_time:.1f}秒)")
+            try:
+                time.sleep(0.5) # 确保写入完成
+                with open(temp_file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    if not content: # 文件可能是空的
+                        print(f"[{execution_id}] 警告: 临时文件为空。")
+                        time.sleep(check_interval) # 再等一下
+                        continue
+                    image_paths = json.loads(content) # 解析 JSON
+                print(f"[{execution_id}] 成功读取 {len(image_paths)} 个图片路径。")
+
                 try:
-                    requests.get("http://127.0.0.1:8188", timeout=5)
-                except requests.exceptions.RequestException as e:
-                    print(f"服务状态检查失败 (尝试 {attempt + 1}/{max_attempts}): {str(e)}")
-            
-            time.sleep(check_interval)
-            attempt += 1
-            
-        except Exception as e:
-            print(f"检测新图像时出错 (尝试 {attempt + 1}/{max_attempts}): {str(e)}")
-            time.sleep(check_interval)
-            attempt += 1
-    
-    error_msg = f"达到最大尝试次数 {max_attempts} 或总超时 {total_timeout}秒，未检测到新图像"
-    print(error_msg)
-    print("可能原因:")
-    print("- 图像生成服务未正常运行")
-    print("- 输出目录权限问题")
-    print("- 网络连接问题")
-    print("- 工作流执行时间过长")
-    print("建议检查:")
-    print("1. 确保ComfyUI服务正在运行")
-    print("2. 检查输出目录权限")
-    print("3. 检查网络连接")
-    print("4. 简化工作流或增加超时时间")
-    raise TimeoutError(error_msg)
+                    os.remove(temp_file_path)
+                    print(f"[{execution_id}] 已删除临时文件。")
+                except OSError as e:
+                    print(f"[{execution_id}] 删除临时文件失败: {e}")
 
+                # 返回绝对路径
+                valid_paths = [os.path.abspath(p) for p in image_paths if os.path.exists(p)]
+                if len(valid_paths) != len(image_paths):
+                    print(f"[{execution_id}] 警告: 部分路径无效。有效路径数: {len(valid_paths)} / {len(image_paths)}")
 
+                if not valid_paths:
+                    print(f"[{execution_id}] 错误: 未找到有效的输出图片路径。")
+                    return None
+
+                print(f"[{execution_id}] 任务成功完成，返回 {len(valid_paths)} 个有效路径。")
+                return valid_paths # *** 成功时返回路径列表 ***
+
+            except json.JSONDecodeError as e:
+                print(f"[{execution_id}] 读取或解析临时文件 JSON 失败: {e}. 文件内容: '{content[:100]}...'") # 打印部分内容帮助调试
+                # 不要立即删除，可能只是写入未完成
+                # try: os.remove(temp_file_path)
+                # except OSError: pass
+                # return None # 解析失败，暂时不返回失败，再等等
+                time.sleep(check_interval * 2) # 等待更长时间再试
+            except Exception as e:
+                print(f"[{execution_id}] 处理临时文件时发生未知错误: {e}")
+                try: os.remove(temp_file_path)
+                except OSError: pass
+                return None # 其他错误，返回 None
+
+        time.sleep(check_interval)
+
+    # 超时处理
+    print(f"[{execution_id}] 等待临时文件超时 ({wait_timeout}秒)。")
+    return None # 超时，返回 None
 
 
 def fuck(json_file):
     # 检查文件是否存在且有效
     if not json_file or not os.path.exists(os.path.join(OUTPUT_DIR, json_file)):
         print(f"JSON 文件无效或不存在: {json_file}")
-        # 返回所有组件都不可见的状态 (顺序: image, pos_prompt, neg_prompt, res, lora, ckpt, unet)
-        return (gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False))
+        # 返回所有组件都不可见的状态
+        return (gr.update(visible=False),) * 10 # 10 个动态组件
 
     json_path = os.path.join(OUTPUT_DIR, json_file)
     try:
         with open(json_path, "r", encoding="utf-8") as file_json:
             prompt = json.load(file_json)
-    except FileNotFoundError:
-        print(f"JSON 文件未找到: {json_path}")
-        return (gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False))
-    except json.JSONDecodeError:
-        print(f"JSON 文件解析错误: {json_path}")
-        return (gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False))
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"读取或解析 JSON 文件时出错 ({json_file}): {e}")
+        return (gr.update(visible=False),) * 10
 
-    # 内部辅助函数，保持不变
-    def find_key_by_name(prompt, name):
-        for key, value in prompt.items():
-            # 确保 value 是字典再进行 get 操作
-            if isinstance(value, dict) and value.get("_meta", {}).get("title") == name:
-                return key
+    # 内部辅助函数
+    def find_key_by_name_internal(p, name): # 避免与全局函数冲突
+        for k, v in p.items():
+            if isinstance(v, dict) and v.get("_meta", {}).get("title") == name:
+                return k
         return None
 
     # 检查各个节点是否存在
-    has_image_input = find_key_by_name(prompt, "☀️gradio前端传入图像") is not None
-    has_pos_prompt = find_key_by_name(prompt, "💧gradio正向提示词") is not None
-    has_neg_prompt = find_key_by_name(prompt, "🔥gradio负向提示词") is not None
-    has_resolution = find_key_by_name(prompt, "📜hua_gradio分辨率") is not None
-    has_lora = find_key_by_name(prompt, "🌊hua_gradio_Lora仅模型") is not None
-    has_checkpoint = find_key_by_name(prompt, "🌊hua_gradio检查点加载器") is not None
-    has_unet = find_key_by_name(prompt, "🌊hua_gradio_UNET加载器") is not None
+    has_image_input = find_key_by_name_internal(prompt, "☀️gradio前端传入图像") is not None
+    has_pos_prompt_1 = find_key_by_name_internal(prompt, "💧gradio正向提示词") is not None
+    has_pos_prompt_2 = find_key_by_name_internal(prompt, "💧gradio正向提示词2") is not None
+    has_pos_prompt_3 = find_key_by_name_internal(prompt, "💧gradio正向提示词3") is not None
+    has_pos_prompt_4 = find_key_by_name_internal(prompt, "💧gradio正向提示词4") is not None
+    has_neg_prompt = find_key_by_name_internal(prompt, "🔥gradio负向提示词") is not None
+    has_resolution = find_key_by_name_internal(prompt, "📜hua_gradio分辨率") is not None
+    has_lora = find_key_by_name_internal(prompt, "🌊hua_gradio_Lora仅模型") is not None
+    has_checkpoint = find_key_by_name_internal(prompt, "🌊hua_gradio检查点加载器") is not None
+    has_unet = find_key_by_name_internal(prompt, "🌊hua_gradio_UNET加载器") is not None
 
-    print(f"检查结果 for {json_file}: Image={has_image_input}, PosP={has_pos_prompt}, NegP={has_neg_prompt}, Res={has_resolution}, Lora={has_lora}, Ckpt={has_checkpoint}, Unet={has_unet}")
+    print(f"检查结果 for {json_file}: Image={has_image_input}, PosP1={has_pos_prompt_1}, PosP2={has_pos_prompt_2}, PosP3={has_pos_prompt_3}, PosP4={has_pos_prompt_4}, NegP={has_neg_prompt}, Res={has_resolution}, Lora={has_lora}, Ckpt={has_checkpoint}, Unet={has_unet}")
 
-    # 根据检查结果返回 gr.update 对象元组
-    # 顺序必须与 demo.load 和 json_dropdown.change 的 outputs 列表对应（除了 Random_Seed）
-    # 顺序: image_accordion, positive_prompt_col, negative_prompt_col, resolution_row, hua_lora_dropdown, hua_checkpoint_dropdown, hua_unet_dropdown
+    # 返回 gr.update 对象元组，顺序必须与 outputs 列表对应
     return (
         gr.update(visible=has_image_input),
-        gr.update(visible=has_pos_prompt),
+        gr.update(visible=has_pos_prompt_1),
+        gr.update(visible=has_pos_prompt_2),
+        gr.update(visible=has_pos_prompt_3),
+        gr.update(visible=has_pos_prompt_4),
         gr.update(visible=has_neg_prompt),
         gr.update(visible=has_resolution),
         gr.update(visible=has_lora),
         gr.update(visible=has_checkpoint),
         gr.update(visible=has_unet)
     )
-        
 
-# 创建Gradio界面
+# --- 队列处理函数 ---
+def run_queued_tasks(inputimage1, prompt_text_positive, prompt_text_positive_2, prompt_text_positive_3, prompt_text_positive_4, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_checkpoint, hua_unet, queue_count=1, progress=gr.Progress(track_tqdm=True)):
+    global accumulated_results # 声明我们要修改全局变量
+    
+    # 初始化当前批次结果
+    current_batch_results = []
+    
+    # 1. 将新任务加入队列 (根据queue_count添加多个相同任务)
+    # 如果是批量任务(queue_count>1)，先清除之前的结果
+    if queue_count > 1:
+        with results_lock:
+            accumulated_results = []
+            current_batch_results = []  # 重置当前批次结果
+    task_params = (inputimage1, prompt_text_positive, prompt_text_positive_2, prompt_text_positive_3, prompt_text_positive_4, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_checkpoint, hua_unet)
+    print(f"[QUEUE_DEBUG] 接收到新任务请求。当前队列长度 (加锁前): {len(task_queue)}")
+    with queue_lock:
+        for _ in range(max(1, int(queue_count))):  # 确保至少添加1个任务
+            task_queue.append(task_params)
+        current_queue_size = len(task_queue)
+        print(f"[QUEUE_DEBUG] 已添加 {queue_count} 个任务到队列。当前队列长度 (加锁后): {current_queue_size}")
+    print(f"[QUEUE_DEBUG] 任务添加完成，释放锁。")
+
+    # 初始状态更新：显示当前累积结果和队列信息
+    with results_lock:
+        # 使用副本以防在 yield 时被修改
+        current_results_copy = accumulated_results[:]
+    print(f"[QUEUE_DEBUG] 准备 yield 初始状态更新。队列: {current_queue_size}, 处理中: {processing_event.is_set()}")
+    yield {
+        queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: {'是' if processing_event.is_set() else '否'}"),
+        output_gallery: gr.update(value=current_results_copy),
+        progress_bar: gr.update(value=0)
+    }
+    print(f"[QUEUE_DEBUG] 已 yield 初始状态更新。")
+
+    # 2. 检查是否已有进程在处理队列
+    print(f"[QUEUE_DEBUG] 检查处理状态: processing_event.is_set() = {processing_event.is_set()}")
+    if processing_event.is_set():
+        print("[QUEUE_DEBUG] 已有任务在处理队列，新任务已排队。函数返回。")
+        # 不需要 return，让 yield 完成更新即可
+        return
+
+    # 3. 开始处理队列 (如果没有其他进程在处理)
+    print(f"[QUEUE_DEBUG] 没有任务在处理，准备设置 processing_event 为 True。")
+    processing_event.set() # 标记为正在处理
+    print(f"[QUEUE_DEBUG] processing_event 已设置为 True。开始处理循环。")
+
+    try:
+        print("[QUEUE_DEBUG] Entering main processing loop (while True).")
+        while True:
+            task_to_run = None
+            current_queue_size = 0 # Initialize
+            print("[QUEUE_DEBUG] Checking queue for tasks (acquiring lock)...")
+            with queue_lock:
+                if task_queue:
+                    task_to_run = task_queue.popleft()
+                    current_queue_size = len(task_queue)
+                    print(f"[QUEUE_DEBUG] Task popped from queue. Remaining: {current_queue_size}")
+                else:
+                    print("[QUEUE_DEBUG] Queue is empty. Breaking loop.")
+                    break # 队列空了
+            print("[QUEUE_DEBUG] Queue lock released.")
+
+            # 如果队列空了，上面的 break 会执行，不会到这里
+            if not task_to_run: # Double check in case break didn't happen? Should not be needed.
+                 print("[QUEUE_DEBUG] Warning: No task found after lock release, but loop didn't break?")
+                 continue # Skip to next iteration
+
+            # 更新状态：显示正在处理和队列大小
+            with results_lock: current_results_copy = accumulated_results[:]
+            print(f"[QUEUE_DEBUG] Preparing to yield 'Processing' status. Queue: {current_queue_size}")
+            yield {
+                queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: 是"),
+                output_gallery: gr.update(value=current_results_copy),
+                progress_bar: gr.update(value=0)
+            }
+            print(f"[QUEUE_DEBUG] Yielded 'Processing' status.")
+
+            if task_to_run: # This check is now redundant due to the earlier check, but keep for clarity
+                print(f"[QUEUE_DEBUG] Starting execution for popped task. Remaining queue: {current_queue_size}")
+                # --- 进度条开始 ---
+                progress(0, desc=f"处理任务 (队列剩余 {current_queue_size})") # 取消注释并设置描述
+                print(f"[QUEUE_DEBUG] Progress set to 0. Desc: Processing task (Queue remaining {current_queue_size})")
+                # --- 进度条开始结束 ---
+                print(f"[QUEUE_DEBUG] Calling generate_image...")
+                new_image_paths = None # Initialize
+                try:
+                    new_image_paths = generate_image(*task_to_run) # 执行任务
+                    print(f"[QUEUE_DEBUG] generate_image returned. Result: {'Success (paths received)' if new_image_paths else 'Failure (None received)'}")
+                except Exception as e:
+                    print(f"[QUEUE_DEBUG] Exception during generate_image call: {e}")
+                    # Consider how to handle this - maybe yield a failure status?
+
+                # --- 进度条结束 ---
+                progress(1) # 无论成功失败，都标记完成
+                print(f"[QUEUE_DEBUG] Progress set to 1.")
+                # --- 进度条结束结束 ---
+
+                if new_image_paths:
+                    print(f"[QUEUE_DEBUG] Task successful, got {len(new_image_paths)} new image paths.")
+                    with results_lock:
+                        if queue_count == 1:
+                            # 单任务模式：只显示当前结果，不累积
+                            accumulated_results = new_image_paths
+                        else:
+                            # 批量任务模式：累积当前批次的所有结果
+                            current_batch_results.extend(new_image_paths)
+                            accumulated_results = current_batch_results[:]
+                            
+                        current_results_copy = accumulated_results[:] # 获取更新后的副本
+                        print(f"[QUEUE_DEBUG] Updated accumulated_results (lock acquired). Queue count: {queue_count}. Current batch: {len(current_batch_results)}. Total: {len(accumulated_results)}")
+                    print(f"[QUEUE_DEBUG] Preparing to yield success update. Queue: {current_queue_size}")
+                    # 更新 UI
+                    yield {
+                         queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: 是 (完成)"),
+                         output_gallery: gr.update(value=current_results_copy, visible=True),  # 强制更新并显示
+                         progress_bar: gr.update(value=1)
+                    }
+                    print(f"[QUEUE_DEBUG] Yielded success update.")
+                else:
+                    print("[QUEUE_DEBUG] Task failed or returned no images.")
+                    with results_lock: current_results_copy = accumulated_results[:] # Get current results even on failure
+                    print(f"[QUEUE_DEBUG] Preparing to yield failure update. Queue: {current_queue_size}")
+                    yield {
+                         queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: 是 (失败)"),
+                         output_gallery: gr.update(value=current_results_copy), # Show existing results
+                         progress_bar: gr.update(value=0)
+                    }
+                    print(f"[QUEUE_DEBUG] Yielded failure update.")
+            # else: # 理论上不应发生, 因为前面有检查
+            #      print("[QUEUE_DEBUG] Warning: task_to_run was unexpectedly None here.")
+
+    finally:
+        print(f"[QUEUE_DEBUG] Entering finally block. Clearing processing_event (was {processing_event.is_set()}).")
+        processing_event.clear() # 清除处理标志
+        print(f"[QUEUE_DEBUG] processing_event cleared (is now {processing_event.is_set()}).")
+        with queue_lock: current_queue_size = len(task_queue)
+        with results_lock: final_results = accumulated_results[:]
+        print(f"[QUEUE_DEBUG] Preparing to yield final status update. Queue: {current_queue_size}, Processing: No")
+        yield {
+            queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: 否"),
+            output_gallery: gr.update(value=final_results),
+            progress_bar: gr.update(value=0)
+        }
+        print("[QUEUE_DEBUG] Yielded final status update. Exiting run_queued_tasks.")
+
+# --- 赞助码处理函数 ---
+def show_sponsor_code():
+    # 动态读取 js/icon.js 并提取 Base64 数据
+    js_icon_path = os.path.join(current_dir, 'js', 'icon.js')
+    base64_data = None
+    default_sponsor_info = """
+<div style='text-align: center;'>
+    <h3>感谢您的支持！</h3>
+    <p>无法加载赞助码图像。</p>
+</div>
+"""
+    try:
+        with open(js_icon_path, 'r', encoding='utf-8') as f:
+            js_content = f.read()
+            # 使用正则表达式查找第一个 loadImage("data:image/...") 中的 Base64 数据
+            match = re.search(r'loadImage\("(data:image/[^;]+;base64,[^"]+)"\)', js_content)
+            if match:
+                base64_data = match.group(1)
+            else:
+                print(f"警告: 在 {js_icon_path} 中未找到符合格式的 Base64 数据。")
+
+    except FileNotFoundError:
+        print(f"错误: 未找到赞助码图像文件: {js_icon_path}")
+    except Exception as e:
+        print(f"读取或解析赞助码图像文件时出错 ({js_icon_path}): {e}")
+
+    if base64_data:
+        sponsor_info = f"""
+<div style='text-align: center;'>
+    <h3>感谢您的支持！</h3>
+    <p>请使用以下方式赞助：</p>
+    <img src='{base64_data}' alt='赞助码' width='512' height='512'>
+</div>
+"""
+    else:
+        sponsor_info = default_sponsor_info
+
+    # 返回一个更新指令，让 Markdown 组件可见并显示内容
+    return gr.update(value=sponsor_info, visible=True)
+
+# --- 清除函数 ---
+def clear_queue():
+    global task_queue
+    with queue_lock:
+        task_queue.clear()
+        current_queue_size = 0
+    print("任务队列已清除。")
+    return gr.update(value=f"队列中: {current_queue_size} | 处理中: {'是' if processing_event.is_set() else '否'}")
+
+def clear_history():
+    global accumulated_results
+    with results_lock:
+        accumulated_results.clear()
+    print("图像历史已清除。")
+    with queue_lock: current_queue_size = len(task_queue)
+    return {
+        output_gallery: gr.update(value=[]),
+        queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: {'是' if processing_event.is_set() else '否'}")
+    }
+
+
+# --- Gradio 界面 ---
 with gr.Blocks() as demo:
     gr.Markdown("# [封装comfyUI工作流](https://github.com/kungful/ComfyUI_to_webui.git)")
 
-    # 将输入和输出图像放在同一行
     with gr.Row():
        with gr.Column():  # 左侧列
-           # 可折叠的上传图像区域 - 现在整个Accordion会根据返回值动态显示/隐藏
-           image_accordion = gr.Accordion("上传图像 (折叠,有gradio传入图像节点才会显示上传)", 
-                                        visible=True,  # 默认隐藏
-                                        open=True)  # 但一旦显示，默认是展开的
-           with image_accordion:  # 将内容放在Accordion内部
+           image_accordion = gr.Accordion("上传图像 (折叠,有gradio传入图像节点才会显示上传)", visible=True, open=True)
+           with image_accordion:
                input_image = gr.Image(type="pil", label="上传图像", height=156, width=156)
-                   
-   
-           
+
            with gr.Row():
-               # 为正向提示词容器添加变量名
                with gr.Column() as positive_prompt_col:
-                   prompt_positive = gr.Textbox(label="正向提示文本")
-                   # 为负向提示词容器添加变量名
-                   with gr.Column() as negative_prompt_col:
-                       prompt_negative = gr.Textbox(label="负向提示文本")
-   
-           # --- 分辨率选择器 ---
-           # 将整个分辨率设置区域包裹在一个 Row 中，并分配变量名
-           with gr.Row() as resolution_row: # <--- 添加变量名
-               with gr.Column(scale=1): # 左侧列
-                   resolution_dropdown = gr.Dropdown(
-                       choices=resolution_presets,
-                       label="分辨率预设",
-                       value=resolution_presets[0] # 默认第一个
-                   )
-                   flip_btn = gr.Button("↔ 切换宽高 (横向/纵向)")
-                 
-               with gr.Accordion("宽度和高度设置", open=False): # <--- 添加 Accordion 并默认折叠
-                   with gr.Column(scale=1): # 右侧列，包含宽高输入 (保持原有 Column 结构)
-                       # 注意：这里将组件命名为 hua_width 和 hua_height
+                   prompt_positive = gr.Textbox(label="正向提示文本 1", elem_id="prompt_positive_1")
+                   prompt_positive_2 = gr.Textbox(label="正向提示文本 2", elem_id="prompt_positive_2")
+                   prompt_positive_3 = gr.Textbox(label="正向提示文本 3", elem_id="prompt_positive_3")
+                   prompt_positive_4 = gr.Textbox(label="正向提示文本 4", elem_id="prompt_positive_4")
+               with gr.Column() as negative_prompt_col:
+                   prompt_negative = gr.Textbox(label="负向提示文本", elem_id="prompt_negative")
+
+           with gr.Row() as resolution_row:
+               with gr.Column(scale=1):
+                   resolution_dropdown = gr.Dropdown(choices=resolution_presets, label="分辨率预设", value=resolution_presets[0])
+                   flip_btn = gr.Button("↔ 切换宽高")
+               with gr.Accordion("宽度和高度设置", open=False):
+                   with gr.Column(scale=1):
                        hua_width = gr.Number(label="宽度", value=512, minimum=64, step=64, elem_id="hua_width_input")
                        hua_height = gr.Number(label="高度", value=512, minimum=64, step=64, elem_id="hua_height_input")
-                       ratio_display = gr.Markdown("当前比例: 1:1") # 初始比例 
-           # --- 分辨率选择器结束 ---
-   
+                       ratio_display = gr.Markdown("当前比例: 1:1")
+
            with gr.Row():
                with gr.Column(scale=3):
                    json_dropdown = gr.Dropdown(choices=get_json_files(), label="选择工作流")
-                   with gr.Column(scale=1):
-                       refresh_button = gr.Button("刷新工作流")  
-           # --- 模型选择器 ---
+               with gr.Column(scale=1): # 调整比例使按钮不至于太宽
+                   refresh_button = gr.Button("🔄 刷新工作流")
+
            with gr.Row():
                with gr.Column(scale=1):
                    hua_lora_dropdown = gr.Dropdown(choices=lora_list, label="选择 Lora 模型", value="None", elem_id="hua_lora_dropdown")
@@ -633,130 +716,169 @@ with gr.Blocks() as demo:
                    hua_checkpoint_dropdown = gr.Dropdown(choices=checkpoint_list, label="选择 Checkpoint 模型", value="None", elem_id="hua_checkpoint_dropdown")
                with gr.Column(scale=1):
                    hua_unet_dropdown = gr.Dropdown(choices=unet_list, label="选择 UNet 模型", value="None", elem_id="hua_unet_dropdown")
-           # --- 模型选择器结束 ---
-   
+
            Random_Seed = gr.HTML("""
            <div style='text-align: center; margin-bottom: 5px;'>
                <h2 style="font-size: 12px; margin: 0; color: #00ff00; font-style: italic;">
                    已添加gradio随机种节点
                </h2>
            </div>
-           """)
-   
-           # --- 分辨率事件处理 ---
-           # 当下拉菜单改变时
-           resolution_dropdown.change(
-               fn=update_from_preset,
-               inputs=resolution_dropdown,
-               outputs=[resolution_dropdown, hua_width, hua_height, ratio_display],
-               # queue=False # 尝试禁用队列以提高响应速度
-           )
-           
-           # 当宽高输入改变时
-           hua_width.change(
-               fn=update_from_inputs,
-               inputs=[hua_width, hua_height],
-               outputs=[resolution_dropdown, ratio_display],
-               # queue=False # 尝试禁用队列以提高响应速度
-           )
-           
-           hua_height.change(
-               fn=update_from_inputs,
-               inputs=[hua_width, hua_height],
-               outputs=[resolution_dropdown, ratio_display],
-               # queue=False # 尝试禁用队列以提高响应速度
-           )
-           
-           # 当点击切换按钮时
-           flip_btn.click(
-               fn=flip_resolution,
-               inputs=[hua_width, hua_height],
-               outputs=[hua_width, hua_height],
-               # queue=False # 尝试禁用队列以提高响应速度
-           )
-           # --- 分辨率事件处理结束 ---
-   
-           #   选择工作流  绑定change事件
-           json_dropdown.change(
-               lambda x: (*fuck(x), check_seed_node(x)), # 使用 * 解包 fuck 返回的元组 (7个元素)，并附加 check_seed_node 的结果
-               inputs=json_dropdown,
-               # 更新 outputs 列表，顺序要严格对应 lambda 返回值的顺序 (8个元素)
-               outputs=[image_accordion, positive_prompt_col, negative_prompt_col, resolution_row, hua_lora_dropdown, hua_checkpoint_dropdown, hua_unet_dropdown, Random_Seed]
-           )
-           # 绑定事件,刷新工作流按钮 (保持不变)
-           refresh_button.click(refresh_json_files, inputs=[], outputs=json_dropdown)
-   
-   
+           """, visible=False) # 初始隐藏，由 check_seed_node 控制
+
+           # --- 添加队列控制按钮 ---
            with gr.Row():
-               run_button = gr.Button("开始跑图")
-       
-       with gr.Column():
-           output_image = gr.Image(
-           type="filepath",
-           label="生成的图像",
-           height=760, # 恢复固定高度
-           width=760,  # 恢复固定宽度
-           # object_fit 参数在此 Gradio 版本不受支持，已移除
-           show_download_button=True,
-           format="png"
-           
-       )    
-           gr.Markdown('我要打十个')
-   
-               
-           # 修改这里，添加 hua_width, hua_height, 以及新的模型下拉列表到 inputs
-           run_button.click(
-               generate_image,
-               inputs=[
-                   input_image,
-                   prompt_positive,
-                   prompt_negative,
-                   json_dropdown,
-                   hua_width,
-                   hua_height,
-                   hua_lora_dropdown,         # 添加 Lora 下拉列表
-                   hua_checkpoint_dropdown,   # 添加 Checkpoint 下拉列表
-                   hua_unet_dropdown          # 添加 UNet 下拉列表
-               ],
-               outputs=output_image
-           )
-   
-           # 初始加载时检查工作流
-           def on_load():
-               json_files = get_json_files()
-               if not json_files:
-                   print("未找到 JSON 文件，隐藏所有动态组件")
-                   # 返回所有组件都不可见的状态 (顺序: image, pos_prompt, neg_prompt, res, lora, ckpt, unet, seed) - 8个元素
-                   return (gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False))
-   
-               default_json = json_files[0]
-               print(f"初始加载，检查默认 JSON: {default_json}")
-               # 调用 fuck 和 check_seed_node 并组合结果
-               fuck_results = fuck(default_json) # fuck 返回一个包含7个更新对象的元组
-               seed_result = check_seed_node(default_json) # check_seed_node 返回一个更新对象
-               # 返回组合后的元组 (8个元素)
-               return (*fuck_results, seed_result) # 解包 fuck 的结果并附加 seed_result
-   
-           # 在 Blocks 上下文中添加加载事件
-           demo.load(
-               on_load,
-               inputs=[],
-               # 更新 outputs 列表，顺序要严格对应 on_load 返回值的顺序 (8个元素)
-               outputs=[image_accordion, positive_prompt_col, negative_prompt_col, resolution_row, hua_lora_dropdown, hua_checkpoint_dropdown, hua_unet_dropdown, Random_Seed]
-           )
+                queue_count = gr.Number(label="队列数量", value=1, minimum=1, step=1, precision=0)
+                with gr.Column(scale=1):
+                    run_button = gr.Button("🚀 开始跑图 (加入队列)", variant="primary")
+                
+                with gr.Column(scale=1):
+                    clear_queue_button = gr.Button("🧹 清除队列")
+                    queue_status_display = gr.Markdown("队列中: 0 | 处理中: 否")
 
-# 启动 Gradio 界面，并创建一个公共链接
-def luanch_gradio(demo):
-    demo.launch(share=True)
 
-#使用多线程启动gradio界面
-gradio_thread = threading.Thread(target=luanch_gradio, args=(demo,))
+
+       with gr.Column(): # 右侧列
+
+
+           with gr.Accordion("预览所有输出图片 (点击加载)", open=False):
+               output_preview_gallery = gr.Gallery(label="输出图片预览", columns=4, height="auto", preview=True, object_fit="contain")
+               load_output_button = gr.Button("加载输出图片")
+
+           with gr.Row():
+               output_gallery = gr.Gallery(label="生成结果 (队列累计)", columns=3, height=600, preview=True, object_fit="contain")
+           with gr.Row():
+               progress_bar = gr.Slider(minimum=0, maximum=1, step=0.01, label="进度", interactive=False, visible=True)
+           with gr.Row():
+               clear_history_button = gr.Button("🗑️ 清除显示历史")
+               gr.Markdown('我要打十个') # 保留这句骚话
+
+           # --- 添加赞助按钮和显示区域 ---
+           with gr.Row(): # 将按钮放在一行，居中效果可能更好
+                gr.Markdown() # 左侧占位
+                sponsor_button = gr.Button("💖 赞助作者")
+                gr.Markdown() # 右侧占位
+           sponsor_display = gr.Markdown(visible=False) # 初始隐藏
+
+    # --- 事件处理 ---
+    resolution_dropdown.change(fn=update_from_preset, inputs=resolution_dropdown, outputs=[resolution_dropdown, hua_width, hua_height, ratio_display])
+    hua_width.change(fn=update_from_inputs, inputs=[hua_width, hua_height], outputs=[resolution_dropdown, ratio_display])
+    hua_height.change(fn=update_from_inputs, inputs=[hua_width, hua_height], outputs=[resolution_dropdown, ratio_display])
+    flip_btn.click(fn=flip_resolution, inputs=[hua_width, hua_height], outputs=[hua_width, hua_height])
+
+    # JSON 下拉菜单改变时，更新所有相关组件的可见性 + 随机种子指示器
+    json_dropdown.change(
+        lambda x: (*fuck(x), check_seed_node(x)), # fuck 返回 10 个, check_seed_node 返回 1 个
+        inputs=json_dropdown,
+        outputs=[ # 必须严格对应 11 个组件
+            image_accordion,
+            prompt_positive,      # Textbox
+            prompt_positive_2,    # Textbox
+            prompt_positive_3,    # Textbox
+            prompt_positive_4,    # Textbox
+            negative_prompt_col,  # Column (包含 Textbox)
+            resolution_row,       # Row (包含 Dropdown, Button, Accordion)
+            hua_lora_dropdown,    # Dropdown
+            hua_checkpoint_dropdown, # Dropdown
+            hua_unet_dropdown,    # Dropdown
+            Random_Seed           # HTML
+        ]
+    )
+
+    refresh_button.click(refresh_json_files, inputs=[], outputs=json_dropdown)
+
+    load_output_button.click(fn=get_output_images, inputs=[], outputs=output_preview_gallery)
+
+    # --- 修改运行按钮的点击事件 ---
+    run_button.click(
+        fn=run_queued_tasks,
+        inputs=[
+            input_image, prompt_positive, prompt_positive_2, prompt_positive_3, prompt_positive_4,
+            prompt_negative, json_dropdown, hua_width, hua_height, hua_lora_dropdown,
+            hua_checkpoint_dropdown, hua_unet_dropdown, queue_count
+        ],
+        outputs=[queue_status_display, output_gallery, progress_bar]
+    )
+
+    # --- 添加新按钮的点击事件 ---
+    clear_queue_button.click(fn=clear_queue, inputs=[], outputs=[queue_status_display])
+    clear_history_button.click(fn=clear_history, inputs=[], outputs=[output_gallery, queue_status_display])
+    sponsor_button.click(fn=show_sponsor_code, inputs=[], outputs=[sponsor_display]) # 绑定赞助按钮事件
+
+    # --- 初始加载 ---
+    def on_load_setup():
+        json_files = get_json_files()
+        updates = []
+        if not json_files:
+            print("未找到 JSON 文件，隐藏所有动态组件")
+            # 返回 11 个 False 更新
+            updates = [gr.update(visible=False)] * 11
+        else:
+            default_json = json_files[0]
+            print(f"初始加载，检查默认 JSON: {default_json}")
+            fuck_results = fuck(default_json) # 10 个更新
+            seed_result = check_seed_node(default_json) # 1 个更新
+            updates = list(fuck_results) + [seed_result] # 组合成 11 个
+
+        # 确保返回 11 个更新对象
+        if len(updates) != 11:
+             print(f"警告: on_load_setup 返回了 {len(updates)} 个更新，需要 11 个。补充默认值。")
+             # 补充或截断以匹配输出数量
+             default_update = gr.update(visible=False) # 或其他合适的默认值
+             updates = (updates + [default_update] * 11)[:11]
+
+        return tuple(updates) # 返回元组
+
+    demo.load(
+        on_load_setup,
+        inputs=[],
+        outputs=[ # 必须严格对应 11 个组件
+            image_accordion, prompt_positive, prompt_positive_2, prompt_positive_3, prompt_positive_4,
+            negative_prompt_col, resolution_row, hua_lora_dropdown, hua_checkpoint_dropdown,
+            hua_unet_dropdown, Random_Seed
+        ]
+    )
+
+# --- Gradio 启动代码 ---
+def luanch_gradio(demo_instance): # 接收 demo 实例
+    try:
+        # 尝试查找可用端口，从 7860 开始
+        port = 7860
+        while True:
+            try:
+                # share=True 会尝试创建公网链接，可能需要登录 huggingface
+                # server_name="0.0.0.0" 允许局域网访问
+                demo_instance.launch(server_name="0.0.0.0", server_port=port, share=False, prevent_thread_lock=True)
+                print(f"Gradio 界面已在 http://127.0.0.1:{port} (或局域网 IP) 启动")
+                # 启动成功后打开本地链接
+                webbrowser.open(f"http://127.0.0.1:{port}/")
+                break # 成功启动，退出循环
+            except OSError as e:
+                if "address already in use" in str(e).lower():
+                    print(f"端口 {port} 已被占用，尝试下一个端口...")
+                    port += 1
+                    if port > 7870: # 限制尝试范围
+                        print("无法找到可用端口 (7860-7870)。")
+                        break
+                else:
+                    print(f"启动 Gradio 时发生未知 OS 错误: {e}")
+                    break # 其他 OS 错误，退出
+            except Exception as e:
+                 print(f"启动 Gradio 时发生未知错误: {e}")
+                 break # 其他错误，退出
+    except Exception as e:
+        print(f"执行 luanch_gradio 时出错: {e}")
+
+
+# 使用守护线程，这样主程序退出时 Gradio 线程也会退出
+gradio_thread = threading.Thread(target=luanch_gradio, args=(demo,), daemon=True)
 gradio_thread.start()
 
-# # 等待 Gradio 界面启动
-# gradio_thread.join(timeout=10)  # 等待 Gradio 启动，最多等待 10 秒
-
-# 打开浏览器并访问 Gradio 的默认本地链接
-gradio_url = "http://127.0.0.1:7860/"
-print(f"Gradio 默认本地链接: {gradio_url}")
-webbrowser.open(gradio_url)
+# 主线程可以继续执行其他任务或等待，这里简单地保持运行
+# 注意：如果这是插件的一部分，主线程可能是 ComfyUI 本身，不需要无限循环
+# print("主线程继续运行... 按 Ctrl+C 退出。")
+# try:
+#     while True:
+#         time.sleep(1)
+# except KeyboardInterrupt:
+#     print("收到退出信号，正在关闭...")
+#     # demo.close() # 关闭 Gradio 服务 (如果需要手动关闭)
