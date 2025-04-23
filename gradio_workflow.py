@@ -685,7 +685,7 @@ with gr.Blocks() as demo:
                input_image = gr.Image(type="pil", label="上传图像", height=156, width=156)
 
            with gr.Row():
-               with gr.Column() as positive_prompt_col:
+               with gr.Accordion("折叠正向提示词", open=True):
                    prompt_positive = gr.Textbox(label="正向提示文本 1", elem_id="prompt_positive_1")
                    prompt_positive_2 = gr.Textbox(label="正向提示文本 2", elem_id="prompt_positive_2")
                    prompt_positive_3 = gr.Textbox(label="正向提示文本 3", elem_id="prompt_positive_3")
