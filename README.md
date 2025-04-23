@@ -6,6 +6,9 @@
 <span style="color:blue;">**`ComfyUI_hua_boy` 是一个为 ComfyUI工作流变成webui的项目**</span>
 
 ## 计划的功能
+- **实时日志预览**: 编写中............
+- **队列功能**:已完成编写
+- **多图显示，预览所有图片**:已完成编写
 - **自动保存api json流**: 已编写完成
 - **gradio前端动态显示图像输入口**：已编写完成
 - **模型选择**：已经编写完成
@@ -16,11 +19,11 @@
 - **增强的界面**：已经优化
 
 ## 安装
-
+如果comfyui加载时自动安装模块没能成功可用以下方法手动安装
 ### 导航到custom_nodes
 1. **克隆仓库**：
    ```bash
-   git clone https://github.com/yourusername/ComfyUI_hua_boy.git
+   git clone https://github.com/kungful/ComfyUI_to_webui.git
    cd ComfyUI_to_webui
    ..\..\..\python_embeded\python.exe -m pip install -r requirements.txt
 ## 使用方法
