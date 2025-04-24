@@ -3,3 +3,4 @@ Pillow
 python-barcode
 numpy
 websocket
+requests
