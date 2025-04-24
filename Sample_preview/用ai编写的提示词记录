@@ -82,3 +82,78 @@ ok现在血量进度条会被图片覆盖还有，
 在开始跑图旁边增加手动队列数量数值，大于1那么就积累图像到生成结果，生成结束后，再次点击就自动清空图片历史大于1再次重新积累。
 ok，现在队列数量大于1并不会触发图片累计在生成结果，当队列数量等于1进行跑图时取消累计图像
 应该是队列数量大于一就累计之前的图，比如设置了2个队列，那么之前的一个队列的图就累计，设置了3就累计之前的两个队列的图，设置等于一的时候不累计之前的图。以此类推
+
+我要实现像tail -f -n 1000 /tmp/sd.log一样实时滚动读取最新的日志，帮我gradio_workflow.py
+中gradio前端中增加一个实时读取日志的功能，请使用相对路径读取，我的日志在G:\ComfyUI_windows_portable\ComfyUI\user\comfyui.log
+当前脚本在G:\ComfyUI_windows_portable\ComfyUI\custom_nodes\ComfyUI_to_webui\gradio_workflow.py结构图如下：
+G:\ComfyUI_windows_portable\
+├── ComfyUI\
+│   ├── user\
+│   │   └── comfyui.log                # 您的日志文件
+│   └── custom_nodes\
+│       └── ComfyUI_to_webui\
+│           └── gradio_workflow.py     # 当前脚本文件
+如果every 失败，可以模拟人不间断点击手动刷新按钮实现自动更新日志啊，笨蛋
+
+
+
+
+使用相对路径，我的日志在G:\ComfyUI_windows_portable\ComfyUI\user\comfyui.log
+当前脚本在G:\ComfyUI_windows_portable\ComfyUI\custom_nodes\ComfyUI_to_webui\gradio_workflow.py结构图如下：
+G:\ComfyUI_windows_portable\
+├── ComfyUI\
+│   ├── user\
+│   │   └── comfyui.log                # 您的日志文件
+│   └── custom_nodes\
+│       └── ComfyUI_to_webui\
+│           └── gradio_workflow.py 可以利用类似获取图片的方式 while time.time() - start_time < wait_timeout:
+        if os.path.exists(temp_file_path):  不断的读取日志文件，传递到前端显示实时轮询滚动最新日志
+
+The every parameter is no longer supported in event listeners
+Previously, if you wanted to run an event “every” X seconds after a certain trigger, you could set every= in the event listener. This is no longer supported — if you see the following error: EventListener._setup.<locals>.event_trigger() got an unexpected keyword argument 'every' , you’ll need to do the following instead:
+
+create a gr.Timer component, and
+use the .tick() method to trigger the event.
+E.g., replace something like this:
+
+with gr.Blocks() as demo:
+    a = gr.Textbox()
+    b = gr.Textbox()
+    btn = gr.Button("Start")
+    btn.click(lambda x:x, a, b, every=1)
+with:
+
+with gr.Blocks() as demo:
+    a = gr.Textbox()
+    b = gr.Textbox()
+    btn = gr.Button("Start")
+    t = gr.Timer(1, active=False)
+    t.tick(lambda x:x, a, b)
+    btn.click(lambda: gr.Timer(active=True), None, t)
+This makes it easy to configure the timer as well to change its frequency or stop the event, e.g.
+
+   ...
+   stop_btn = gr.Button("Stop")
+	 stop_btn.click(lambda: gr.Timer(active=False), None, t) # deactivates timer
+   fast_btn = gr.Button("Fast")
+	 fast_btn.click(lambda: gr.Timer(0.1), None, t) # makes timer tick every 0.1s
+
+
+终于完成了实时轮询日志，gradio官方移除了every,所有ai都无法解决，人工获取示例利用gr.Timer 组件完成了，国产包括chatgpt都无法解决，最终使用官方示例丢给gemini编写完成
+爽爆了
+
+
+gradio_workflow.py在实时comfyui日志窗口内增加一个侧边滑轨条，还有一个滚动条，滚动条可以自动滚动到最底部，
+目前没有自动滚动到底部查看最新日志的功能，最好点击展开日志后自动滚动到底部查看最新日志，
+
+gradio_workflow.py现在实时日志窗口是上拉到顶部的，反了，请纠正，还有第一次展开的时候下拉框非常的长，开始监控日志才正常的长度请优化代码
+
+gradio_workflow.py现在实时日志窗口不停闪烁，我想让实时comfyui日志点击展开的时候自动默认开启监控日志
+
+就算设置了刷新log_timer = gr.Timer(2, active=True) # 每 2 秒触发一次，初始激活，日志框内也一样闪烁是啥原因
+
+gradio_workflow.py让开始跑图按钮点击那一刹那自动实时日志窗口就自动展开，开始跑图按钮直接用事件去触发展开，能实现吗。
+
+gradio_workflow.py删除 进度组件           with gr.Row():
+               progress_bar = gr.Slider(minimum=0, maximum=1, step=0.01, label="进度", interactive=False, visible=True) 以及相关事件代码也要移除
+终极解决，让日志默认展开
