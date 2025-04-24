@@ -821,8 +821,8 @@ with gr.Blocks() as demo:
            with gr.Accordion("实时 ComfyUI 日志 (轮询)", open=True, elem_id="comfyui_log_accordion"):
                log_display = gr.HTML(
                    value="""
-                   <div id='log-container' style='height:250px; border:1px solid #ccc; overflow-y:auto; padding:10px; background:#f8f8f8;'>
-                       <pre id='log-content' style='margin:0; white-space:pre-wrap; font-size:12px; line-height:1.2;'>日志内容将在此处更新...</pre>
+                   <div id='log-container' style='height:250px; border:1px solid #00ff2f; overflow-y:auto; padding:10px; background:#000;'>
+                       <pre id='log-content' style='margin:0; white-space:pre-wrap; font-size:12px; line-height:1.2; color:#00ff2f; font-family:monospace;'>日志内容将在此处更新...</pre>
                    </div>
                    <script>
                        // Function to scroll the log container
@@ -909,8 +909,8 @@ with gr.Blocks() as demo:
     def update_log_display_html():
         log_content = read_new_log_entries() # 最新的在顶部
         return f"""
-        <div id='log-container' style='max-height:250px; border:1px solid #ccc; overflow-y:auto; padding:10px; background:#f8f8f8;'>
-            <pre id='log-content' style='margin:0; white-space:pre-wrap;'>{log_content}</pre>
+        <div id='log-container' style='max-height:250px; border:1px solid #ccc; overflow-y:auto; padding:10px; background:#000;'>
+            <pre id='log-content' style='margin:0; white-space:pre-wrap;color:#00ff00'>{log_content}</pre>
         </div>
         """ # 确保没有 script 块
 
@@ -923,8 +923,8 @@ with gr.Blocks() as demo:
         return (
             gr.Timer(active=True),
             f"""
-            <div id='log-container' style='max-height:250px; border:1px solid #ccc; overflow-y:auto; padding:10px; background:#f8f8f8;'>
-                <pre id='log-content' style='margin:0; white-space:pre-wrap;'>{initial_log_content}</pre>
+            <div id='log-container' style='max-height:250px; border:1px solid #ccc; overflow-y:auto; padding:10px; background:#000;'>
+                <pre id='log-content' style='margin:0; white-space:pre-wrap;color:#00ff00'>{initial_log_content}</pre>
             </div>
             """ # 确保没有 script 块
         )
@@ -965,8 +965,8 @@ with gr.Blocks() as demo:
 
         # 返回所有更新，包括日志显示框的初始内容 (仅 HTML)
         initial_log_html = f"""
-        <div id='log-container' style='max-height:250px; border:1px solid #ccc; overflow-y:auto; padding:10px; background:#f8f8f8;'>
-            <pre id='log-content' style='margin:0; white-space:pre-wrap;'>{initial_log_content}</pre>
+        <div id='log-container' style='max-height:250px; border:1px solid #ccc; overflow-y:auto; padding:10px; background:#000;'>
+            <pre id='log-content' style='margin:0; white-space:pre-wrap;color:#00ff00'>{initial_log_content}</pre>
         </div>
         """ # 确保没有 script 块
         return tuple(updates) + (initial_log_html,) # 11 + 1 = 12 个输出
