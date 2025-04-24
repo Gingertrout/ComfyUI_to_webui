@@ -157,3 +157,17 @@ gradio_workflow.py让开始跑图按钮点击那一刹那自动实时日志窗�
 gradio_workflow.py删除 进度组件           with gr.Row():
                progress_bar = gr.Slider(minimum=0, maximum=1, step=0.01, label="进度", interactive=False, visible=True) 以及相关事件代码也要移除
 终极解决，让日志默认展开
+
+
+gradio_workflow.py现在日志窗口，点击开始跑图的时候会被这些:处理任务 (队列剩余 1) - 0.0% 出现在生成图像窗口一起冻住，看不到日志进度，完成跑图才正常滚动刷新日志
+
+gradio_workflow.py清除所有日志显示的代码包括事件和函数。
+
+请将轮询日志示例.py的日志方式替换到gradio_workflow.py中，不要读取本地的log了，我要api更屌实时读取日志文件，传递到前端显示实时轮询滚动最新日志，
+
+请将轮询日志示例.py的日志完美融入到gradio_workflow.py中
+
+gradio_workflow.py现在还不能像请将轮询日志示例.py那样自动滚动到底部查看最新日志，而且它很完美，请你参考继续优化代码，
+没能解决日志实时预览，是不是就像轮询日志示例.py那样就能自动滚动到底部查看最新日志
+
+gradio_workflow.py中增加一个刷新模型的功能，要和刷新工作流按钮的函数方法检索机制类似
