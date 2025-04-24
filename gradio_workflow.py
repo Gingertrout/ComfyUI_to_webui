@@ -12,6 +12,11 @@ import numpy as np
 import torch
 import threading
 from threading import Lock, Event # 导入 Lock 和 Event
+# --- 日志轮询导入 ---
+import requests # requests 可能已导入，确认一下
+import json # json 可能已导入，确认一下
+import time # time 可能已导入，确认一下
+# --- 日志轮询导入结束 ---
 import folder_paths
 import node_helpers
 from pathlib import Path
@@ -32,83 +37,43 @@ queue_lock = Lock()
 accumulated_results = []
 results_lock = Lock()
 processing_event = Event() # False: 空闲, True: 正在处理
-
-# --- 日志读取相关全局变量 ---
-# 构建日志文件的绝对路径
-# __file__ 是当前脚本 (gradio_workflow.py) 的路径
-# os.path.dirname(__file__) 获取脚本所在目录 (ComfyUI_to_webui)
-# '..' 向上移动一级到 custom_nodes
-# '..' 再次向上移动一级到 ComfyUI
-# 'user' 进入 user 目录
-# 'comfyui.log' 指定日志文件名
-LOG_FILE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'user', 'comfyui.log'))
-print(f"日志文件路径设置为: {LOG_FILE_PATH}") # 打印确认路径
-MAX_LOG_LINES = 200 # 显示最后 N 行日志
-log_lines_deque = deque(maxlen=MAX_LOG_LINES)
-last_log_pos = 0 # 记录上次读取的文件位置
-log_timer_active = False # 跟踪日志定时器的状态
 # --- 全局状态变量结束 ---
 
-# --- 日志读取函数 ---
-def read_new_log_entries():
-    global log_lines_deque, last_log_pos
+# --- 日志轮询全局变量和函数 ---
+COMFYUI_LOG_URL = "http://127.0.0.1:8188/internal/logs/raw"
+all_logs_text = ""
+
+def fetch_and_format_logs():
+    global all_logs_text
+
     try:
-        # 检查文件是否存在，如果不存在则清空 deque 并重置位置
-        if not os.path.exists(LOG_FILE_PATH):
-            if last_log_pos > 0 or len(log_lines_deque) > 0: # 仅在之前有内容时清除
-                log_lines_deque.clear()
-                last_log_pos = 0
-                print("日志文件不存在，已清空显示。")
-            return "等待日志文件创建..."
+        response = requests.get(COMFYUI_LOG_URL, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        log_entries = data.get("entries", [])
 
-        # 使用二进制模式打开以精确控制位置
-        with open(LOG_FILE_PATH, 'rb') as f:
-            # 移动到文件末尾获取当前大小
-            f.seek(0, io.SEEK_END)
-            current_size = f.tell()
+        # 移除多余空行并合并日志内容
+        formatted_logs = "\n".join(filter(None, [entry.get('m', '').strip() for entry in log_entries]))
+        all_logs_text = formatted_logs
 
-            # 检查文件是否变小（可能被截断或替换）
-            if current_size < last_log_pos:
-                print("日志文件似乎已重置，从头开始读取。")
-                log_lines_deque.clear()
-                last_log_pos = 0
+        return all_logs_text
 
-            # 移动到上次读取的位置
-            f.seek(last_log_pos)
-            # 读取新内容
-            new_bytes = f.read()
-            # 更新上次读取的位置
-            last_log_pos = f.tell()
-
-        if new_bytes:
-            # 解码新内容并按行分割
-            # 使用 errors='ignore' 处理可能的解码错误
-            new_content = new_bytes.decode('utf-8', errors='ignore')
-            # 使用 splitlines() 而不是 split('\n') 来正确处理不同的换行符
-            new_lines = new_content.splitlines(keepends=True) # 保留换行符以便正确显示
-            if new_lines:
-                 # 如果第一行不完整（因为上次读取可能在行中间结束），尝试与 deque 的最后一行合并
-                 # 检查 deque 是否为空，以及最后一行是否以换行符结束
-                 if log_lines_deque and not log_lines_deque[-1].endswith(('\n', '\r')):
-                     log_lines_deque[-1] += new_lines[0]
-                     new_lines = new_lines[1:] # 处理剩余的新行
-
-                 log_lines_deque.extend(new_lines) # 添加新行，deque 会自动处理长度限制
-
-        # 返回 deque 中的所有行，反转顺序，最新的在顶部
-        return "".join(reversed(log_lines_deque))
-
-    except FileNotFoundError:
-        # 文件可能在检查后、打开前被删除
-        if last_log_pos > 0 or len(log_lines_deque) > 0:
-            log_lines_deque.clear()
-            last_log_pos = 0
-            print("日志文件读取时未找到，已清空显示。")
-        return f"错误：日志文件未找到于 {LOG_FILE_PATH}"
+    except requests.exceptions.RequestException as e:
+        error_message = f"无法连接到 ComfyUI 服务器: {e}"
+        return all_logs_text + "\n" + error_message if all_logs_text else error_message
+    except json.JSONDecodeError:
+        error_message = "无法解析服务器响应 (非 JSON)"
+        return all_logs_text + "\n" + error_message if all_logs_text else error_message
     except Exception as e:
-        print(f"读取日志文件时出错: {e}") # 打印错误到控制台
-        # 返回当前 deque 内容加上错误信息
-        return "".join(log_lines_deque) + f"\n\n--- 读取日志时出错: {e} ---"
+        error_message = f"发生未知错误: {e}"
+        return all_logs_text + "\n" + error_message if all_logs_text else error_message
+
+# --- 日志轮询全局变量和函数结束 ---
+
+# --- 日志记录函数 ---
+def log_message(message):
+    timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]  # 精确到毫秒
+    print(f"{timestamp} - {message}")
 
 def find_key_by_name(prompt, name):
     for key, value in prompt.items():
@@ -559,89 +524,89 @@ def run_queued_tasks(inputimage1, prompt_text_positive, prompt_text_positive_2, 
             accumulated_results = []
             current_batch_results = []  # 重置当前批次结果
     task_params = (inputimage1, prompt_text_positive, prompt_text_positive_2, prompt_text_positive_3, prompt_text_positive_4, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_checkpoint, hua_unet)
-    print(f"[QUEUE_DEBUG] 接收到新任务请求。当前队列长度 (加锁前): {len(task_queue)}")
+    log_message(f"[QUEUE_DEBUG] 接收到新任务请求。当前队列长度 (加锁前): {len(task_queue)}")
     with queue_lock:
         for _ in range(max(1, int(queue_count))):  # 确保至少添加1个任务
             task_queue.append(task_params)
         current_queue_size = len(task_queue)
-        print(f"[QUEUE_DEBUG] 已添加 {queue_count} 个任务到队列。当前队列长度 (加锁后): {current_queue_size}")
-    print(f"[QUEUE_DEBUG] 任务添加完成，释放锁。")
+        log_message(f"[QUEUE_DEBUG] 已添加 {queue_count} 个任务到队列。当前队列长度 (加锁后): {current_queue_size}")
+    log_message(f"[QUEUE_DEBUG] 任务添加完成，释放锁。")
 
     # 初始状态更新：显示当前累积结果和队列信息
     with results_lock:
         # 使用副本以防在 yield 时被修改
         current_results_copy = accumulated_results[:]
-    print(f"[QUEUE_DEBUG] 准备 yield 初始状态更新。队列: {current_queue_size}, 处理中: {processing_event.is_set()}")
+    log_message(f"[QUEUE_DEBUG] 准备 yield 初始状态更新。队列: {current_queue_size}, 处理中: {processing_event.is_set()}")
     yield {
         queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: {'是' if processing_event.is_set() else '否'}"),
         output_gallery: gr.update(value=current_results_copy)
     }
-    print(f"[QUEUE_DEBUG] 已 yield 初始状态更新。")
+    log_message(f"[QUEUE_DEBUG] 已 yield 初始状态更新。")
 
     # 2. 检查是否已有进程在处理队列
-    print(f"[QUEUE_DEBUG] 检查处理状态: processing_event.is_set() = {processing_event.is_set()}")
+    log_message(f"[QUEUE_DEBUG] 检查处理状态: processing_event.is_set() = {processing_event.is_set()}")
     if processing_event.is_set():
-        print("[QUEUE_DEBUG] 已有任务在处理队列，新任务已排队。函数返回。")
+        log_message("[QUEUE_DEBUG] 已有任务在处理队列，新任务已排队。函数返回。")
         # 不需要 return，让 yield 完成更新即可
         return
 
     # 3. 开始处理队列 (如果没有其他进程在处理)
-    print(f"[QUEUE_DEBUG] 没有任务在处理，准备设置 processing_event 为 True。")
+    log_message(f"[QUEUE_DEBUG] 没有任务在处理，准备设置 processing_event 为 True。")
     processing_event.set() # 标记为正在处理
-    print(f"[QUEUE_DEBUG] processing_event 已设置为 True。开始处理循环。")
+    log_message(f"[QUEUE_DEBUG] processing_event 已设置为 True。开始处理循环。")
 
     try:
-        print("[QUEUE_DEBUG] Entering main processing loop (while True).")
+        log_message("[QUEUE_DEBUG] Entering main processing loop (while True).")
         while True:
             task_to_run = None
             current_queue_size = 0 # Initialize
-            print("[QUEUE_DEBUG] Checking queue for tasks (acquiring lock)...")
+            log_message("[QUEUE_DEBUG] Checking queue for tasks (acquiring lock)...")
             with queue_lock:
                 if task_queue:
                     task_to_run = task_queue.popleft()
                     current_queue_size = len(task_queue)
-                    print(f"[QUEUE_DEBUG] Task popped from queue. Remaining: {current_queue_size}")
+                    log_message(f"[QUEUE_DEBUG] Task popped from queue. Remaining: {current_queue_size}")
                 else:
-                    print("[QUEUE_DEBUG] Queue is empty. Breaking loop.")
+                    log_message("[QUEUE_DEBUG] Queue is empty. Breaking loop.")
                     break # 队列空了
-            print("[QUEUE_DEBUG] Queue lock released.")
+            log_message("[QUEUE_DEBUG] Queue lock released.")
 
             # 如果队列空了，上面的 break 会执行，不会到这里
             if not task_to_run: # Double check in case break didn't happen? Should not be needed.
-                 print("[QUEUE_DEBUG] Warning: No task found after lock release, but loop didn't break?")
+                 log_message("[QUEUE_DEBUG] Warning: No task found after lock release, but loop didn't break?")
                  continue # Skip to next iteration
 
             # 更新状态：显示正在处理和队列大小
             with results_lock: current_results_copy = accumulated_results[:]
-            print(f"[QUEUE_DEBUG] Preparing to yield 'Processing' status. Queue: {current_queue_size}")
+            log_message(f"[QUEUE_DEBUG] Preparing to yield 'Processing' status. Queue: {current_queue_size}")
             yield {
                 queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: 是"),
                 output_gallery: gr.update(value=current_results_copy)
             }
-            print(f"[QUEUE_DEBUG] Yielded 'Processing' status.")
+            log_message(f"[QUEUE_DEBUG] Yielded 'Processing' status.")
 
             if task_to_run: # This check is now redundant due to the earlier check, but keep for clarity
-                print(f"[QUEUE_DEBUG] Starting execution for popped task. Remaining queue: {current_queue_size}")
+                log_message(f"[QUEUE_DEBUG] Starting execution for popped task. Remaining queue: {current_queue_size}")
                 # --- 进度条开始 ---
                 progress(0, desc=f"处理任务 (队列剩余 {current_queue_size})") # 取消注释并设置描述
-                print(f"[QUEUE_DEBUG] Progress set to 0. Desc: Processing task (Queue remaining {current_queue_size})")
+                log_message(f"[QUEUE_DEBUG] Progress set to 0. Desc: Processing task (Queue remaining {current_queue_size})")
                 # --- 进度条开始结束 ---
-                print(f"[QUEUE_DEBUG] Calling generate_image...")
+                log_message(f"[QUEUE_DEBUG] Calling generate_image...")
                 new_image_paths = None # Initialize
                 try:
                     new_image_paths = generate_image(*task_to_run) # 执行任务
-                    print(f"[QUEUE_DEBUG] generate_image returned. Result: {'Success (paths received)' if new_image_paths else 'Failure (None received)'}")
+                    log_message(f"[QUEUE_DEBUG] generate_image returned. Result: {'Success (paths received)' if new_image_paths else 'Failure (None received)'}")
                 except Exception as e:
-                    print(f"[QUEUE_DEBUG] Exception during generate_image call: {e}")
+                    log_message(f"[QUEUE_DEBUG] Exception during generate_image call: {e}")
                     # Consider how to handle this - maybe yield a failure status?
 
                 # --- 进度条结束 ---
                 progress(1) # 无论成功失败，都标记完成
-                print(f"[QUEUE_DEBUG] Progress set to 1.")
+                log_message(f"[QUEUE_DEBUG] Progress set to 1.")
                 # --- 进度条结束结束 ---
 
                 if new_image_paths:
-                    print(f"[QUEUE_DEBUG] Task successful, got {len(new_image_paths)} new image paths.")
+                    log_message(f"[QUEUE_DEBUG] Task successful, got {len(new_image_paths)} new image paths.")
                     with results_lock:
                         if queue_count == 1:
                             # 单任务模式：只显示当前结果，不累积
@@ -652,38 +617,38 @@ def run_queued_tasks(inputimage1, prompt_text_positive, prompt_text_positive_2, 
                             accumulated_results = current_batch_results[:]
 
                         current_results_copy = accumulated_results[:] # 获取更新后的副本
-                        print(f"[QUEUE_DEBUG] Updated accumulated_results (lock acquired). Queue count: {queue_count}. Current batch: {len(current_batch_results)}. Total: {len(accumulated_results)}")
-                    print(f"[QUEUE_DEBUG] Preparing to yield success update. Queue: {current_queue_size}")
+                        log_message(f"[QUEUE_DEBUG] Updated accumulated_results (lock acquired). Queue count: {queue_count}. Current batch: {len(current_batch_results)}. Total: {len(accumulated_results)}")
+                    log_message(f"[QUEUE_DEBUG] Preparing to yield success update. Queue: {current_queue_size}")
                     # 更新 UI
                     yield {
                          queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: 是 (完成)"),
                          output_gallery: gr.update(value=current_results_copy, visible=True)  # 强制更新并显示
                     }
-                    print(f"[QUEUE_DEBUG] Yielded success update.")
+                    log_message(f"[QUEUE_DEBUG] Yielded success update.")
                 else:
-                    print("[QUEUE_DEBUG] Task failed or returned no images.")
+                    log_message("[QUEUE_DEBUG] Task failed or returned no images.")
                     with results_lock: current_results_copy = accumulated_results[:] # Get current results even on failure
-                    print(f"[QUEUE_DEBUG] Preparing to yield failure update. Queue: {current_queue_size}")
+                    log_message(f"[QUEUE_DEBUG] Preparing to yield failure update. Queue: {current_queue_size}")
                     yield {
                          queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: 是 (失败)"),
                          output_gallery: gr.update(value=current_results_copy), # Show existing results
                     }
-                    print(f"[QUEUE_DEBUG] Yielded failure update.")
+                    log_message(f"[QUEUE_DEBUG] Yielded failure update.")
             # else: # 理论上不应发生, 因为前面有检查
-            #      print("[QUEUE_DEBUG] Warning: task_to_run was unexpectedly None here.")
+            #      log_message("[QUEUE_DEBUG] Warning: task_to_run was unexpectedly None here.")
 
     finally:
-        print(f"[QUEUE_DEBUG] Entering finally block. Clearing processing_event (was {processing_event.is_set()}).")
+        log_message(f"[QUEUE_DEBUG] Entering finally block. Clearing processing_event (was {processing_event.is_set()}).")
         processing_event.clear() # 清除处理标志
-        print(f"[QUEUE_DEBUG] processing_event cleared (is now {processing_event.is_set()}).")
+        log_message(f"[QUEUE_DEBUG] processing_event cleared (is now {processing_event.is_set()}).")
         with queue_lock: current_queue_size = len(task_queue)
         with results_lock: final_results = accumulated_results[:]
-        print(f"[QUEUE_DEBUG] Preparing to yield final status update. Queue: {current_queue_size}, Processing: No")
+        log_message(f"[QUEUE_DEBUG] Preparing to yield final status update. Queue: {current_queue_size}, Processing: No")
         yield {
             queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: 否"),
             output_gallery: gr.update(value=final_results)
         }
-        print("[QUEUE_DEBUG] Yielded final status update. Exiting run_queued_tasks.")
+        log_message("[QUEUE_DEBUG] Yielded final status update. Exiting run_queued_tasks.")
 
 # --- 赞助码处理函数 ---
 def show_sponsor_code():
@@ -731,14 +696,14 @@ def clear_queue():
     with queue_lock:
         task_queue.clear()
         current_queue_size = 0
-    print("任务队列已清除。")
+    log_message("任务队列已清除。")
     return gr.update(value=f"队列中: {current_queue_size} | 处理中: {'是' if processing_event.is_set() else '否'}")
 
 def clear_history():
     global accumulated_results
     with results_lock:
         accumulated_results.clear()
-    print("图像历史已清除。")
+    log_message("图像历史已清除。")
     with queue_lock: current_queue_size = len(task_queue)
     return {
         output_gallery: gr.update(value=[]),
@@ -752,9 +717,18 @@ with gr.Blocks() as demo:
 
     with gr.Row():
        with gr.Column():  # 左侧列
-           with gr.Accordion("预览所有输出图片 (点击加载)", open=False):
-               output_preview_gallery = gr.Gallery(label="输出图片预览", columns=4, height="auto", preview=True, object_fit="contain")
-               load_output_button = gr.Button("加载输出图片")
+           # --- 添加实时日志显示区域 ---
+           with gr.Accordion("实时日志 (ComfyUI)", open=True):
+               log_display = gr.Textbox(
+                   label="日志输出",
+                   lines=20,
+                   max_lines=20,
+                   autoscroll=True,
+                   interactive=False,
+                   show_copy_button=True,
+               )
+
+
                
            image_accordion = gr.Accordion("上传图像 (折叠,有gradio传入图像节点才会显示上传)", visible=True, open=True)
            with image_accordion:
@@ -766,8 +740,8 @@ with gr.Blocks() as demo:
                    prompt_positive_2 = gr.Textbox(label="正向提示文本 2", elem_id="prompt_positive_2")
                    prompt_positive_3 = gr.Textbox(label="正向提示文本 3", elem_id="prompt_positive_3")
                    prompt_positive_4 = gr.Textbox(label="正向提示文本 4", elem_id="prompt_positive_4")
-               with gr.Column() as negative_prompt_col:
-                   prompt_negative = gr.Textbox(label="负向提示文本", elem_id="prompt_negative")
+           with gr.Column() as negative_prompt_col:
+               prompt_negative = gr.Textbox(label="负向提示文本", elem_id="prompt_negative")
 
            with gr.Row() as resolution_row:
                with gr.Column(scale=1):
@@ -792,70 +766,51 @@ with gr.Blocks() as demo:
                    hua_checkpoint_dropdown = gr.Dropdown(choices=checkpoint_list, label="选择 Checkpoint 模型", value="None", elem_id="hua_checkpoint_dropdown")
                with gr.Column(scale=1):
                    hua_unet_dropdown = gr.Dropdown(choices=unet_list, label="选择 UNet 模型", value="None", elem_id="hua_unet_dropdown")
+               with gr.Column(scale=1):
+                   refresh_model_button = gr.Button("🔄 刷新模型")
 
-           Random_Seed = gr.HTML("""
-           <div style='text-align: center; margin-bottom: 5px;'>
-               <h2 style="font-size: 12px; margin: 0; color: #00ff00; font-style: italic;">
-                   已添加gradio随机种节点
-               </h2>
-           </div>
-           """, visible=False) # 初始隐藏，由 check_seed_node 控制
 
-           # --- 添加队列控制按钮 ---
-           with gr.Row():
-                queue_count = gr.Number(label="队列数量", value=1, minimum=1, step=1, precision=0)
-                with gr.Column(scale=1):
-                    run_button = gr.Button("🚀 开始跑图 (加入队列)", variant="primary")
 
-                with gr.Column(scale=1):
-                    clear_queue_button = gr.Button("🧹 清除队列")
-                    queue_status_display = gr.Markdown("队列中: 0 | 处理中: 否")
 
 
 
        with gr.Column(): # 右侧列
 
+           with gr.Accordion("预览所有输出图片 (点击加载)", open=False):
+               output_preview_gallery = gr.Gallery(label="输出图片预览", columns=4, height="auto", preview=True, object_fit="contain")
+               load_output_button = gr.Button("加载输出图片")
+               
            with gr.Row():
                output_gallery = gr.Gallery(label="生成结果 (队列累计)", columns=3, height=600, preview=True, object_fit="contain")
-                       # --- 添加实时日志显示区域 ---
-           with gr.Accordion("实时 ComfyUI 日志 (轮询)", open=True, elem_id="comfyui_log_accordion"):
-               log_display = gr.HTML(
-                   value="""
-                   <div id='log-container' style='height:250px; border:1px solid #00ff2f; overflow-y:auto; padding:10px; background:#000;'>
-                       <pre id='log-content' style='margin:0; white-space:pre-wrap; font-size:12px; line-height:1.2; color:#00ff2f; font-family:monospace;'>日志内容将在此处更新...</pre>
-                   </div>
-                   <script>
-                       // Function to scroll the log container
-                       function scrollLogToEnd() {
-                           const container = document.querySelector('#comfyui_log_display #log-container');
-                           if (container) {
-                               setTimeout(() => {
-                                   container.scrollTop = container.scrollHeight;
-                               }, 50); // Delay to allow rendering
-                           }
-                       }
-                       // Initialize with scroll to bottom
-                       scrollLogToEnd();
-                   </script>
-                   """,
-                   elem_id="comfyui_log_display" # Give the HTML component an ID
-               )
-               with gr.Row():
-                   start_log_button = gr.Button("开始监控日志")
-                   stop_log_button = gr.Button("停止监控日志")
-               # Timer 定义在 Blocks 内部，初始 inactive
-               log_timer = gr.Timer(1, active=True) # 每 1 秒触发一次，初始激活
+           # --- 添加队列控制按钮 ---
+           with gr.Row():
+                run_button = gr.Button("🚀 开始跑图 (加入队列)", variant="primary")
+                queue_count = gr.Number(label="队列数量", value=1, minimum=1, step=1, precision=0)
+ 
 
+                with gr.Column(scale=1):
+                    clear_queue_button = gr.Button("🧹 清除队列")
+                    queue_status_display = gr.Markdown("队列中: 0 | 处理中: 否")
+                    
            with gr.Row():
                clear_history_button = gr.Button("🗑️ 清除显示历史")
-               gr.Markdown('我要打十个') # 保留这句骚话
+                # --- 添加赞助按钮和显示区域 ---
+               with gr.Row(): # 将按钮放在一行，居中效果可能更好
+                    gr.Markdown() # 左侧占位
+                    sponsor_button = gr.Button("💖 赞助作者")
+                    gr.Markdown() # 右侧占位
+               sponsor_display = gr.Markdown(visible=False) # 初始隐藏
+              
+               Random_Seed = gr.HTML("""
+               <div style='text-align: center; margin-bottom: 5px;'>
+                   <h2 style="font-size: 12px; margin: 0; color: #00ff00; font-style: italic;">
+                       已添加gradio随机种节点
+                   </h2>
+               </div>
+               """, visible=False) # 初始隐藏，由 check_seed_node 控制
+           gr.Markdown('我要打十个') # 保留这句骚话
 
-           # --- 添加赞助按钮和显示区域 ---
-           with gr.Row(): # 将按钮放在一行，居中效果可能更好
-                gr.Markdown() # 左侧占位
-                sponsor_button = gr.Button("💖 赞助作者")
-                gr.Markdown() # 右侧占位
-           sponsor_display = gr.Markdown(visible=False) # 初始隐藏
+
 
 
 
@@ -904,39 +859,15 @@ with gr.Blocks() as demo:
     clear_history_button.click(fn=clear_history, inputs=[], outputs=[output_gallery, queue_status_display])
     sponsor_button.click(fn=show_sponsor_code, inputs=[], outputs=[sponsor_display]) # 绑定赞助按钮事件
 
-    # --- 日志监控事件处理 ---
-    # Timer 触发时调用日志读取函数更新日志显示 (只返回 HTML 内容)
-    def update_log_display_html():
-        log_content = read_new_log_entries() # 最新的在顶部
-        return f"""
-        <div id='log-container' style='max-height:250px; border:1px solid #ccc; overflow-y:auto; padding:10px; background:#000;'>
-            <pre id='log-content' style='margin:0; white-space:pre-wrap;color:#00ff00'>{log_content}</pre>
-        </div>
-        """ # 确保没有 script 块
-
-    log_timer.tick(update_log_display_html, None, log_display) # 更新 HTML 组件
-
-    # 点击 "开始监控" 按钮激活 Timer
-    def start_log_monitoring():
-        # 只返回 Timer 更新和初始 HTML 内容
-        initial_log_content = read_new_log_entries() # 获取反转后的初始日志
-        return (
-            gr.Timer(active=True),
-            f"""
-            <div id='log-container' style='max-height:250px; border:1px solid #ccc; overflow-y:auto; padding:10px; background:#000;'>
-                <pre id='log-content' style='margin:0; white-space:pre-wrap;color:#00ff00'>{initial_log_content}</pre>
-            </div>
-            """ # 确保没有 script 块
-        )
-
-    start_log_button.click(
-        start_log_monitoring,
-        inputs=None,
-        outputs=[log_timer, log_display] # 更新 Timer 和 HTML 组件
+    refresh_model_button.click(
+        lambda: (
+            gr.update(choices=get_model_list("loras")),
+            gr.update(choices=get_model_list("checkpoints")),
+            gr.update(choices=get_model_list("unet"))
+        ),
+        inputs=[],
+        outputs=[hua_lora_dropdown, hua_checkpoint_dropdown, hua_unet_dropdown]
     )
-
-    # 点击 "停止监控" 按钮禁用 Timer
-    stop_log_button.click(lambda: gr.Timer(active=False), None, log_timer)
 
     # --- 初始加载 ---
     def on_load_setup():
@@ -960,34 +891,30 @@ with gr.Blocks() as demo:
              default_update = gr.update(visible=False) # 或其他合适的默认值
              updates = (updates + [default_update] * 11)[:11]
 
-        # 返回初始日志内容
-        initial_log_content = read_new_log_entries()
-
-        # 返回所有更新，包括日志显示框的初始内容 (仅 HTML)
-        initial_log_html = f"""
-        <div id='log-container' style='max-height:250px; border:1px solid #ccc; overflow-y:auto; padding:10px; background:#000;'>
-            <pre id='log-content' style='margin:0; white-space:pre-wrap;color:#00ff00'>{initial_log_content}</pre>
-        </div>
-        """ # 确保没有 script 块
-        return tuple(updates) + (initial_log_html,) # 11 + 1 = 12 个输出
+        # 返回所有更新
+        return tuple(updates) # 11 个输出
 
     demo.load(
-        fn=lambda: (*on_load_setup(), gr.Timer(active=True)),
+        fn=on_load_setup, # 直接调用 on_load_setup
         inputs=[],
-        outputs=[ # 11 dynamic components + log_display + log_timer
+        outputs=[ # 11 dynamic components
             image_accordion, prompt_positive, prompt_positive_2, prompt_positive_3, prompt_positive_4,
             negative_prompt_col, resolution_row, hua_lora_dropdown, hua_checkpoint_dropdown,
-            hua_unet_dropdown, Random_Seed,
-            log_display,
-            log_timer
+            hua_unet_dropdown, Random_Seed
         ]
     )
 
-# --- Gradio 启动代码 ---
+    # --- 添加日志轮询 Timer ---
+    # 每 0.1 秒调用 fetch_and_format_logs，并将结果输出到 log_display (加快刷新以改善滚动)
+    log_timer = gr.Timer(0.1, active=True)  # 每 0.1 秒触发一次
+    log_timer.tick(fetch_and_format_logs, inputs=None, outputs=log_display)
+
+
+    # --- Gradio 启动代码 ---
 def luanch_gradio(demo_instance): # 接收 demo 实例
     try:
-        # 尝试查找可用端口，从 7860 开始
-        port = 7860
+        # 尝试查找可用端口，从 7861 开始
+        port = 7861
         while True:
             try:
                 # share=True 会尝试创建公网链接，可能需要登录 huggingface
@@ -1002,7 +929,7 @@ def luanch_gradio(demo_instance): # 接收 demo 实例
                     print(f"端口 {port} 已被占用，尝试下一个端口...")
                     port += 1
                     if port > 7870: # 限制尝试范围
-                        print("无法找到可用端口 (7860-7870)。")
+                        print("无法找到可用端口 (7861-7870)。")
                         break
                 else:
                     print(f"启动 Gradio 时发生未知 OS 错误: {e}")
