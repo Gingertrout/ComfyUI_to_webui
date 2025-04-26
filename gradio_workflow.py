@@ -317,7 +317,11 @@ def generate_image(inputimage1, prompt_text_positive, prompt_text_positive_2, pr
     text_ok_key_3 = find_key_by_name(prompt, "💧gradio正向提示词3")
     text_ok_key_4 = find_key_by_name(prompt, "💧gradio正向提示词4")
     text_bad_key = find_key_by_name(prompt, "🔥gradio负向提示词")
+    # 查找分辨率节点并打印调试信息
     fenbianlv_key = find_key_by_name(prompt, "📜hua_gradio分辨率")
+    print(f"[{execution_id}] 查找分辨率节点结果: {fenbianlv_key}")
+    if fenbianlv_key:
+        print(f"[{execution_id}] 分辨率节点详情: {prompt.get(fenbianlv_key, {})}")
     lora_key = find_key_by_name(prompt, "🌊hua_gradio_Lora仅模型")
     checkpoint_key = find_key_by_name(prompt, "🌊hua_gradio检查点加载器")
     unet_key = find_key_by_name(prompt, "🌊hua_gradio_UNET加载器")
@@ -378,8 +382,13 @@ def generate_image(inputimage1, prompt_text_positive, prompt_text_positive_2, pr
             prompt[fenbianlv_key]["inputs"]["custom_width"] = width_val
             prompt[fenbianlv_key]["inputs"]["custom_height"] = height_val
             print(f"[{execution_id}] 设置分辨率: {width_val}x{height_val}")
+            # 添加调试信息
+            print(f"[{execution_id}] 分辨率节点ID: {fenbianlv_key}")
+            print(f"[{execution_id}] 分辨率节点输入: {prompt[fenbianlv_key]['inputs']}")
         except (ValueError, TypeError, KeyError) as e:
              print(f"[{execution_id}] 更新分辨率时出错: {e}. 使用默认值或跳过。")
+             # 打印当前prompt结构帮助调试
+             print(f"[{execution_id}] 当前prompt结构: {json.dumps(prompt, indent=2, ensure_ascii=False)}")
 
     # 更新模型选择 (如果节点存在且选择了模型)
     if lora_key and hua_lora != "None": prompt[lora_key]["inputs"]["lora_name"] = hua_lora
