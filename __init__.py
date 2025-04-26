@@ -11,6 +11,7 @@ import platform # 移到这里，因为下面的代码需要它
 package_to_module_map = {
     "python-barcode": "barcode",
     "Pillow": "PIL",
+    "imageio[ffmpeg]": "imageio",
     # 添加其他需要的映射
 }
 
@@ -115,6 +116,7 @@ requirements_path = os.path.join(current_dir, "requirements.txt")
 check_and_install_dependencies(requirements_path)
 
 # --- 结束自动依赖安装 ---
+
 
 from .hua_word_image import Huaword
 from .hua_word_models import Modelhua
@@ -230,7 +232,7 @@ jie = """
 ⣪⢣⡳⡹⡜⣎⢧⢫⢎⢧⡫⣎⠧⡋⢊⠠⠈⡀⠄⠁⡀⢁⠠⠐⠀⡁⢁⠠⠀⠡⠀⠡⠐⠠⠀⠂⠀⠂⠠⠐⠀⢀⠠⠀⠂⢀⠀⠄⠠⠀⡈⢀⠠⠐⠈⠀⠈⠀⢁⠠⠀⠁⠄⠂⠀⠁⠠⠀⠂⠀⠂⠀⢀⠈⠀⠀⠂⠁⠠⠀⢀⠂⠠⠐⠀⡐⠀⠂⡈⠀⠄⠂⡈⠊⠆⢇⢕⢜⢔⢕
 ⣪⢣⡳⡹⣪⢺⢜⢵⡹⣪⢚⠨⠀⠄⠠⠀⠄⠀⠄⠂⠀⠄⠠⠀⠂⠠⠀⠠⠀⢁⠈⡀⠂⡁⠠⠈⢀⠁⠄⠂⠈⠀⡀⠄⠂⠀⠄⠂⠀⠂⠀⡀⠀⡀⠠⠀⠁⢈⠀⢀⠀⠂⠀⠄⠀⠄⠠⠀⠠⠀⠐⠀⠠⠀⢈⠀⠐⠀⠐⢀⠠⠐⠀⠂⠁⡀⠄⢁⠠⠐⠀⠂⠠⠈⠐⡀⢐⠀⠅⠑
 ⡗⡵⡹⡪⣎⢧⡫⡺⠘⠠⢀⠐⠀⠐⠀⠄⠂⠀⠂⠀⠂⠐⠀⠐⠈⢀⠈⢀⠐⠀⡀⠄⠐⠀⠄⠂⠀⠄⠀⠂⠈⡀⢀⠠⠀⠁⡀⠐⠈⠀⠄⠀⠄⠀⡀⠄⠈⡀⠠⠀⡐⠀⠠⠐⠀⠠⠀⠄⠂⠀⠂⠁⢀⠈⢀⠀⡈⠀⢁⠀⠠⠐⠈⢀⠁⡀⠐⢀⠠⠐⠈⠀⠂⡈⠠⠀⠄⠂⠈⠄
-➕➖✖️➗  ✨✨✨✨✨          ☀️☁️☔️❄️    ➖✖️➗ ✨✨           ✨✨   ✨   ➖✖️➗  ✨                  
+➕➖✖️➗  ✨✨✨✨✨          ☀️☁️☔️❄️    ➖✖️➗ ✨✨           ✨✨   ✨   ➖✖️➗  ✨              
 """
 print(jie)
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", ]
