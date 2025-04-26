@@ -905,13 +905,29 @@ def clear_history():
 
 
 # --- Gradio 界面 ---
-with gr.Blocks() as demo:
+# 黑客风格CSS - 黑底绿字
+hacker_css = """
+.log-display-container {
+    background-color: black !important;
+    color: #00ff00 !important;
+}
+.log-display-container h4 {
+    color: #00ff00 !important;
+}
+.log-display-container textarea {
+    background-color: black !important;
+    color: #00ff00 !important;
+    /* border-color: #00ff00 !important; */
+}
+"""
+
+with gr.Blocks(css=hacker_css) as demo:
     gr.Markdown("# [封装comfyUI工作流](https://github.com/kungful/ComfyUI_to_webui.git)")
 
     with gr.Row():
        with gr.Column():  # 左侧列
            # --- 添加实时日志显示区域 ---
-           with gr.Accordion("实时日志 (ComfyUI)", open=True):
+           with gr.Accordion("实时日志 (ComfyUI)", open=True, elem_classes="log-display-container"):
                log_display = gr.Textbox(
                    label="日志输出",
                    lines=20,
@@ -919,7 +935,12 @@ with gr.Blocks() as demo:
                    autoscroll=True,
                    interactive=False,
                    show_copy_button=True,
+                   elem_classes="log-display-container"  # 使用 CSS 控制滚动条和高度
                )
+            
+           image_accordion = gr.Accordion("上传图像 (折叠,有gradio传入图像节点才会显示上传)", visible=True, open=True)
+           with image_accordion:
+               input_image = gr.Image(type="pil", label="上传图像", height=256, width=256)
 
            with gr.Row():
                with gr.Column(scale=3):
@@ -930,12 +951,10 @@ with gr.Blocks() as demo:
                    with gr.Column(scale=1):
                        refresh_model_button = gr.Button("🔄 刷新模型")
 
-           image_accordion = gr.Accordion("上传图像 (折叠,有gradio传入图像节点才会显示上传)", visible=True, open=True)
-           with image_accordion:
-               input_image = gr.Image(type="pil", label="上传图像", height=156, width=156)
+
 
            with gr.Row():
-               with gr.Column() as positive_prompt_col:
+               with gr.Accordion("正向提示文本(折叠)", open=True) as positive_prompt_col:
                    prompt_positive = gr.Textbox(label="正向提示文本 1", elem_id="prompt_positive_1")
                    prompt_positive_2 = gr.Textbox(label="正向提示文本 2", elem_id="prompt_positive_2")
                    prompt_positive_3 = gr.Textbox(label="正向提示文本 3", elem_id="prompt_positive_3")
