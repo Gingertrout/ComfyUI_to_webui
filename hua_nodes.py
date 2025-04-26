@@ -582,7 +582,7 @@ class Hua_gradio_jsonsave:
             # Save JSON file
             filename_with_batch_num = f"{filename_prefix}"
 
-            json_filename = f"{filename_with_batch_num}_{counter:05}_.json"
+            json_filename = f"{filename_with_batch_num}.json"
             json_data = prompt
             json_file_path = os.path.join(full_output_folder, json_filename)
             with open(json_file_path, 'w', encoding='utf-8') as json_file:
