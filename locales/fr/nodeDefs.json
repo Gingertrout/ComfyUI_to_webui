@@ -1,0 +1,413 @@
+{
+  "Huaword": {
+    "display_name": "🌵Image booléenne",
+    "inputs": {
+      "text1": {
+        "name": "Texte 1",
+        "tooltip": "Chaîne complète"
+      },
+      "text2": {
+        "name": "Texte 2",
+        "tooltip": "Chaîne spécifiée"
+      },
+      "image1": {
+        "name": "Image 1"
+      },
+      "image2": {
+        "name": "Image 2"
+      }
+    },
+    "outputs": {
+      "0": {
+        "tooltip": "Si le mot spécifié apparaît dans la chaîne, image1 sera sélectionnée, sinon image2 sera sortie."
+      }
+    }
+  },
+  "Hua_Video_Output": {
+    "display_name": "Sortie vidéo (Gradio)",
+    "inputs": {
+      "images": {
+        "name": "Images"
+      },
+      "filename_prefix": {
+        "name": "Préfixe du nom de fichier"
+      },
+      "frame_rate": {
+        "name": "Fréquence d'images"
+      },
+      "format": {
+        "name": "Format"
+      },
+      "unique_id": {
+        "name": "ID unique"
+      },
+      "loop_count": {
+        "name": "Nombre de boucles"
+      },
+      "pingpong": {
+        "name": "Lecture en ping-pong"
+      },
+      "save_output": {
+        "name": "Enregistrer la sortie"
+      },
+      "audio": {
+        "name": "Audio"
+      },
+      "crf": {
+        "name": "CRF"
+      },
+      "preset": {
+        "name": "Préréglage"
+      }
+    }
+  },
+  "Modelhua": {
+    "display_name": "🌴Modèle booléen",
+    "inputs": {
+      "text1": {
+        "name": "Texte 1",
+        "tooltip": "Chaîne complète"
+      },
+      "text2": {
+        "name": "Texte 2",
+        "tooltip": "Chaîne spécifiée"
+      },
+      "model1": {
+        "name": "Modèle 1"
+      },
+      "model2": {
+        "name": "Modèle 2"
+      }
+    },
+    "outputs": {
+      "0": {
+        "tooltip": "Si le mot spécifié apparaît dans la chaîne, model1 sera sélectionné, sinon model2 sera sorti."
+      }
+    }
+  },
+  "Go_to_image": {
+    "display_name": "⭐Carte mentale",
+    "inputs": {
+      "image": {
+        "name": "Image"
+      },
+      "pos_text": {
+        "name": "Texte positif"
+      },
+      "images": {
+        "name": "Images"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "Image"
+      },
+      "1": {
+        "name": "Masque"
+      },
+      "2": {
+        "name": "Condition"
+      }
+    }
+  },
+  "Hua_Output": {
+    "display_name": "🌙Sortie d'image vers l'interface Gradio",
+    "inputs": {
+      "images": {
+        "name": "Images",
+        "tooltip": "Images à enregistrer"
+      },
+      "unique_id": {
+        "name": "ID unique",
+        "tooltip": "ID unique fourni par Gradio pour cette exécution"
+      }
+    }
+  },
+  "GradioTextBad": {
+    "display_name": "🔥Invite négative Gradio",
+    "inputs": {
+      "string": {
+        "name": "Chaîne",
+        "tooltip": "Texte à encoder"
+      }
+    },
+    "outputs": {
+      "0": {
+        "tooltip": "Condition contenant le texte intégré utilisé pour guider le modèle de diffusion"
+      }
+    }
+  },
+  "GradioInputImage": {
+    "display_name": "☀️Image d'entrée de l'interface Gradio",
+    "inputs": {
+      "image": {
+        "name": "Image"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "Image",
+        "tooltip": "Ceci est un nœud pour l'image d'entrée Gradio"
+      },
+      "1": {
+        "name": "Masque"
+      }
+    }
+  },
+  "Barcode_seed": {
+    "display_name": "hua_Graine de code-barres",
+    "inputs": {
+      "seed": {
+        "name": "Graine"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "Valeur de la graine"
+      },
+      "1": {
+        "name": "Lien d'aide"
+      }
+    }
+  },
+  "BarcodeGeneratorNode": {
+    "display_name": "hua_Générateur de code-barres",
+    "inputs": {
+      "前缀": {
+        "name": "Préfixe (Facultatif)"
+      },
+      "输入数字": {
+        "name": "Numéro de départ"
+      },
+      "字体大小": {
+        "name": "Taille de la police (px)"
+      },
+      "条码高度缩放": {
+        "name": "Échelle de hauteur du code-barres"
+      },
+      "文本下边距": {
+        "name": "Marge inférieure du texte (px)"
+      },
+      "条码与文本间距": {
+        "name": "Espacement code-barres et texte (px)"
+      },
+      "左右边距": {
+        "name": "Échelle de marge gauche et droite"
+      },
+      "顶部边距": {
+        "name": "Marge supérieure (px)"
+      },
+      "全局缩放比例": {
+        "name": "Échelle globale"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "Image du code-barres"
+      },
+      "1": {
+        "name": "Masque de taille"
+      },
+      "2": {
+        "name": "Numéro de sortie"
+      }
+    }
+  },
+  "GradioTextOk2": {
+    "display_name": "💧Invite positive Gradio 2",
+    "inputs": {
+      "string": {
+        "name": "Chaîne",
+        "tooltip": "Texte à encoder"
+      }
+    },
+    "outputs": {
+      "0": {
+        "tooltip": "Condition contenant le texte intégré utilisé pour guider le modèle de diffusion"
+      }
+    }
+  },
+  "GradioTextOk3": {
+    "display_name": "💧Invite positive Gradio 3",
+    "inputs": {
+      "string": {
+        "name": "Chaîne",
+        "tooltip": "Texte à encoder"
+      }
+    },
+    "outputs": {
+      "0": {
+        "tooltip": "Condition contenant le texte intégré utilisé pour guider le modèle de diffusion"
+      }
+    }
+  },
+  "GradioTextOk4": {
+    "display_name": "💧Invite positive Gradio 4",
+    "inputs": {
+      "string": {
+        "name": "Chaîne",
+        "tooltip": "Texte à encoder"
+      }
+    },
+    "outputs": {
+      "0": {
+        "tooltip": "Condition contenant le texte intégré utilisé pour guider le modèle de diffusion"
+      }
+    }
+  },
+  "Hua_gradio_Seed": {
+    "display_name": "🧙hua_gradio Graine aléatoire",
+    "inputs": {
+      "seed": {
+        "name": "Graine"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "Graine"
+      },
+      "1": {
+        "name": "Lien d'aide"
+      }
+    }
+  },
+  "Hua_gradio_resolution": {
+    "display_name": "📜hua_gradio Résolution",
+    "inputs": {
+      "custom_width": {
+        "name": "Largeur personnalisée"
+      },
+      "custom_height": {
+        "name": "Hauteur personnalisée"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "Largeur"
+      },
+      "1": {
+        "name": "Hauteur"
+      }
+    }
+  },
+  "Hua_gradio_jsonsave": {
+    "display_name": "📁hua_gradio_json Enregistrer",
+    "inputs": {
+      "images": {
+        "name": "Images",
+        "tooltip": "Images à enregistrer"
+      },
+      "filename_prefix": {
+        "name": "Préfixe du nom de fichier",
+        "tooltip": "Préfixe du nom de fichier pour le fichier à enregistrer. Peut contenir des informations de formatage, telles que %date:yyyy-MM-dd% ou %Empty Latent Image.width% pour inclure des valeurs des nœuds."
+      }
+    }
+  },
+  "Hua_LoraLoader": {
+    "display_name": "🌊hua_gradio_Lora Chargeur",
+    "inputs": {
+      "model": {
+        "name": "Modèle",
+        "tooltip": "Modèle de diffusion auquel appliquer le LoRA."
+      },
+      "clip": {
+        "name": "CLIP",
+        "tooltip": "Modèle CLIP auquel appliquer le LoRA."
+      },
+      "lora_name": {
+        "name": "Nom du LoRA",
+        "tooltip": "Nom du LoRA."
+      },
+      "strength_model": {
+        "name": "Force du modèle",
+        "tooltip": "Force pour modifier le modèle de diffusion. Cette valeur peut être négative."
+      },
+      "strength_clip": {
+        "name": "Force du CLIP",
+        "tooltip": "Force pour modifier le modèle CLIP. Cette valeur peut être négative."
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "Modèle",
+        "tooltip": "Modèle de diffusion modifié."
+      },
+      "1": {
+        "name": "CLIP",
+        "tooltip": "Modèle CLIP modifié."
+      }
+    }
+  },
+  "Hua_LoraLoaderModelOnly": {
+    "display_name": "🌊hua_gradio_Lora Modèle uniquement",
+    "inputs": {
+      "model": {
+        "name": "Modèle"
+      },
+      "lora_name": {
+        "name": "Nom du LoRA"
+      },
+      "strength_model": {
+        "name": "Force du modèle"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "Modèle"
+      }
+    }
+  },
+  "Hua_CheckpointLoaderSimple": {
+    "display_name": "🌊hua_gradio Chargeur de point de contrôle",
+    "inputs": {
+      "ckpt_name": {
+        "name": "Nom du point de contrôle",
+        "tooltip": "Nom du point de contrôle (modèle) à charger."
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "Modèle",
+        "tooltip": "Modèle utilisé pour débruiter l'espace latent."
+      },
+      "1": {
+        "name": "CLIP",
+        "tooltip": "Modèle CLIP utilisé pour encoder les invites textuelles."
+      },
+      "2": {
+        "name": "VAE",
+        "tooltip": "Modèle VAE utilisé pour encoder et décoder les images vers et depuis l'espace latent."
+      }
+    }
+  },
+  "Hua_UNETLoader": {
+    "display_name": "🌊hua_gradio_UNET Chargeur",
+    "inputs": {
+      "unet_name": {
+        "name": "Nom UNET"
+      },
+      "weight_dtype": {
+        "name": "Type de données de poids"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "Modèle"
+      }
+    }
+  },
+  "GradioTextOk": {
+    "display_name": "💧Invite positive Gradio",
+    "inputs": {
+      "string": {
+        "name": "Chaîne",
+        "tooltip": "Texte à encoder"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "Chaîne"
+      }
+    }
+  }
+}
