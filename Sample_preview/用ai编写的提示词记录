@@ -254,3 +254,14 @@ gradio_workflow.py中清除显示历史按钮点击后同时也把生成结果�
 遇到问题了，就是我需要多线程去处理gradio前端，现在点击开始跑图就会阻塞日志的实时更新，完全不动，跑完图片才动，用另一个线程去轮询日志，避免阻塞，请优化代码
 
 请帮我构建一个核心的功能
+
+
+将gradio——workflow.py检索类似 示例.json的函数方法改成检索"class_type":的方式，利用类名检索。
+我的类名请对应init.py中的真实类名，NODE_CLASS_MAPPINGS 右边中就是真实对应的类名，这些类名是唯一的，
+根据NODE_DISPLAY_NAME_MAPPINGS = {去找到NODE_CLASS_MAPPINGS右边的真实类名进行替换到函数中正确编写
+
+
+手动更改api json流的类名，右边为真实类名，左边为显示名称，
+"hua_gradioinput": GradioInputImage,
+"hua_gradiooutput": Hua_Output,
+"hua_gradio_video_output": Hua_Video_Output
