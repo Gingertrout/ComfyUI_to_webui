@@ -132,17 +132,17 @@ from .hua_nodes import BarcodeGeneratorNode, Barcode_seed
 from .output_image_to_gradio import Hua_Output
 from .output_video_to_gradio import Hua_Video_Output # 添加视频节点导入
 NODE_CLASS_MAPPINGS = {
-    "ComfyUI_hua_boy": Huaword,
-    "小字体说明：我是comfyui_hua_boy的model": Modelhua,
-    "hua_gradioinput": GradioInputImage,
-    "hua_gradiooutput": Hua_Output,
-    "brucelee": Go_to_image,
-    "hua_textok": GradioTextOk,
-    "hua_textok2": GradioTextOk2,
-    "hua_textok3": GradioTextOk3,
-    "hua_textok4": GradioTextOk4,
-    "hua_textbad": GradioTextBad,
-    "hua_gradio_seed": Hua_gradio_Seed,
+    "Huaword": Huaword,
+    "Modelhua": Modelhua,
+    "GradioInputImage": GradioInputImage,
+    "Hua_Output": Hua_Output,
+    "Go_to_image": Go_to_image,
+    "GradioTextOk": GradioTextOk,
+    "GradioTextOk2": GradioTextOk2,
+    "GradioTextOk3": GradioTextOk3,
+    "GradioTextOk4": GradioTextOk4,
+    "GradioTextBad": GradioTextBad,
+    "Hua_gradio_Seed": Hua_gradio_Seed,
     "Hua_gradio_resolution": Hua_gradio_resolution,
     "Hua_LoraLoader": Hua_LoraLoader,
     "Hua_LoraLoaderModelOnly": Hua_LoraLoaderModelOnly,
@@ -150,31 +150,31 @@ NODE_CLASS_MAPPINGS = {
     "Hua_UNETLoader": Hua_UNETLoader,
     "BarcodeGeneratorNode": BarcodeGeneratorNode, # 使用新的类名
     "Barcode_seed": Barcode_seed,
-    "hua_gradio_jsonsave": Hua_gradio_jsonsave,
-    "hua_gradio_video_output": Hua_Video_Output # 添加视频节点类映射
+    "Hua_gradio_jsonsave": Hua_gradio_jsonsave,
+    "Hua_Video_Output": Hua_Video_Output # 添加视频节点类映射
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "ComfyUI_hua_boy": "🌵布尔图片Boolean_image",
-    "小字体说明:我是comfyui_hua_boy的model": "🌴布尔模型Boolean_model",
-    "hua_gradioinput": "☀️gradio前端传入图像",
-    "hua_gradiooutput": "🌙图像输出到gradio前端",
-    "brucelee": "⭐思维导图",
-    "hua_textok": "💧gradio正向提示词",
-    "hua_textok2": "💧gradio正向提示词2",
-    "hua_textok3": "💧gradio正向提示词3",
-    "hua_textok4": "💧gradio正向提示词4",
-    "hua_textbad": "🔥gradio负向提示词",
-    "hua_gradio_seed": "🧙hua_gradio随机种",
-    "Hua_gradio_resolution": "📜hua_gradio分辨率",
-    "Hua_LoraLoader": "🌊hua_gradio_Lora加载器",
-    "Hua_LoraLoaderModelOnly": "🌊hua_gradio_Lora仅模型",
-    "Hua_CheckpointLoaderSimple": "🌊hua_gradio检查点加载器",
-    "Hua_UNETLoader": "🌊hua_gradio_UNET加载器",
-    "BarcodeGeneratorNode": "hua_条形码生成器", # 使用新的显示名称，与节点文件一致
-    "Barcode_seed": "hua_条形码种子",
-    "hua_gradio_jsonsave": "📁hua_gradio_json保存",
-    "hua_gradio_video_output": "🎬视频输出到gradio前端" # 添加视频节点显示名称
+    "Huaword": "🌵Boolean Image",
+    "Modelhua": "🌴Boolean Model",
+    "GradioInputImage": "☀️Gradio Frontend Input Image",
+    "Hua_Output": "🌙Image Output to Gradio Frontend",
+    "Go_to_image": "⭐Mind Map",
+    "GradioTextOk": "💧Gradio Positive Prompt",
+    "GradioTextOk2": "💧Gradio Positive Prompt 2",
+    "GradioTextOk3": "💧Gradio Positive Prompt 3",
+    "GradioTextOk4": "💧Gradio Positive Prompt 4",
+    "GradioTextBad": "🔥Gradio Negative Prompt",
+    "Hua_gradio_Seed": "🧙hua_gradio Random Seed",
+    "Hua_gradio_resolution": "📜hua_gradio Resolution",
+    "Hua_LoraLoader": "🌊hua_gradio_Lora Loader",
+    "Hua_LoraLoaderModelOnly": "🌊hua_gradio_Lora Model Only",
+    "Hua_CheckpointLoaderSimple": "🌊hua_gradio Checkpoint Loader",
+    "Hua_UNETLoader": "🌊hua_gradio_UNET Loader",
+    "BarcodeGeneratorNode": "hua_Barcode Generator", # 使用新的显示名称，与节点文件一致
+    "Barcode_seed": "hua_Barcode Seed",
+    "Hua_gradio_jsonsave": "📁hua_gradio_json Save",
+    "Hua_Video_Output": "🎬Video Output (Gradio)" # 添加视频节点显示名称
 
     
 }
