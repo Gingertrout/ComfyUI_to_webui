@@ -1,0 +1,15 @@
+[project]
+name = "to_webui"
+description = "Encapsulate the comfyui workflow as a gradio webui"
+version = "1.0.0"
+license = {file = "LICENSE"}
+dependencies = ["gradio>=3.0", "Pillow", "python-barcode", "numpy", "websocket", "requests", "imageio[ffmpeg]"]
+
+[project.urls]
+Repository = "https://github.com/kungful/ComfyUI_to_webui"
+#  Used by Comfy Registry https://comfyregistry.org
+
+[tool.comfy]
+PublisherId = ""
+DisplayName = "ComfyUI_to_webui"
+Icon = ""
