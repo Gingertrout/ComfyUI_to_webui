@@ -52,9 +52,9 @@ app.registerExtension({ //这是一个方法，用于注册一个扩展。扩展
     name: "icon",//这是扩展的名称，用于标识这个扩展。在这个例子中，扩展的名称为
 
     beforeRegisterNodeDef(nodeType, nodeData, app) { //这是一个回调函数，在节点类型注册之前执行。beforeRegisterNodeDef 是这个回调函数的名称，nodeType、nodeData 和 app 是传递给这个函数的参数。
-        if (nodeData.name === "hua_gradioinput") {// 为特定节点类型设置图标
+        if (nodeData.name === "GradioInputImage") {// 为特定节点类型设置图标
             setIconImage(nodeType, canvasIcon, [200, 100], 0, 2);
-        } else if (nodeData.name === "hua_gradiooutput") {
+        } else if (nodeData.name === "Hua_Output") {
             setIconImage(nodeType, outputIcon, [200, 100], 1, 0);
         }
     }
