@@ -78,9 +78,11 @@ def log_message(message):
     timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]  # 精确到毫秒
     print(f"{timestamp} - {message}")
 
-def find_key_by_name(prompt, name):
+# 修改函数以通过 class_type 查找，并重命名参数
+def find_key_by_class_type(prompt, class_type):
     for key, value in prompt.items():
-        if isinstance(value, dict) and value.get("_meta", {}).get("title") == name:
+        # 直接检查 class_type 字段
+        if isinstance(value, dict) and value.get("class_type") == class_type:
             return key
     return None
 
@@ -92,7 +94,8 @@ def check_seed_node(json_file):
     try:
         with open(json_path, "r", encoding="utf-8") as file_json:
             prompt = json.load(file_json)
-        seed_key = find_key_by_name(prompt, "🧙hua_gradio随机种")
+        # 使用新的函数和真实类名
+        seed_key = find_key_by_class_type(prompt, "Hua_gradio_Seed")
         return gr.update(visible=seed_key is not None)
     except (FileNotFoundError, json.JSONDecodeError) as e:
         print(f"读取或解析 JSON 文件时出错 ({json_file}): {e}")
@@ -309,24 +312,24 @@ def generate_image(inputimage1, prompt_text_positive, prompt_text_positive_2, pr
         print(f"[{execution_id}] 读取或解析 JSON 文件时出错 ({json_path}): {e}")
         return None, None
 
-    # --- 节点查找 ---
-    image_input_key = find_key_by_name(prompt, "☀️gradio前端传入图像")
-    seed_key = find_key_by_name(prompt, "🧙hua_gradio随机种")
-    text_ok_key = find_key_by_name(prompt, "💧gradio正向提示词")
-    text_ok_key_2 = find_key_by_name(prompt, "💧gradio正向提示词2")
-    text_ok_key_3 = find_key_by_name(prompt, "💧gradio正向提示词3")
-    text_ok_key_4 = find_key_by_name(prompt, "💧gradio正向提示词4")
-    text_bad_key = find_key_by_name(prompt, "🔥gradio负向提示词")
+    # --- 节点查找 (使用新的函数和真实类名) ---
+    image_input_key = find_key_by_class_type(prompt, "GradioInputImage")
+    seed_key = find_key_by_class_type(prompt, "Hua_gradio_Seed")
+    text_ok_key = find_key_by_class_type(prompt, "GradioTextOk")
+    text_ok_key_2 = find_key_by_class_type(prompt, "GradioTextOk2")
+    text_ok_key_3 = find_key_by_class_type(prompt, "GradioTextOk3")
+    text_ok_key_4 = find_key_by_class_type(prompt, "GradioTextOk4")
+    text_bad_key = find_key_by_class_type(prompt, "GradioTextBad")
     # 查找分辨率节点并打印调试信息
-    fenbianlv_key = find_key_by_name(prompt, "📜hua_gradio分辨率")
+    fenbianlv_key = find_key_by_class_type(prompt, "Hua_gradio_resolution")
     print(f"[{execution_id}] 查找分辨率节点结果: {fenbianlv_key}")
     if fenbianlv_key:
         print(f"[{execution_id}] 分辨率节点详情: {prompt.get(fenbianlv_key, {})}")
-    lora_key = find_key_by_name(prompt, "🌊hua_gradio_Lora仅模型")
-    checkpoint_key = find_key_by_name(prompt, "🌊hua_gradio检查点加载器")
-    unet_key = find_key_by_name(prompt, "🌊hua_gradio_UNET加载器")
-    hua_output_key = find_key_by_name(prompt, "🌙图像输出到gradio前端")
-    hua_video_output_key = find_key_by_name(prompt, "🎬视频输出到gradio前端") # 查找视频输出节点
+    lora_key = find_key_by_class_type(prompt, "Hua_LoraLoaderModelOnly") # 注意这里用的是仅模型
+    checkpoint_key = find_key_by_class_type(prompt, "Hua_CheckpointLoaderSimple")
+    unet_key = find_key_by_class_type(prompt, "Hua_UNETLoader")
+    hua_output_key = find_key_by_class_type(prompt, "Hua_Output")
+    hua_video_output_key = find_key_by_class_type(prompt, "Hua_Video_Output") # 查找视频输出节点
 
     # --- 更新 Prompt ---
     inputfilename = None # 初始化
@@ -552,24 +555,24 @@ def fuck(json_file):
         model_updates = [gr.update(visible=False, value="None")] * 3 # 3 model dropdowns
         return tuple(visibility_updates + model_updates) # 10 个动态组件
 
-    # 内部辅助函数
-    def find_key_by_name_internal(p, name): # 避免与全局函数冲突
+    # 内部辅助函数 (修改为按 class_type 查找)
+    def find_key_by_class_type_internal(p, class_type):
         for k, v in p.items():
-            if isinstance(v, dict) and v.get("_meta", {}).get("title") == name:
+            if isinstance(v, dict) and v.get("class_type") == class_type:
                 return k
         return None
 
-    # 检查各个节点是否存在
-    has_image_input = find_key_by_name_internal(prompt, "☀️gradio前端传入图像") is not None
-    has_pos_prompt_1 = find_key_by_name_internal(prompt, "💧gradio正向提示词") is not None
-    has_pos_prompt_2 = find_key_by_name_internal(prompt, "💧gradio正向提示词2") is not None
-    has_pos_prompt_3 = find_key_by_name_internal(prompt, "💧gradio正向提示词3") is not None
-    has_pos_prompt_4 = find_key_by_name_internal(prompt, "💧gradio正向提示词4") is not None
-    has_neg_prompt = find_key_by_name_internal(prompt, "🔥gradio负向提示词") is not None
-    has_resolution = find_key_by_name_internal(prompt, "📜hua_gradio分辨率") is not None
-    has_lora = find_key_by_name_internal(prompt, "🌊hua_gradio_Lora仅模型") is not None
-    has_checkpoint = find_key_by_name_internal(prompt, "🌊hua_gradio检查点加载器") is not None
-    has_unet = find_key_by_name_internal(prompt, "🌊hua_gradio_UNET加载器") is not None
+    # 检查各个节点是否存在 (使用新的内部函数和真实类名)
+    has_image_input = find_key_by_class_type_internal(prompt, "GradioInputImage") is not None
+    has_pos_prompt_1 = find_key_by_class_type_internal(prompt, "GradioTextOk") is not None
+    has_pos_prompt_2 = find_key_by_class_type_internal(prompt, "GradioTextOk2") is not None
+    has_pos_prompt_3 = find_key_by_class_type_internal(prompt, "GradioTextOk3") is not None
+    has_pos_prompt_4 = find_key_by_class_type_internal(prompt, "GradioTextOk4") is not None
+    has_neg_prompt = find_key_by_class_type_internal(prompt, "GradioTextBad") is not None
+    has_resolution = find_key_by_class_type_internal(prompt, "Hua_gradio_resolution") is not None
+    has_lora = find_key_by_class_type_internal(prompt, "Hua_LoraLoaderModelOnly") is not None
+    has_checkpoint = find_key_by_class_type_internal(prompt, "Hua_CheckpointLoaderSimple") is not None
+    has_unet = find_key_by_class_type_internal(prompt, "Hua_UNETLoader") is not None
 
     print(f"检查结果 for {json_file}: Image={has_image_input}, PosP1={has_pos_prompt_1}, PosP2={has_pos_prompt_2}, PosP3={has_pos_prompt_3}, PosP4={has_pos_prompt_4}, NegP={has_neg_prompt}, Res={has_resolution}, Lora={has_lora}, Ckpt={has_checkpoint}, Unet={has_unet}")
 
@@ -619,27 +622,27 @@ def get_workflow_defaults_and_visibility(json_file):
         print(f"读取或解析 JSON 文件时出错 ({json_file}): {e}")
         return defaults # 返回所有都不可见/默认
 
-    # 内部辅助函数 (避免与全局函数冲突)
-    def find_key(p, name):
+    # 内部辅助函数 (修改为按 class_type 查找)
+    def find_key_by_class_type_internal(p, class_type):
         for k, v in p.items():
-            if isinstance(v, dict) and v.get("_meta", {}).get("title") == name:
+            if isinstance(v, dict) and v.get("class_type") == class_type:
                 return k
         return None
 
-    # 检查节点存在性并更新可见性
-    defaults["visible_image_input"] = find_key(prompt, "☀️gradio前端传入图像") is not None
-    defaults["visible_pos_prompt_1"] = find_key(prompt, "💧gradio正向提示词") is not None
-    defaults["visible_pos_prompt_2"] = find_key(prompt, "💧gradio正向提示词2") is not None
-    defaults["visible_pos_prompt_3"] = find_key(prompt, "💧gradio正向提示词3") is not None
-    defaults["visible_pos_prompt_4"] = find_key(prompt, "💧gradio正向提示词4") is not None
-    defaults["visible_neg_prompt"] = find_key(prompt, "🔥gradio负向提示词") is not None
-    defaults["visible_resolution"] = find_key(prompt, "📜hua_gradio分辨率") is not None
-    defaults["visible_seed_indicator"] = find_key(prompt, "🧙hua_gradio随机种") is not None
-    defaults["visible_image_output"] = find_key(prompt, "🌙图像输出到gradio前端") is not None # 检查图片输出
-    defaults["visible_video_output"] = find_key(prompt, "🎬视频输出到gradio前端") is not None # 检查视频输出
+    # 检查节点存在性并更新可见性 (使用新的内部函数和真实类名)
+    defaults["visible_image_input"] = find_key_by_class_type_internal(prompt, "GradioInputImage") is not None
+    defaults["visible_pos_prompt_1"] = find_key_by_class_type_internal(prompt, "GradioTextOk") is not None
+    defaults["visible_pos_prompt_2"] = find_key_by_class_type_internal(prompt, "GradioTextOk2") is not None
+    defaults["visible_pos_prompt_3"] = find_key_by_class_type_internal(prompt, "GradioTextOk3") is not None
+    defaults["visible_pos_prompt_4"] = find_key_by_class_type_internal(prompt, "GradioTextOk4") is not None
+    defaults["visible_neg_prompt"] = find_key_by_class_type_internal(prompt, "GradioTextBad") is not None
+    defaults["visible_resolution"] = find_key_by_class_type_internal(prompt, "Hua_gradio_resolution") is not None
+    defaults["visible_seed_indicator"] = find_key_by_class_type_internal(prompt, "Hua_gradio_Seed") is not None
+    defaults["visible_image_output"] = find_key_by_class_type_internal(prompt, "Hua_Output") is not None # 检查图片输出
+    defaults["visible_video_output"] = find_key_by_class_type_internal(prompt, "Hua_Video_Output") is not None # 检查视频输出
 
-    # 检查模型节点并提取默认值
-    lora_key = find_key(prompt, "🌊hua_gradio_Lora仅模型")
+    # 检查模型节点并提取默认值 (使用新的内部函数和真实类名)
+    lora_key = find_key_by_class_type_internal(prompt, "Hua_LoraLoaderModelOnly")
     if lora_key and lora_key in prompt and "inputs" in prompt[lora_key]:
         defaults["visible_lora"] = True
         defaults["default_lora"] = prompt[lora_key]["inputs"].get("lora_name", "None")
@@ -647,7 +650,7 @@ def get_workflow_defaults_and_visibility(json_file):
         defaults["visible_lora"] = False
         defaults["default_lora"] = "None"
 
-    checkpoint_key = find_key(prompt, "🌊hua_gradio检查点加载器")
+    checkpoint_key = find_key_by_class_type_internal(prompt, "Hua_CheckpointLoaderSimple")
     if checkpoint_key and checkpoint_key in prompt and "inputs" in prompt[checkpoint_key]:
         defaults["visible_checkpoint"] = True
         defaults["default_checkpoint"] = prompt[checkpoint_key]["inputs"].get("ckpt_name", "None")
@@ -655,7 +658,7 @@ def get_workflow_defaults_and_visibility(json_file):
         defaults["visible_checkpoint"] = False
         defaults["default_checkpoint"] = "None"
 
-    unet_key = find_key(prompt, "🌊hua_gradio_UNET加载器")
+    unet_key = find_key_by_class_type_internal(prompt, "Hua_UNETLoader")
     if unet_key and unet_key in prompt and "inputs" in prompt[unet_key]:
         defaults["visible_unet"] = True
         defaults["default_unet"] = prompt[unet_key]["inputs"].get("unet_name", "None")
