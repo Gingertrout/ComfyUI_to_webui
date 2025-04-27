@@ -20,6 +20,8 @@
     "outputs": {
       "0": {
         "tooltip": "在字符串中出现了你提到的词则会选在image1，如果没有就image2输出"
+      }
+    }
   },
   "Hua_Video_Output": {
     "display_name": "视频输出 (Gradio)",
@@ -58,8 +60,6 @@
         "name": "预设"
       }
     }
-  }
-}
   },
   "Modelhua": {
     "display_name": "🌴布尔模型Boolean_model",
