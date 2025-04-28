@@ -1,5 +1,5 @@
 [project]
-name = "to_webui"
+name = "ComfyUI_to_webui"
 description = "Encapsulate the comfyui workflow as a gradio webui"
 version = "1.0.0"
 license = {file = "LICENSE"}
@@ -10,6 +10,6 @@ Repository = "https://github.com/kungful/ComfyUI_to_webui"
 #  Used by Comfy Registry https://comfyregistry.org
 
 [tool.comfy]
-PublisherId = ""
+PublisherId = "hua"
 DisplayName = "ComfyUI_to_webui"
 Icon = ""
