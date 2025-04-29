@@ -1,5 +1,9 @@
-![前后端原理image](https://github.com/kungful/ComfyUI_to_webui/blob/f3b459882f6f9961559f166f21719d662a575584/Sample_preview/%E5%89%8D%E5%90%8E%E7%AB%AF%E5%AF%B9%E6%8E%A5%E5%8E%9F%E7%90%862.png)
+![newui2](https://raw.githubusercontent.com/kungful/ComfyUI_to_webui/c5a5887626ecd3/ComfyUI_to_webui/c5a5887626ecd3271364a2a9b1830f54d35dfa9d/Sample_preview/newui2.png)
+你可以在我的镜像中直接使用该插件，也可使用 [云端算力桌面程序](https://github.com/kungful/xiangongyun_GUI.git)。
+[免费镜像](https://www.xiangongyun.com/image/detail/7b36c1a3-da41-4676-b5b3-03ec25d6e197)
 
+![newUI](https://raw.githubusercontent.com/kungful/ComfyUI_to_webui/c17b4dbfa90e715304e1baf3ca4928ea6933b9f6/Sample_preview/newUI.png)
+![前后端原理](https://raw.githubusercontent.com/kungful/ComfyUI_to_webui/f3b459882f6f9961559f166f21719d662a575584/Sample_preview/%E5%89%8D%E5%90%8E%E7%AB%AF%E5%AF%B9%E6%8E%A5%E5%8E%9F%E7%90%862.png)
 ## 概述
 <span style="color:blue;">**示例工作流在**</span> Sample_preview 文件夹里面
 <span style="color:blue;">**`ComfyUI_hua_boy` 是一个为 ComfyUI工作流变成webui的项目**</span>
