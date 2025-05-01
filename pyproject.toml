@@ -1,7 +1,7 @@
 [project]
 name = "ComfyUI_to_webui"
 description = "Encapsulate the comfyui workflow as a gradio webui"
-version = "1.0.0"
+version = "1.0.1"
 license = {file = "LICENSE"}
 dependencies = ["gradio>=3.0", "Pillow", "python-barcode", "numpy", "websocket", "requests", "imageio[ffmpeg]"]
 
