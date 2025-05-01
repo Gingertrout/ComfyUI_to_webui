@@ -146,7 +146,24 @@ class Hua_Video_Output:
                              loop_count=0, pingpong=False, save_output=True, audio=None, crf=23,
                              preset="fast", prompt=None, extra_pnginfo=None): # Removed save_metadata_png parameter
 
-        if images is None or images.size(0) == 0:
+        # 修复：检查输入是否为空，同时支持 Tensor 和 list，并计算 num_frames
+        num_frames = 0
+        if images is not None:
+            if isinstance(images, torch.Tensor):
+                num_frames = images.size(0)
+            elif isinstance(images, list):
+                # 确保列表中的元素是 Tensor
+                if all(isinstance(img, torch.Tensor) for img in images):
+                    num_frames = len(images)
+                else:
+                    print("错误: images 列表包含非 Tensor 元素。")
+                    self._write_error_to_json(unique_id, "Input list contains non-Tensor elements.")
+                    return ()
+            else:
+                print(f"警告: 未知的 images 类型: {type(images)}，视为空输入。")
+                # num_frames 保持 0
+
+        if num_frames == 0:
             print("错误: 没有图像帧输入。")
             self._write_error_to_json(unique_id, "No input frames.")
             return ()
@@ -169,8 +186,7 @@ class Hua_Video_Output:
         # --- Prepare Frames ---
         try:
             # 迭代器方式处理帧，减少内存占用
-            # 在应用 pingpong 前，需要知道总帧数
-            num_frames = images.size(0)
+            # num_frames 已在上面计算
             frames_iterator = (tensor_to_bytes(images[i]) for i in range(num_frames))
 
             # 需要获取第一帧来确定尺寸和检查 alpha
@@ -502,13 +518,16 @@ class Hua_Video_Output:
                         break # 停止写入
 
                 print(f"已向 ffmpeg 写入 {frame_count} 帧。")
-                process.stdin.close() # 关闭 stdin
-                print("所有帧已写入 stdin，已关闭。等待 FFmpeg 完成...")
+
+                # 移除显式的 stdin.close()，让 communicate() 处理
+                print("所有帧已写入，准备调用 communicate() 等待 FFmpeg 完成...")
 
                 # 等待进程完成并获取输出，增加超时（例如 300 秒 = 5 分钟）
+                # communicate() 会负责关闭 stdin，读取 stdout/stderr，并等待进程结束
                 timeout_seconds = 300
                 try:
-                    stdout, stderr = process.communicate(timeout=timeout_seconds)
+                    # input=None 因为数据已通过 stdin.write 写入
+                    stdout, stderr = process.communicate(input=None, timeout=timeout_seconds)
                     return_code = process.returncode
                     print(f"FFmpeg communicate() 完成。返回码: {return_code}")
                 except subprocess.TimeoutExpired:
