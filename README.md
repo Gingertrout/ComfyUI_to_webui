@@ -1,4 +1,4 @@
-![newui2](https://github.com/kungful/ComfyUI_to_webui/blob/fc8d59b572c3aa0baab7884d9994412255ac78df/Sample_preview/newUI.png)
+![newui2](https://github.com/kungful/ComfyUI_to_webui/blob/26be8af74bea1b122a30e6b3089ce37cab1a60b8/Sample_preview/newui2.png)
 你可以在我的镜像中直接使用该插件，也可使用 [云端算力桌面程序](https://github.com/kungful/xiangongyun_GUI.git)。
 [免费镜像](https://www.xiangongyun.com/image/detail/7b36c1a3-da41-4676-b5b3-03ec25d6e197)
 
