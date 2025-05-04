@@ -6,7 +6,7 @@
 ![前后端原理](https://github.com/kungful/ComfyUI_to_webui/blob/9b57fff3c120bcb09d265ac3e75e4e8c04e84015/Sample_preview/%E5%89%8D%E5%90%8E%E7%AB%AF%E5%AF%B9%E6%8E%A5%E5%8E%9F%E7%90%86.png)
 ## 概述
 <span style="color:blue;">**示例工作流在**</span> Sample_preview 文件夹里面
-<span style="color:blue;">**`ComfyUI_hua_boy` 是一个为 ComfyUI工作流变成webui的项目**</span>
+<span style="color:blue;">**`ComfyUI_to_webui` 是一个为 ComfyUI工作流变成webui的项目**</span>
 
 ## 计划的功能
 - **横向标签设置功能**: 疯狂进化中........
