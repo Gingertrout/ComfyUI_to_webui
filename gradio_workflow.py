@@ -1383,11 +1383,13 @@ with gr.Blocks(css=hacker_css) as demo:
 
             # GitHub Repo Button
             github_repo_btn = gr.Button("本插件 GitHub 仓库")
-            github_repo_btn.click(lambda: gr.update(value="https://github.com/kungful/ComfyUI_to_webui.git",visible=True), inputs=[], outputs=[sponsor_display]) # 显示链接
+            gitthub_display = gr.Markdown(visible=False) # 此选项卡中用于显示链接的区域
+            github_repo_btn.click(lambda: gr.update(value="https://github.com/kungful/ComfyUI_to_webui.git",visible=True), inputs=[], outputs=[gitthub_display]) # 修正: 指向 gitthub_display
 
             # Free Mirror Button
             free_mirror_btn = gr.Button("开发者的免费镜像")
-            free_mirror_btn.click(lambda: gr.update(value="https://www.xiangongyun.com/image/detail/7b36c1a3-da41-4676-b5b3-03ec25d6e197",visible=True), inputs=[], outputs=[sponsor_display]) # 显示链接
+            free_mirror_diplay = gr.Markdown(visible=False) # 此选项卡中用于显示链接的区域
+            free_mirror_btn.click(lambda: gr.update(value="https://www.xiangongyun.com/image/detail/7b36c1a3-da41-4676-b5b3-03ec25d6e197",visible=True), inputs=[], outputs=[free_mirror_diplay]) # 修正: 指向 free_mirror_diplay
 
             # Sponsor Button & Display Area
             sponsor_info_btn = gr.Button("💖 赞助开发者")
@@ -1402,7 +1404,8 @@ with gr.Blocks(css=hacker_css) as demo:
 
             # Tutorial Button
             tutorial_btn = gr.Button("使用教程 (GitHub)")
-            tutorial_btn.click(lambda: gr.update(value="https://github.com/kungful/ComfyUI_to_webui.git",visible=True), inputs=[], outputs=[sponsor_display]) # 显示链接
+            tutorial_display = gr.Markdown(visible=False) # 此选项卡中用于显示链接的区域
+            tutorial_btn.click(lambda: gr.update(value="https://github.com/kungful/ComfyUI_to_webui.git",visible=True), inputs=[], outputs=[tutorial_display]) # 修正: 指向 tutorial_display
 
             # 添加一些间距或说明
             gr.Markdown("---")
