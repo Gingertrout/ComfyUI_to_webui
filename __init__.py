@@ -118,7 +118,7 @@ check_and_install_dependencies(requirements_path)
 # --- 结束自动依赖安装 ---
 
 
-from .hua_word_image import Huaword
+from .hua_word_image import Huaword, HuaFloatNode, HuaIntNode, HuaFloatNode2, HuaFloatNode3, HuaFloatNode4, HuaIntNode2, HuaIntNode3, HuaIntNode4 # 添加导入
 from .hua_word_models import Modelhua
 # Removed GradioInputImage, GradioTextOk, GradioTextBad from gradio_workflow import
 from .mind_map import Go_to_image
@@ -151,7 +151,15 @@ NODE_CLASS_MAPPINGS = {
     "BarcodeGeneratorNode": BarcodeGeneratorNode, # 使用新的类名
     "Barcode_seed": Barcode_seed,
     "Hua_gradio_jsonsave": Hua_gradio_jsonsave,
-    "Hua_Video_Output": Hua_Video_Output # 添加视频节点类映射
+    "Hua_Video_Output": Hua_Video_Output, # 添加视频节点类映射
+    "HuaFloatNode": HuaFloatNode, # 添加浮点数节点映射
+    "HuaIntNode": HuaIntNode, # 添加整数节点映射
+    "HuaFloatNode2": HuaFloatNode2,
+    "HuaFloatNode3": HuaFloatNode3,
+    "HuaFloatNode4": HuaFloatNode4,
+    "HuaIntNode2": HuaIntNode2,
+    "HuaIntNode3": HuaIntNode3,
+    "HuaIntNode4": HuaIntNode4,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -174,7 +182,15 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "BarcodeGeneratorNode": "hua_Barcode Generator", # 使用新的显示名称，与节点文件一致
     "Barcode_seed": "hua_Barcode Seed",
     "Hua_gradio_jsonsave": "📁hua_gradio_json Save",
-    "Hua_Video_Output": "🎬Video Output (Gradio)" # 添加视频节点显示名称
+    "Hua_Video_Output": "🎬Video Output (Gradio)", # 添加视频节点显示名称
+    "HuaFloatNode": "🔢Float Input (Hua)", # 添加浮点数节点显示名称
+    "HuaIntNode": "🔢Integer Input (Hua)", # 添加整数节点显示名称
+    "HuaFloatNode2": "🔢Float Input 2 (Hua)",
+    "HuaFloatNode3": "🔢Float Input 3 (Hua)",
+    "HuaFloatNode4": "🔢Float Input 4 (Hua)",
+    "HuaIntNode2": "🔢Integer Input 2 (Hua)",
+    "HuaIntNode3": "🔢Integer Input 3 (Hua)",
+    "HuaIntNode4": "🔢Integer Input 4 (Hua)"
 
     
 }
@@ -232,7 +248,8 @@ jie = """
 ⣪⢣⡳⡹⡜⣎⢧⢫⢎⢧⡫⣎⠧⡋⢊⠠⠈⡀⠄⠁⡀⢁⠠⠐⠀⡁⢁⠠⠀⠡⠀⠡⠐⠠⠀⠂⠀⠂⠠⠐⠀⢀⠠⠀⠂⢀⠀⠄⠠⠀⡈⢀⠠⠐⠈⠀⠈⠀⢁⠠⠀⠁⠄⠂⠀⠁⠠⠀⠂⠀⠂⠀⢀⠈⠀⠀⠂⠁⠠⠀⢀⠂⠠⠐⠀⡐⠀⠂⡈⠀⠄⠂⡈⠊⠆⢇⢕⢜⢔⢕
 ⣪⢣⡳⡹⣪⢺⢜⢵⡹⣪⢚⠨⠀⠄⠠⠀⠄⠀⠄⠂⠀⠄⠠⠀⠂⠠⠀⠠⠀⢁⠈⡀⠂⡁⠠⠈⢀⠁⠄⠂⠈⠀⡀⠄⠂⠀⠄⠂⠀⠂⠀⡀⠀⡀⠠⠀⠁⢈⠀⢀⠀⠂⠀⠄⠀⠄⠠⠀⠠⠀⠐⠀⠠⠀⢈⠀⠐⠀⠐⢀⠠⠐⠀⠂⠁⡀⠄⢁⠠⠐⠀⠂⠠⠈⠐⡀⢐⠀⠅⠑
 ⡗⡵⡹⡪⣎⢧⡫⡺⠘⠠⢀⠐⠀⠐⠀⠄⠂⠀⠂⠀⠂⠐⠀⠐⠈⢀⠈⢀⠐⠀⡀⠄⠐⠀⠄⠂⠀⠄⠀⠂⠈⡀⢀⠠⠀⠁⡀⠐⠈⠀⠄⠀⠄⠀⡀⠄⠈⡀⠠⠀⡐⠀⠠⠐⠀⠠⠀⠄⠂⠀⠂⠁⢀⠈⢀⠀⡈⠀⢁⠀⠠⠐⠈⢀⠁⡀⠐⢀⠠⠐⠈⠀⠂⡈⠠⠀⠄⠂⠈⠄
-➕➖✖️➗  ✨✨✨✨✨          ☀️☁️☔️❄️    ➖✖️➗ ✨✨           ✨✨   ✨   ➖✖️➗  ✨              
+➕➖✖️➗  ✨✨✨✨✨          ☀️☁️☔️❄️    ➖✖️➗ ✨✨           ✨✨   ✨   ➖✖️➗  ✨    
+           
 """
 print(jie)
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", ]
