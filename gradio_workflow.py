@@ -13,6 +13,7 @@ import torch
 import threading
 from threading import Lock, Event # 导入 Lock 和 Event
 from concurrent.futures import ThreadPoolExecutor
+import websocket # 添加 websocket 导入
 # --- 日志轮询导入 ---
 import requests # requests 可能已导入，确认一下
 import json # json 可能已导入，确认一下
@@ -31,6 +32,7 @@ from datetime import datetime
 from math import gcd
 import uuid
 import fnmatch
+from .hua_word_image import HuaFloatNode, HuaIntNode, HuaFloatNode2, HuaFloatNode3, HuaFloatNode4, HuaIntNode2, HuaIntNode3, HuaIntNode4 # 导入新的节点类
 
 # --- 全局状态变量 ---
 task_queue = deque()
@@ -40,6 +42,8 @@ last_video_result = None # 用于存储最新的视频路径
 results_lock = Lock()
 processing_event = Event() # False: 空闲, True: 正在处理
 executor = ThreadPoolExecutor(max_workers=1) # 单线程执行生成任务
+last_used_seed = -1 # 用于递增/递减模式
+seed_lock = Lock() # 用于保护 last_used_seed
 # --- 全局状态变量结束 ---
 
 # --- 日志轮询全局变量和函数 ---
@@ -72,6 +76,71 @@ def fetch_and_format_logs():
         return all_logs_text + "\n" + error_message if all_logs_text else error_message
 
 # --- 日志轮询全局变量和函数结束 ---
+
+# --- ComfyUI 节点徽章设置 ---
+# 尝试两种可能的 API 路径
+COMFYUI_API_NODE_BADGE = "http://127.0.0.1:8188/settings/Comfy.NodeBadge.NodeIdBadgeMode"
+# COMFYUI_API_NODE_BADGE = "http://127.0.0.1:8188/api/settings/Comfy.NodeBadge.NodeIdBadgeMode" # 备用路径
+
+def update_node_badge_mode(mode):
+    """发送 POST 请求更新 NodeIdBadgeMode"""
+    try:
+        # 直接尝试 JSON 格式
+        response = requests.post(
+            COMFYUI_API_NODE_BADGE,
+            json=mode,  # 使用 json 参数自动设置 Content-Type 为 application/json
+        )
+
+        if response.status_code == 200:
+            return f"✅ 成功更新节点徽章模式为: {mode}"
+        else:
+            # 尝试解析错误信息
+            try:
+                error_detail = response.json() # 尝试解析 JSON 错误
+                error_text = error_detail.get('error', response.text)
+                error_traceback = error_detail.get('traceback', '')
+                return f"❌ 更新失败 (HTTP {response.status_code}): {error_text}\n{error_traceback}".strip()
+            except json.JSONDecodeError: # 如果不是 JSON 错误
+                return f"❌ 更新失败 (HTTP {response.status_code}): {response.text}"
+    except requests.exceptions.ConnectionError:
+         return f"❌ 请求出错: 无法连接到 ComfyUI 服务器 ({COMFYUI_API_NODE_BADGE})。请确保 ComfyUI 正在运行。"
+    except Exception as e:
+        return f"❌ 请求出错: {str(e)}"
+# --- ComfyUI 节点徽章设置结束 ---
+
+# --- 重启和中断函数 ---
+def reboot_manager():
+    try:
+        # 发送重启请求，改为 GET 方法
+        reboot_url = "http://127.0.0.1:8188/api/manager/reboot"
+        response = requests.get(reboot_url)  # 改为 GET 请求
+        if response.status_code == 200:
+            # WebSocket 监听在 Gradio 中会阻塞，简化处理
+            # ws_url = "ws://127.0.0.1:8188/ws?clientId=110c8a9cbffc4e4da35ef7d2503fcccf"
+            # def on_message(ws, message):
+            #     ws.close()
+            #     # Gradio click 不能直接返回这个
+            # ws = websocket.WebSocketApp(ws_url, on_message=on_message)
+            # ws.run_forever() # 这会阻塞
+            return "重启请求已发送。请稍后检查 ComfyUI 状态。" # 简化返回信息
+        else:
+            return f"重启请求失败，状态码: {response.status_code}"
+    except Exception as e:
+        return f"发生错误: {str(e)}"
+
+def interrupt_task():
+    try:
+        # 发送清理当前任务请求
+        interrupt_url = "http://127.0.0.1:8188/api/interrupt"
+        response = requests.get(interrupt_url)
+        if response.status_code == 200:
+            return "清理当前任务请求已发送成功。"
+        else:
+            return f"清理当前任务请求失败，状态码: {response.status_code}"
+    except Exception as e:
+        return f"发生错误: {str(e)}"
+# --- 重启和中断函数结束 ---
+
 
 # --- 日志记录函数 ---
 def log_message(message):
@@ -290,10 +359,11 @@ def get_output_images():
         print(f"扫描输出目录时出错: {e}")
         return []
 
-# 修改 generate_image 函数
-def generate_image(inputimage1, prompt_text_positive, prompt_text_positive_2, prompt_text_positive_3, prompt_text_positive_4, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_checkpoint, hua_unet):
+# 修改 generate_image 函数以接受种子模式、固定种子值以及新的 Float/Int 值
+def generate_image(inputimage1, input_video, prompt_text_positive, prompt_text_positive_2, prompt_text_positive_3, prompt_text_positive_4, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_checkpoint, hua_unet, hua_float_value, hua_int_value, hua_float_value_2, hua_int_value_2, hua_float_value_3, hua_int_value_3, hua_float_value_4, hua_int_value_4, seed_mode, fixed_seed): # 添加新参数
+    global last_used_seed # 声明使用全局变量
     execution_id = str(uuid.uuid4())
-    print(f"[{execution_id}] 开始生成任务...")
+    print(f"[{execution_id}] 开始生成任务 (种子模式: {seed_mode})...")
     output_type = None # 'image' or 'video'
 
     if not json_file:
@@ -314,6 +384,7 @@ def generate_image(inputimage1, prompt_text_positive, prompt_text_positive_2, pr
 
     # --- 节点查找 (使用新的函数和真实类名) ---
     image_input_key = find_key_by_class_type(prompt, "GradioInputImage")
+    video_input_key = find_key_by_class_type(prompt, "VHS_LoadVideo") # 查找视频输入节点
     seed_key = find_key_by_class_type(prompt, "Hua_gradio_Seed")
     text_ok_key = find_key_by_class_type(prompt, "GradioTextOk")
     text_ok_key_2 = find_key_by_class_type(prompt, "GradioTextOk2")
@@ -330,6 +401,15 @@ def generate_image(inputimage1, prompt_text_positive, prompt_text_positive_2, pr
     unet_key = find_key_by_class_type(prompt, "Hua_UNETLoader")
     hua_output_key = find_key_by_class_type(prompt, "Hua_Output")
     hua_video_output_key = find_key_by_class_type(prompt, "Hua_Video_Output") # 查找视频输出节点
+    # --- 新增：查找 Float 和 Int 节点 (包括 2/3/4) ---
+    float_node_key = find_key_by_class_type(prompt, "HuaFloatNode")
+    int_node_key = find_key_by_class_type(prompt, "HuaIntNode")
+    float_node_key_2 = find_key_by_class_type(prompt, "HuaFloatNode2")
+    int_node_key_2 = find_key_by_class_type(prompt, "HuaIntNode2")
+    float_node_key_3 = find_key_by_class_type(prompt, "HuaFloatNode3")
+    int_node_key_3 = find_key_by_class_type(prompt, "HuaIntNode3")
+    float_node_key_4 = find_key_by_class_type(prompt, "HuaFloatNode4")
+    int_node_key_4 = find_key_by_class_type(prompt, "HuaIntNode4")
 
     # --- 更新 Prompt ---
     inputfilename = None # 初始化
@@ -359,17 +439,72 @@ def generate_image(inputimage1, prompt_text_positive, prompt_text_positive_2, pr
                     del prompt[image_input_key]["inputs"]["image"] # 或者设置为 None，取决于节点如何处理
         else:
              # 如果没有输入图像，确保节点输入中没有残留的文件名
-             if "image" in prompt.get(image_input_key, {}).get("inputs", {}):
+             if image_input_key and "image" in prompt.get(image_input_key, {}).get("inputs", {}):
                  # 尝试移除或设置为空，取决于节点期望
                  # prompt[image_input_key]["inputs"]["image"] = None
                  print(f"[{execution_id}] 无输入图像提供，清除节点 {image_input_key} 的 image 输入。")
                  # 或者如果节点必须有输入，则可能需要报错或使用默认图像
                  # return None, None # 如果图生图节点必须有输入
 
+    # --- 处理视频输入 ---
+    inputvideofilename = None
+    if video_input_key:
+        if input_video is not None and os.path.exists(input_video):
+            try:
+                # Gradio 返回的是临时文件路径，需要复制到 ComfyUI 的 input 目录
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                # 保留原始扩展名
+                original_ext = os.path.splitext(input_video)[1]
+                inputvideofilename = f"gradio_input_{timestamp}_{random.randint(100, 999)}{original_ext}"
+                dest_path = os.path.join(INPUT_DIR, inputvideofilename)
+                shutil.copy2(input_video, dest_path) # 使用 copy2 保留元数据
+                prompt[video_input_key]["inputs"]["video"] = inputvideofilename
+                print(f"[{execution_id}] 输入视频已复制到: {dest_path}")
+            except Exception as e:
+                print(f"[{execution_id}] 复制输入视频时出错: {e}")
+                # 清除节点输入，让其使用默认值（如果存在）
+                if "video" in prompt[video_input_key]["inputs"]:
+                    del prompt[video_input_key]["inputs"]["video"]
+        else:
+            # 如果没有输入视频或路径无效，确保节点输入中没有残留的文件名
+            if "video" in prompt.get(video_input_key, {}).get("inputs", {}):
+                print(f"[{execution_id}] 无有效输入视频提供，清除节点 {video_input_key} 的 video 输入。")
+                # 移除或设置为空，取决于节点期望
+                 # prompt[video_input_key]["inputs"]["video"] = None
+
     if seed_key:
-        seed = random.randint(0, 0xffffffff)
-        prompt[seed_key]["inputs"]["seed"] = seed
-        print(f"[{execution_id}] 设置随机种子: {seed}")
+        with seed_lock: # 保护对 last_used_seed 的访问
+            current_seed = 0
+            if seed_mode == "随机":
+                current_seed = random.randint(0, 0xffffffff)
+                print(f"[{execution_id}] 种子模式: 随机. 生成种子: {current_seed}")
+            elif seed_mode == "递增":
+                if last_used_seed == -1: # 如果是第一次运行递增
+                    last_used_seed = random.randint(0, 0xffffffff -1) # 随机选一个初始值，避免总是从0开始且确保能+1
+                last_used_seed = (last_used_seed + 1) & 0xffffffff # 递增并处理溢出 (按位与)
+                current_seed = last_used_seed
+                print(f"[{execution_id}] 种子模式: 递增. 使用种子: {current_seed}")
+            elif seed_mode == "递减":
+                if last_used_seed == -1: # 如果是第一次运行递减
+                    last_used_seed = random.randint(1, 0xffffffff) # 随机选一个初始值，避免总是从0开始且确保能-1
+                last_used_seed = (last_used_seed - 1) & 0xffffffff # 递减并处理下溢 (按位与)
+                current_seed = last_used_seed
+                print(f"[{execution_id}] 种子模式: 递减. 使用种子: {current_seed}")
+            elif seed_mode == "固定":
+                try:
+                    current_seed = int(fixed_seed) & 0xffffffff # 确保是整数且在范围内
+                    last_used_seed = current_seed # 固定模式也更新 last_used_seed
+                    print(f"[{execution_id}] 种子模式: 固定. 使用种子: {current_seed}")
+                except (ValueError, TypeError):
+                    current_seed = random.randint(0, 0xffffffff)
+                    last_used_seed = current_seed
+                    print(f"[{execution_id}] 种子模式: 固定. 固定种子值无效 ('{fixed_seed}')，回退到随机种子: {current_seed}")
+            else: # 未知模式，默认为随机
+                current_seed = random.randint(0, 0xffffffff)
+                last_used_seed = current_seed
+                print(f"[{execution_id}] 未知种子模式 '{seed_mode}'. 回退到随机种子: {current_seed}")
+
+            prompt[seed_key]["inputs"]["seed"] = current_seed
 
     # 更新文本提示词 (如果节点存在)
     if text_ok_key: prompt[text_ok_key]["inputs"]["string"] = prompt_text_positive
@@ -397,6 +532,40 @@ def generate_image(inputimage1, prompt_text_positive, prompt_text_positive_2, pr
     if lora_key and hua_lora != "None": prompt[lora_key]["inputs"]["lora_name"] = hua_lora
     if checkpoint_key and hua_checkpoint != "None": prompt[checkpoint_key]["inputs"]["ckpt_name"] = hua_checkpoint
     if unet_key and hua_unet != "None": prompt[unet_key]["inputs"]["unet_name"] = hua_unet
+
+    # --- 新增：更新 Float 和 Int 节点输入 ---
+    if float_node_key and hua_float_value is not None:
+        try:
+            prompt[float_node_key]["inputs"]["float_value"] = float(hua_float_value)
+            print(f"[{execution_id}] 设置浮点数输入: {hua_float_value}")
+        except (ValueError, TypeError, KeyError) as e:
+            print(f"[{execution_id}] 更新浮点数输入时出错: {e}. 使用默认值或跳过。")
+
+    if int_node_key and hua_int_value is not None:
+        try:
+            prompt[int_node_key]["inputs"]["int_value"] = int(hua_int_value)
+            print(f"[{execution_id}] 设置整数输入: {hua_int_value}")
+        except (ValueError, TypeError, KeyError) as e:
+            print(f"[{execution_id}] 更新整数输入时出错: {e}. 使用默认值或跳过。")
+
+    # --- 新增：更新 Float/Int 2/3/4 节点输入 ---
+    new_inputs = {
+        float_node_key_2: hua_float_value_2, int_node_key_2: hua_int_value_2,
+        float_node_key_3: hua_float_value_3, int_node_key_3: hua_int_value_3,
+        float_node_key_4: hua_float_value_4, int_node_key_4: hua_int_value_4,
+    }
+    for node_key, value in new_inputs.items():
+        if node_key and value is not None:
+            node_info = prompt.get(node_key, {})
+            node_type = node_info.get("class_type", "Unknown")
+            input_field = "float_value" if "Float" in node_type else "int_value"
+            try:
+                converted_value = float(value) if "Float" in node_type else int(value)
+                prompt[node_key]["inputs"][input_field] = converted_value
+                print(f"[{execution_id}] 设置 {node_type} 输入 ({input_field}): {converted_value}")
+            except (ValueError, TypeError, KeyError) as e:
+                print(f"[{execution_id}] 更新 {node_type} 输入时出错: {e}. 使用默认值或跳过。")
+
 
     # --- 设置输出节点的 unique_id ---
     if hua_output_key:
@@ -594,6 +763,7 @@ def fuck(json_file):
 def get_workflow_defaults_and_visibility(json_file):
     defaults = {
         "visible_image_input": False,
+        "visible_video_input": False, # 新增视频输入可见性
         "visible_pos_prompt_1": False,
         "visible_pos_prompt_2": False,
         "visible_pos_prompt_3": False,
@@ -609,6 +779,31 @@ def get_workflow_defaults_and_visibility(json_file):
         "visible_seed_indicator": False,
         "visible_image_output": False, # 新增
         "visible_video_output": False, # 新增
+        "visible_float_input": False, # 新增 Float 可见性
+        "default_float_label": "浮点数输入 (Float)", # 新增 Float 默认标签
+        "visible_int_input": False,   # 新增 Int 可见性
+        "default_int_label": "整数输入 (Int)",     # 新增 Int 默认标签
+        "visible_float_input_2": False,
+        "default_float_label_2": "浮点数输入 2 (Float)",
+        "visible_float_input_3": False,
+        "default_float_label_3": "浮点数输入 3 (Float)",
+        "visible_float_input_4": False,
+        "default_float_label_4": "浮点数输入 4 (Float)",
+        "visible_int_input_2": False,
+        "default_int_label_2": "整数输入 2 (Int)",
+        "visible_int_input_3": False,
+        "default_int_label_3": "整数输入 3 (Int)",
+        "visible_int_input_4": False,
+        "default_int_label_4": "整数输入 4 (Int)",
+        # --- 新增：分辨率和提示词默认值 ---
+        "default_width": 512,
+        "default_height": 512,
+        "default_pos_prompt_1": "",
+        "default_pos_prompt_2": "",
+        "default_pos_prompt_3": "",
+        "default_pos_prompt_4": "",
+        "default_neg_prompt": "",
+        # --- 新增结束 ---
     }
     if not json_file or not os.path.exists(os.path.join(OUTPUT_DIR, json_file)):
         print(f"JSON 文件无效或不存在: {json_file}")
@@ -631,15 +826,93 @@ def get_workflow_defaults_and_visibility(json_file):
 
     # 检查节点存在性并更新可见性 (使用新的内部函数和真实类名)
     defaults["visible_image_input"] = find_key_by_class_type_internal(prompt, "GradioInputImage") is not None
-    defaults["visible_pos_prompt_1"] = find_key_by_class_type_internal(prompt, "GradioTextOk") is not None
-    defaults["visible_pos_prompt_2"] = find_key_by_class_type_internal(prompt, "GradioTextOk2") is not None
-    defaults["visible_pos_prompt_3"] = find_key_by_class_type_internal(prompt, "GradioTextOk3") is not None
-    defaults["visible_pos_prompt_4"] = find_key_by_class_type_internal(prompt, "GradioTextOk4") is not None
-    defaults["visible_neg_prompt"] = find_key_by_class_type_internal(prompt, "GradioTextBad") is not None
-    defaults["visible_resolution"] = find_key_by_class_type_internal(prompt, "Hua_gradio_resolution") is not None
+    defaults["visible_video_input"] = find_key_by_class_type_internal(prompt, "VHS_LoadVideo") is not None # 检查视频输入节点
+
+    # --- 检查提示词节点并提取默认值 ---
+    pos_prompt_1_key = find_key_by_class_type_internal(prompt, "GradioTextOk")
+    if pos_prompt_1_key and pos_prompt_1_key in prompt and "inputs" in prompt[pos_prompt_1_key]:
+        defaults["visible_pos_prompt_1"] = True
+        defaults["default_pos_prompt_1"] = prompt[pos_prompt_1_key]["inputs"].get("string", "")
+    else: defaults["visible_pos_prompt_1"] = False
+
+    pos_prompt_2_key = find_key_by_class_type_internal(prompt, "GradioTextOk2")
+    if pos_prompt_2_key and pos_prompt_2_key in prompt and "inputs" in prompt[pos_prompt_2_key]:
+        defaults["visible_pos_prompt_2"] = True
+        defaults["default_pos_prompt_2"] = prompt[pos_prompt_2_key]["inputs"].get("string", "")
+    else: defaults["visible_pos_prompt_2"] = False
+
+    pos_prompt_3_key = find_key_by_class_type_internal(prompt, "GradioTextOk3")
+    if pos_prompt_3_key and pos_prompt_3_key in prompt and "inputs" in prompt[pos_prompt_3_key]:
+        defaults["visible_pos_prompt_3"] = True
+        defaults["default_pos_prompt_3"] = prompt[pos_prompt_3_key]["inputs"].get("string", "")
+    else: defaults["visible_pos_prompt_3"] = False
+
+    pos_prompt_4_key = find_key_by_class_type_internal(prompt, "GradioTextOk4")
+    if pos_prompt_4_key and pos_prompt_4_key in prompt and "inputs" in prompt[pos_prompt_4_key]:
+        defaults["visible_pos_prompt_4"] = True
+        defaults["default_pos_prompt_4"] = prompt[pos_prompt_4_key]["inputs"].get("string", "")
+    else: defaults["visible_pos_prompt_4"] = False
+
+    neg_prompt_key = find_key_by_class_type_internal(prompt, "GradioTextBad")
+    if neg_prompt_key and neg_prompt_key in prompt and "inputs" in prompt[neg_prompt_key]:
+        defaults["visible_neg_prompt"] = True
+        defaults["default_neg_prompt"] = prompt[neg_prompt_key]["inputs"].get("string", "")
+    else: defaults["visible_neg_prompt"] = False
+
+    # --- 检查分辨率节点并提取默认值 ---
+    resolution_key = find_key_by_class_type_internal(prompt, "Hua_gradio_resolution")
+    if resolution_key and resolution_key in prompt and "inputs" in prompt[resolution_key]:
+        defaults["visible_resolution"] = True
+        # 尝试提取，如果失败则保留默认值 512
+        try: defaults["default_width"] = int(prompt[resolution_key]["inputs"].get("custom_width", 512))
+        except (ValueError, TypeError): pass
+        try: defaults["default_height"] = int(prompt[resolution_key]["inputs"].get("custom_height", 512))
+        except (ValueError, TypeError): pass
+    else: defaults["visible_resolution"] = False
+
     defaults["visible_seed_indicator"] = find_key_by_class_type_internal(prompt, "Hua_gradio_Seed") is not None
     defaults["visible_image_output"] = find_key_by_class_type_internal(prompt, "Hua_Output") is not None # 检查图片输出
     defaults["visible_video_output"] = find_key_by_class_type_internal(prompt, "Hua_Video_Output") is not None # 检查视频输出
+
+    # --- 新增：检查 Float 和 Int 节点可见性并提取 name ---
+    float_node_key = find_key_by_class_type_internal(prompt, "HuaFloatNode")
+    if float_node_key and float_node_key in prompt and "inputs" in prompt[float_node_key]:
+        defaults["visible_float_input"] = True
+        float_name = prompt[float_node_key]["inputs"].get("name", "FloatInput") # 获取 name，提供默认值
+        defaults["default_float_label"] = f"{float_name}: 浮点数输入 (Float)" # 设置带前缀的标签
+    else:
+        defaults["visible_float_input"] = False
+        defaults["default_float_label"] = "浮点数输入 (Float)" # 默认标签
+
+    int_node_key = find_key_by_class_type_internal(prompt, "HuaIntNode")
+    if int_node_key and int_node_key in prompt and "inputs" in prompt[int_node_key]:
+        defaults["visible_int_input"] = True
+        int_name = prompt[int_node_key]["inputs"].get("name", "IntInput") # 获取 name，提供默认值
+        defaults["default_int_label"] = f"{int_name}: 整数输入 (Int)" # 设置带前缀的标签
+    else:
+        defaults["visible_int_input"] = False
+        defaults["default_int_label"] = "整数输入 (Int)" # 默认标签
+
+    # --- 新增：检查 Float/Int 2/3/4 节点 ---
+    for i in range(2, 5):
+        # Float
+        float_node_key_i = find_key_by_class_type_internal(prompt, f"HuaFloatNode{i}")
+        if float_node_key_i and float_node_key_i in prompt and "inputs" in prompt[float_node_key_i]:
+            defaults[f"visible_float_input_{i}"] = True
+            float_name_i = prompt[float_node_key_i]["inputs"].get("name", f"FloatInput{i}")
+            defaults[f"default_float_label_{i}"] = f"{float_name_i}: 浮点数输入 {i} (Float)"
+        else:
+            defaults[f"visible_float_input_{i}"] = False
+            defaults[f"default_float_label_{i}"] = f"浮点数输入 {i} (Float)"
+        # Int
+        int_node_key_i = find_key_by_class_type_internal(prompt, f"HuaIntNode{i}")
+        if int_node_key_i and int_node_key_i in prompt and "inputs" in prompt[int_node_key_i]:
+            defaults[f"visible_int_input_{i}"] = True
+            int_name_i = prompt[int_node_key_i]["inputs"].get("name", f"IntInput{i}")
+            defaults[f"default_int_label_{i}"] = f"{int_name_i}: 整数输入 {i} (Int)"
+        else:
+            defaults[f"visible_int_input_{i}"] = False
+            defaults[f"default_int_label_{i}"] = f"整数输入 {i} (Int)"
 
     # 检查模型节点并提取默认值 (使用新的内部函数和真实类名)
     lora_key = find_key_by_class_type_internal(prompt, "Hua_LoraLoaderModelOnly")
@@ -670,8 +943,8 @@ def get_workflow_defaults_and_visibility(json_file):
     return defaults
 
 
-# --- 队列处理函数 ---
-def run_queued_tasks(inputimage1, prompt_text_positive, prompt_text_positive_2, prompt_text_positive_3, prompt_text_positive_4, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_checkpoint, hua_unet, queue_count=1, progress=gr.Progress(track_tqdm=True)):
+# --- 队列处理函数 (更新签名以包含种子参数和新 Float/Int) ---
+def run_queued_tasks(inputimage1, input_video, prompt_text_positive, prompt_text_positive_2, prompt_text_positive_3, prompt_text_positive_4, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_checkpoint, hua_unet, hua_float_value, hua_int_value, hua_float_value_2, hua_int_value_2, hua_float_value_3, hua_int_value_3, hua_float_value_4, hua_int_value_4, seed_mode, fixed_seed, queue_count=1, progress=gr.Progress(track_tqdm=True)): # 添加新参数
     global accumulated_image_results, last_video_result # 声明我们要修改全局变量
 
     # 初始化当前批次结果 (仅用于批量图片任务)
@@ -688,8 +961,9 @@ def run_queued_tasks(inputimage1, prompt_text_positive, prompt_text_positive_2, 
          with results_lock:
              last_video_result = None
 
-    task_params = (inputimage1, prompt_text_positive, prompt_text_positive_2, prompt_text_positive_3, prompt_text_positive_4, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_checkpoint, hua_unet)
-    log_message(f"[QUEUE_DEBUG] 接收到新任务请求。当前队列长度 (加锁前): {len(task_queue)}")
+    # 将所有参数（包括新的种子参数和 Float/Int 值）打包到 task_params
+    task_params = (inputimage1, input_video, prompt_text_positive, prompt_text_positive_2, prompt_text_positive_3, prompt_text_positive_4, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_checkpoint, hua_unet, hua_float_value, hua_int_value, hua_float_value_2, hua_int_value_2, hua_float_value_3, hua_int_value_3, hua_float_value_4, hua_int_value_4, seed_mode, fixed_seed) # 添加新参数到元组
+    log_message(f"[QUEUE_DEBUG] 接收到新任务请求 (种子模式: {seed_mode})。当前队列长度 (加锁前): {len(task_queue)}")
     with queue_lock:
         for _ in range(max(1, int(queue_count))):
             task_queue.append(task_params)
@@ -925,125 +1199,222 @@ hacker_css = """
 """
 
 with gr.Blocks(css=hacker_css) as demo:
-    gr.Markdown("# [封装comfyUI工作流](https://github.com/kungful/ComfyUI_to_webui.git)")
-
-    with gr.Row():
-       with gr.Column():  # 左侧列
-           # --- 添加实时日志显示区域 ---
-           with gr.Accordion("实时日志 (ComfyUI)", open=True, elem_classes="log-display-container"):
-               log_display = gr.Textbox(
-                   label="日志输出",
-                   lines=20,
-                   max_lines=20,
-                   autoscroll=True,
-                   interactive=False,
-                   show_copy_button=True,
-                   elem_classes="log-display-container"  # 使用 CSS 控制滚动条和高度
-               )
-            
-           image_accordion = gr.Accordion("上传图像 (折叠,有gradio传入图像节点才会显示上传)", visible=True, open=True)
-           with image_accordion:
-               input_image = gr.Image(type="pil", label="上传图像", height=256, width=256)
-
-           with gr.Row():
-               with gr.Column(scale=3):
-                   json_dropdown = gr.Dropdown(choices=get_json_files(), label="选择工作流")
-               with gr.Column(scale=1):
-                   with gr.Column(scale=1): # 调整比例使按钮不至于太宽
-                       refresh_button = gr.Button("🔄 刷新工作流")
+    with gr.Tab("封装comfyui工作流"):
+        with gr.Row():
+           with gr.Column():  # 左侧列
+               # --- 添加实时日志显示区域 ---
+               with gr.Accordion("实时日志 (ComfyUI)", open=True, elem_classes="log-display-container"):
+                   log_display = gr.Textbox(
+                       label="日志输出",
+                       lines=20,
+                       max_lines=20,
+                       autoscroll=True,
+                       interactive=False,
+                       show_copy_button=True,
+                       elem_classes="log-display-container"  # 使用 CSS 控制滚动条和高度
+                   )
+                
+               image_accordion = gr.Accordion("上传图像 (折叠,有gradio传入图像节点才会显示上传)", visible=True, open=True)
+               with image_accordion:
+                   input_image = gr.Image(type="pil", label="上传图像", height=256, width=256)
+    
+               # --- 添加视频上传组件 ---
+               video_accordion = gr.Accordion("上传视频 (折叠,有gradio传入视频节点才会显示上传)", visible=False, open=True) # 初始隐藏
+               with video_accordion:
+                   # 使用 filepath 类型，因为 ComfyUI 节点需要文件名
+                   # sources=["upload"] 限制为仅上传
+                   input_video = gr.Video(label="上传视频", sources=["upload"], height=256, width=256)
+    
+               with gr.Row():
+                   with gr.Column(scale=3):
+                       json_dropdown = gr.Dropdown(choices=get_json_files(), label="选择工作流")
                    with gr.Column(scale=1):
-                       refresh_model_button = gr.Button("🔄 刷新模型")
-
-
-
-           with gr.Row():
-               with gr.Accordion("正向提示文本(折叠)", open=True) as positive_prompt_col:
-                   prompt_positive = gr.Textbox(label="正向提示文本 1", elem_id="prompt_positive_1")
-                   prompt_positive_2 = gr.Textbox(label="正向提示文本 2", elem_id="prompt_positive_2")
-                   prompt_positive_3 = gr.Textbox(label="正向提示文本 3", elem_id="prompt_positive_3")
-                   prompt_positive_4 = gr.Textbox(label="正向提示文本 4", elem_id="prompt_positive_4")
-           with gr.Column() as negative_prompt_col:
-               prompt_negative = gr.Textbox(label="负向提示文本", elem_id="prompt_negative")
-
-           with gr.Row() as resolution_row:
-               with gr.Column(scale=1):
-                   resolution_dropdown = gr.Dropdown(choices=resolution_presets, label="分辨率预设", value=resolution_presets[0])
-               with gr.Column(scale=1):
-                   with gr.Accordion("宽度和高度设置", open=False):
+                       with gr.Column(scale=1): # 调整比例使按钮不至于太宽
+                           refresh_button = gr.Button("🔄 刷新工作流")
                        with gr.Column(scale=1):
-                           hua_width = gr.Number(label="宽度", value=512, minimum=64, step=64, elem_id="hua_width_input")
-                           hua_height = gr.Number(label="高度", value=512, minimum=64, step=64, elem_id="hua_height_input")
-                           ratio_display = gr.Markdown("当前比例: 1:1")
+                           refresh_model_button = gr.Button("🔄 刷新模型")
+    
+    
+    
+               with gr.Row():
+                   with gr.Accordion("正向提示文本(折叠)", open=True) as positive_prompt_col:
+                       prompt_positive = gr.Textbox(label="正向提示文本 1", elem_id="prompt_positive_1")
+                       prompt_positive_2 = gr.Textbox(label="正向提示文本 2", elem_id="prompt_positive_2")
+                       prompt_positive_3 = gr.Textbox(label="正向提示文本 3", elem_id="prompt_positive_3")
+                       prompt_positive_4 = gr.Textbox(label="正向提示文本 4", elem_id="prompt_positive_4")
+               with gr.Column() as negative_prompt_col:
+                   prompt_negative = gr.Textbox(label="负向提示文本", elem_id="prompt_negative")
+    
+               with gr.Row() as resolution_row:
+                   with gr.Column(scale=1):
+                       resolution_dropdown = gr.Dropdown(choices=resolution_presets, label="分辨率预设", value=resolution_presets[0])
+                   with gr.Column(scale=1):
+                       with gr.Accordion("宽度和高度设置", open=False):
+                           with gr.Column(scale=1):
+                               hua_width = gr.Number(label="宽度", value=512, minimum=64, step=64, elem_id="hua_width_input")
+                               hua_height = gr.Number(label="高度", value=512, minimum=64, step=64, elem_id="hua_height_input")
+                               ratio_display = gr.Markdown("当前比例: 1:1")
+                       with gr.Row():
+                           with gr.Column(scale=1):
+                              flip_btn = gr.Button("↔ 切换宽高")
+    
+    
+    
+               with gr.Row():
+                   with gr.Column(scale=1):
+                       hua_lora_dropdown = gr.Dropdown(choices=lora_list, label="选择 Lora 模型", value="None", elem_id="hua_lora_dropdown")
+                   with gr.Column(scale=1):
+                       hua_checkpoint_dropdown = gr.Dropdown(choices=checkpoint_list, label="选择 Checkpoint 模型", value="None", elem_id="hua_checkpoint_dropdown")
+                   with gr.Column(scale=1):
+                       hua_unet_dropdown = gr.Dropdown(choices=unet_list, label="选择 UNet 模型", value="None", elem_id="hua_unet_dropdown")
+    
+               # --- 添加 Float 和 Int 输入组件 (初始隐藏) ---
+               with gr.Row() as float_int_row:
+                    with gr.Column(scale=1):
+                        hua_float_input = gr.Number(label="浮点数输入 (Float)", visible=False, elem_id="hua_float_input")
+                        hua_float_input_2 = gr.Number(label="浮点数输入 2 (Float)", visible=False, elem_id="hua_float_input_2")
+                        hua_float_input_3 = gr.Number(label="浮点数输入 3 (Float)", visible=False, elem_id="hua_float_input_3")
+                        hua_float_input_4 = gr.Number(label="浮点数输入 4 (Float)", visible=False, elem_id="hua_float_input_4")
+                    with gr.Column(scale=1):
+                        hua_int_input = gr.Number(label="整数输入 (Int)", precision=0, visible=False, elem_id="hua_int_input") # precision=0 for integer
+                        hua_int_input_2 = gr.Number(label="整数输入 2 (Int)", precision=0, visible=False, elem_id="hua_int_input_2")
+                        hua_int_input_3 = gr.Number(label="整数输入 3 (Int)", precision=0, visible=False, elem_id="hua_int_input_3")
+                        hua_int_input_4 = gr.Number(label="整数输入 4 (Int)", precision=0, visible=False, elem_id="hua_int_input_4")
+    
+    
+    
+    
+    
+    
+    
+           with gr.Column(): # 右侧列
+    
+               with gr.Accordion("预览所有输出图片 (点击加载)", open=False):
+                   output_preview_gallery = gr.Gallery(label="输出图片预览", columns=4, height="auto", preview=True, object_fit="contain")
+                   load_output_button = gr.Button("加载输出图片")
+    
+               with gr.Row():
+                   # 图片和视频输出区域，初始都隐藏，根据工作流显示
+                   output_gallery = gr.Gallery(label="生成图片结果", columns=3, height=600, preview=True, object_fit="contain", visible=False)
+                   output_video = gr.Video(label="生成视频结果", height=600, autoplay=True, loop=True, visible=False) # 添加视频组件
+    
+               # --- 添加队列控制按钮 ---
+               with gr.Row():
+                   queue_status_display = gr.Markdown("队列中: 0 | 处理中: 否") # 移到按钮上方
+    
+               with gr.Row():
                    with gr.Row():
-                       with gr.Column(scale=1):
-                          flip_btn = gr.Button("↔ 切换宽高")
-
-
-
-           with gr.Row():
-               with gr.Column(scale=1):
-                   hua_lora_dropdown = gr.Dropdown(choices=lora_list, label="选择 Lora 模型", value="None", elem_id="hua_lora_dropdown")
-               with gr.Column(scale=1):
-                   hua_checkpoint_dropdown = gr.Dropdown(choices=checkpoint_list, label="选择 Checkpoint 模型", value="None", elem_id="hua_checkpoint_dropdown")
-               with gr.Column(scale=1):
-                   hua_unet_dropdown = gr.Dropdown(choices=unet_list, label="选择 UNet 模型", value="None", elem_id="hua_unet_dropdown")
-
-
-
-
-
-
-
-       with gr.Column(): # 右侧列
-
-           with gr.Accordion("预览所有输出图片 (点击加载)", open=False):
-               output_preview_gallery = gr.Gallery(label="输出图片预览", columns=4, height="auto", preview=True, object_fit="contain")
-               load_output_button = gr.Button("加载输出图片")
-
-           with gr.Row():
-               # 图片和视频输出区域，初始都隐藏，根据工作流显示
-               output_gallery = gr.Gallery(label="生成图片结果", columns=3, height=600, preview=True, object_fit="contain", visible=False)
-               output_video = gr.Video(label="生成视频结果", height=600, autoplay=True, loop=True, visible=False) # 添加视频组件
-
-           # --- 添加队列控制按钮 ---
-           with gr.Row():
+                       run_button = gr.Button("🚀 开始跑图 (加入队列)", variant="primary",elem_id="align-center")
+                       clear_queue_button = gr.Button("🧹 清除队列",elem_id="align-center")
+    
+                   with gr.Row():
+                       clear_history_button = gr.Button("🗑️ 清除显示历史")
+                        # --- 添加赞助按钮和显示区域 ---
+                       sponsor_button = gr.Button("💖 赞助作者")
+    
+                   with gr.Row():
+                       queue_count = gr.Number(label="队列数量", value=1, minimum=1, step=1, precision=0)
+    
+    
+    
+    
+    
                with gr.Row():
-                   run_button = gr.Button("🚀 开始跑图 (加入队列)", variant="primary",elem_id="align-center")
-                   clear_queue_button = gr.Button("🧹 清除队列",elem_id="align-center")
-
-               with gr.Row():
-                   clear_history_button = gr.Button("🗑️ 清除显示历史")
-                    # --- 添加赞助按钮和显示区域 ---
-                   sponsor_button = gr.Button("💖 赞助作者")
-
-               with gr.Row():
-                   queue_count = gr.Number(label="队列数量", value=1, minimum=1, step=1, precision=0)
-
-
-
-
-
-           with gr.Row():
-               with gr.Column(scale=1):
-                   Random_Seed = gr.HTML("""
-                   <div style='text-align: center; margin-bottom: 5px;'>
-                       <h2 style="font-size: 12px; margin: 0; color: #00ff00; font-style: italic;">
-                           已添加gradio随机种节点
-                       </h2>
-                   </div>
-                   """, visible=False) # 初始隐藏，由 check_seed_node 控制
-                   sponsor_display = gr.Markdown(visible=False) # 初始隐藏
-               with gr.Column(scale=1):
-                   gr.Markdown('我要打十个') # 保留这句骚话
-               with gr.Row():
+                   with gr.Column(scale=1, visible=False) as seed_options_col: # 种子选项列，初始隐藏
+                       seed_mode_dropdown = gr.Dropdown(
+                           choices=["随机", "递增", "递减", "固定"],
+                           value="随机",
+                           label="种子模式",
+                           elem_id="seed_mode_dropdown"
+                       )
+                       fixed_seed_input = gr.Number(
+                           label="固定种子值",
+                           value=0,
+                           minimum=0,
+                           maximum=0xffffffff, # Max unsigned 32-bit int
+                           step=1,
+                           precision=0,
+                           visible=False, # 初始隐藏，仅在模式为 "固定" 时显示
+                           elem_id="fixed_seed_input"
+                       )
+                       sponsor_display = gr.Markdown(visible=False) # 初始隐藏
                    with gr.Column(scale=1):
-                       queue_status_display = gr.Markdown("队列中: 0 | 处理中: 否")
+                       gr.Markdown('我要打十个') # 保留这句骚话
+                   # with gr.Row(): # queue_status_display 已移到上方
+                   #     with gr.Column(scale=1):
+                   #         queue_status_display = gr.Markdown("队列中: 0 | 处理中: 否")
+    with gr.Tab("设置"):
+        with gr.Column(): # 使用 Column 布局
+            gr.Markdown("## 🎛️ ComfyUI 节点徽章控制")
+            gr.Markdown("控制 ComfyUI 界面中节点 ID 徽章的显示方式。设置完成请刷新comfyui界面即可。")
+            node_badge_mode_radio = gr.Radio(
+                choices=["Show all", "Hover", "None"],
+                value="Show all", # 默认值可以尝试从 ComfyUI 获取，但这里先设为 Show all
+                label="选择节点 ID 徽章显示模式"
+            )
+            node_badge_output_text = gr.Textbox(label="更新结果", interactive=False)
 
+            # 将事件处理移到 UI 定义之后
+            node_badge_mode_radio.change(
+                fn=update_node_badge_mode,
+                inputs=node_badge_mode_radio,
+                outputs=node_badge_output_text
+            )
+            # TODO: 添加一个按钮或在加载时尝试获取当前设置并更新 Radio 的 value
 
+            gr.Markdown("---") # 添加分隔线
+            gr.Markdown("## ⚡ ComfyUI 控制")
+            gr.Markdown("重启 ComfyUI 或中断当前正在执行的任务。")
 
+            with gr.Row():
+                reboot_button = gr.Button("🔄 重启ComfyUI")
+                interrupt_button = gr.Button("🛑 清理/中断当前任务")
+
+            reboot_output = gr.Textbox(label="重启结果", interactive=False)
+            interrupt_output = gr.Textbox(label="清理结果", interactive=False)
+
+            # 将事件处理移到 UI 定义之后
+            reboot_button.click(fn=reboot_manager, inputs=[], outputs=[reboot_output])
+            interrupt_button.click(fn=interrupt_task, inputs=[], outputs=[interrupt_output])
+
+    with gr.Tab("信息"):
+        with gr.Column():
+            gr.Markdown("### ℹ️ 插件与开发者信息") # 添加标题
+
+            # GitHub Repo Button
+            github_repo_btn = gr.Button("本插件 GitHub 仓库")
+            github_repo_btn.click(lambda: gr.update(value="https://github.com/kungful/ComfyUI_to_webui.git",visible=True), inputs=[], outputs=[sponsor_display]) # 显示链接
+
+            # Free Mirror Button
+            free_mirror_btn = gr.Button("开发者的免费镜像")
+            free_mirror_btn.click(lambda: gr.update(value="https://www.xiangongyun.com/image/detail/7b36c1a3-da41-4676-b5b3-03ec25d6e197",visible=True), inputs=[], outputs=[sponsor_display]) # 显示链接
+
+            # Sponsor Button & Display Area
+            sponsor_info_btn = gr.Button("💖 赞助开发者")
+            info_sponsor_display = gr.Markdown(visible=False) # 此选项卡中用于显示赞助信息的区域
+            sponsor_info_btn.click(fn=show_sponsor_code, inputs=[], outputs=[info_sponsor_display]) # 目标新的显示区域
+
+            # Contact Button & Display Area
+            contact_btn = gr.Button("开发者联系方式")
+            contact_display = gr.Markdown(visible=False) # 联系信息显示区域
+            # 使用 lambda 更新 Markdown 组件的值并使其可见
+            contact_btn.click(lambda: gr.update(value="**邮箱:** blenderkrita@gmail.com", visible=True), inputs=[], outputs=[contact_display])
+
+            # Tutorial Button
+            tutorial_btn = gr.Button("使用教程 (GitHub)")
+            tutorial_btn.click(lambda: gr.update(value="https://github.com/kungful/ComfyUI_to_webui.git",visible=True), inputs=[], outputs=[sponsor_display]) # 显示链接
+
+            # 添加一些间距或说明
+            gr.Markdown("---")
+            gr.Markdown("点击上方按钮获取相关信息或跳转链接。")
 
 
     # --- 事件处理 ---
+
+    # --- 节点徽章设置事件 (已在 Tab 内定义) ---
+    # node_badge_mode_radio.change(fn=update_node_badge_mode, inputs=node_badge_mode_radio, outputs=node_badge_output_text)
+
+    # --- 其他事件处理 ---
     resolution_dropdown.change(fn=update_from_preset, inputs=resolution_dropdown, outputs=[resolution_dropdown, hua_width, hua_height, ratio_display])
     hua_width.change(fn=update_from_inputs, inputs=[hua_width, hua_height], outputs=[resolution_dropdown, ratio_display])
     hua_height.change(fn=update_from_inputs, inputs=[hua_width, hua_height], outputs=[resolution_dropdown, ratio_display])
@@ -1052,41 +1423,90 @@ with gr.Blocks(css=hacker_css) as demo:
     # JSON 下拉菜单改变时，更新所有相关组件的可见性、默认值 + 输出区域可见性
     def update_ui_on_json_change(json_file):
         defaults = get_workflow_defaults_and_visibility(json_file)
+        # 计算分辨率预设和比例显示
+        closest_preset = find_closest_preset(defaults["default_width"], defaults["default_height"])
+        ratio_str = calculate_aspect_ratio(defaults["default_width"], defaults["default_height"])
+        ratio_display_text = f"当前比例: {ratio_str}"
+
         return (
             gr.update(visible=defaults["visible_image_input"]),
-            gr.update(visible=defaults["visible_pos_prompt_1"]),
-            gr.update(visible=defaults["visible_pos_prompt_2"]),
-            gr.update(visible=defaults["visible_pos_prompt_3"]),
-            gr.update(visible=defaults["visible_pos_prompt_4"]),
-            gr.update(visible=defaults["visible_neg_prompt"]),
+            gr.update(visible=defaults["visible_video_input"]),
+            # 更新提示词可见性和值
+            gr.update(visible=defaults["visible_pos_prompt_1"], value=defaults["default_pos_prompt_1"]),
+            gr.update(visible=defaults["visible_pos_prompt_2"], value=defaults["default_pos_prompt_2"]),
+            gr.update(visible=defaults["visible_pos_prompt_3"], value=defaults["default_pos_prompt_3"]),
+            gr.update(visible=defaults["visible_pos_prompt_4"], value=defaults["default_pos_prompt_4"]),
+            gr.update(visible=defaults["visible_neg_prompt"], value=defaults["default_neg_prompt"]),
+            # 更新分辨率区域可见性
             gr.update(visible=defaults["visible_resolution"]),
+            # 更新分辨率组件的值
+            gr.update(value=closest_preset), # resolution_dropdown
+            gr.update(value=defaults["default_width"]), # hua_width
+            gr.update(value=defaults["default_height"]), # hua_height
+            gr.update(value=ratio_display_text), # ratio_display
+            # 更新模型可见性和值
             gr.update(visible=defaults["visible_lora"], value=defaults["default_lora"]),
             gr.update(visible=defaults["visible_checkpoint"], value=defaults["default_checkpoint"]),
             gr.update(visible=defaults["visible_unet"], value=defaults["default_unet"]),
+            # 更新种子区域可见性
             gr.update(visible=defaults["visible_seed_indicator"]),
-            gr.update(visible=defaults["visible_image_output"]), # 控制图片 Gallery 可见性
-            gr.update(visible=defaults["visible_video_output"])  # 控制视频播放器可见性
+            # 更新输出区域可见性
+            gr.update(visible=defaults["visible_image_output"]),
+            gr.update(visible=defaults["visible_video_output"]),
+            # 更新 Float/Int 可见性和标签 (包括 2/3/4)
+            gr.update(visible=defaults["visible_float_input"], label=defaults["default_float_label"]),
+            gr.update(visible=defaults["visible_int_input"], label=defaults["default_int_label"]),
+            gr.update(visible=defaults["visible_float_input_2"], label=defaults["default_float_label_2"]),
+            gr.update(visible=defaults["visible_int_input_2"], label=defaults["default_int_label_2"]),
+            gr.update(visible=defaults["visible_float_input_3"], label=defaults["default_float_label_3"]),
+            gr.update(visible=defaults["visible_int_input_3"], label=defaults["default_int_label_3"]),
+            gr.update(visible=defaults["visible_float_input_4"], label=defaults["default_float_label_4"]),
+            gr.update(visible=defaults["visible_int_input_4"], label=defaults["default_int_label_4"])
         )
 
     json_dropdown.change(
         fn=update_ui_on_json_change,
         inputs=json_dropdown,
-        outputs=[ # 必须严格对应 13 个组件
-            image_accordion,         # Accordion
-            prompt_positive,         # Textbox
-            prompt_positive_2,       # Textbox
-            prompt_positive_3,       # Textbox
-            prompt_positive_4,       # Textbox
-            negative_prompt_col,     # Column (包含 Textbox)
-            resolution_row,          # Row (包含 Dropdown, Button, Accordion)
-            hua_lora_dropdown,       # Dropdown
-            hua_checkpoint_dropdown, # Dropdown
-            hua_unet_dropdown,       # Dropdown
-            Random_Seed,             # HTML
-            output_gallery,          # Gallery (图片输出)
-            output_video             # Video (视频输出)
+        outputs=[ # 扩展 outputs 列表以包含所有需要更新的组件 (共 26 个)
+            image_accordion,         # 1. 图片输入 Accordion
+            video_accordion,         # 2. 视频输入 Accordion
+            prompt_positive,         # 3. 正向提示 1 Textbox
+            prompt_positive_2,       # 4. 正向提示 2 Textbox
+            prompt_positive_3,       # 5. 正向提示 3 Textbox
+            prompt_positive_4,       # 6. 正向提示 4 Textbox
+            prompt_negative,         # 7. 负向提示 Textbox (注意：之前是 negative_prompt_col，现在直接指向 Textbox)
+            resolution_row,          # 8. 分辨率 Row (控制整体可见性)
+            resolution_dropdown,     # 9. 分辨率预设 Dropdown (更新值)
+            hua_width,               # 10. 宽度 Number (更新值)
+            hua_height,              # 11. 高度 Number (更新值)
+            ratio_display,           # 12. 比例显示 Markdown (更新值)
+            hua_lora_dropdown,       # 13. Lora Dropdown
+            hua_checkpoint_dropdown, # 14. Checkpoint Dropdown
+            hua_unet_dropdown,       # 15. UNet Dropdown
+            seed_options_col,        # 16. 种子选项 Column
+            output_gallery,          # 17. 图片输出 Gallery
+            output_video,            # 18. 视频输出 Video
+            hua_float_input,         # 19. Float 输入 Number
+            hua_int_input,           # 20. Int 输入 Number
+            hua_float_input_2,       # 21. Float 输入 2 Number
+            hua_int_input_2,         # 22. Int 输入 2 Number
+            hua_float_input_3,       # 23. Float 输入 3 Number
+            hua_int_input_3,         # 24. Int 输入 3 Number
+            hua_float_input_4,       # 25. Float 输入 4 Number
+            hua_int_input_4          # 26. Int 输入 4 Number
         ]
     )
+
+    # --- 新增：根据种子模式显示/隐藏固定种子输入框 ---
+    def toggle_fixed_seed_input(mode):
+        return gr.update(visible=(mode == "固定"))
+
+    seed_mode_dropdown.change(
+        fn=toggle_fixed_seed_input,
+        inputs=seed_mode_dropdown,
+        outputs=fixed_seed_input
+    )
+    # --- 新增结束 ---
 
     refresh_button.click(refresh_json_files, inputs=[], outputs=json_dropdown)
 
@@ -1096,9 +1516,13 @@ with gr.Blocks(css=hacker_css) as demo:
     run_button.click(
         fn=run_queued_tasks,
         inputs=[
-            input_image, prompt_positive, prompt_positive_2, prompt_positive_3, prompt_positive_4,
+            input_image, input_video, prompt_positive, prompt_positive_2, prompt_positive_3, prompt_positive_4,
             prompt_negative, json_dropdown, hua_width, hua_height, hua_lora_dropdown,
-            hua_checkpoint_dropdown, hua_unet_dropdown, queue_count
+            hua_checkpoint_dropdown, hua_unet_dropdown, hua_float_input, hua_int_input,
+            hua_float_input_2, hua_int_input_2, hua_float_input_3, hua_int_input_3, # 添加新的 Float/Int 输入
+            hua_float_input_4, hua_int_input_4, # 添加新的 Float/Int 输入
+            seed_mode_dropdown, fixed_seed_input, # 添加新的种子输入
+            queue_count
         ],
         outputs=[queue_status_display, output_gallery, output_video] # 增加 output_video
     )
@@ -1123,35 +1547,51 @@ with gr.Blocks(css=hacker_css) as demo:
         json_files = get_json_files()
         if not json_files:
             print("未找到 JSON 文件，隐藏所有动态组件并设置默认值")
-            # 返回 13 个更新，模型设置为 None，输出区域隐藏
+            # 返回 20 个更新，模型设置为 None，输出区域隐藏，提示词为空，分辨率为默认
             return (
-                gr.update(visible=False), # image_accordion
-                gr.update(visible=False), # prompt_positive
-                gr.update(visible=False), # prompt_positive_2
-                gr.update(visible=False), # prompt_positive_3
-                gr.update(visible=False), # prompt_positive_4
-                gr.update(visible=False), # negative_prompt_col
-                gr.update(visible=False), # resolution_row
-                gr.update(visible=False, value="None"), # hua_lora_dropdown
-                gr.update(visible=False, value="None"), # hua_checkpoint_dropdown
-                gr.update(visible=False, value="None"), # hua_unet_dropdown
-                gr.update(visible=False), # Random_Seed
-                gr.update(visible=False), # output_gallery
-                gr.update(visible=False)  # output_video
+                gr.update(visible=False), # 1. image_accordion
+                gr.update(visible=False), # 2. video_accordion
+                gr.update(visible=False, value=""), # 3. prompt_positive
+                gr.update(visible=False, value=""), # 4. prompt_positive_2
+                gr.update(visible=False, value=""), # 5. prompt_positive_3
+                gr.update(visible=False, value=""), # 6. prompt_positive_4
+                gr.update(visible=False, value=""), # 7. prompt_negative
+                gr.update(visible=False), # 8. resolution_row
+                gr.update(value="custom"), # 9. resolution_dropdown
+                gr.update(value=512), # 10. hua_width
+                gr.update(value=512), # 11. hua_height
+                gr.update(value="当前比例: 1:1"), # 12. ratio_display
+                gr.update(visible=False, value="None"), # 13. hua_lora_dropdown
+                gr.update(visible=False, value="None"), # 14. hua_checkpoint_dropdown
+                gr.update(visible=False, value="None"), # 15. hua_unet_dropdown
+                gr.update(visible=False), # 16. seed_options_col
+                gr.update(visible=False), # 17. output_gallery
+                gr.update(visible=False), # 18. output_video
+                gr.update(visible=False, label="浮点数输入 (Float)"), # 19. hua_float_input
+                gr.update(visible=False, label="整数输入 (Int)"),  # 20. hua_int_input
+                gr.update(visible=False, label="浮点数输入 2 (Float)"), # 21. hua_float_input_2
+                gr.update(visible=False, label="整数输入 2 (Int)"),  # 22. hua_int_input_2
+                gr.update(visible=False, label="浮点数输入 3 (Float)"), # 23. hua_float_input_3
+                gr.update(visible=False, label="整数输入 3 (Int)"),  # 24. hua_int_input_3
+                gr.update(visible=False, label="浮点数输入 4 (Float)"), # 25. hua_float_input_4
+                gr.update(visible=False, label="整数输入 4 (Int)")   # 26. hua_int_input_4
             )
         else:
             default_json = json_files[0]
             print(f"初始加载，检查默认 JSON: {default_json}")
-            # 使用新的更新函数
+            # 使用更新后的 update_ui_on_json_change 函数
             return update_ui_on_json_change(default_json)
 
     demo.load(
         fn=on_load_setup,
         inputs=[],
-        outputs=[ # 13 dynamic components
-            image_accordion, prompt_positive, prompt_positive_2, prompt_positive_3, prompt_positive_4,
-            negative_prompt_col, resolution_row, hua_lora_dropdown, hua_checkpoint_dropdown,
-            hua_unet_dropdown, Random_Seed, output_gallery, output_video
+        outputs=[ # 必须严格对应 update_ui_on_json_change 返回的 26 个组件
+            image_accordion, video_accordion, prompt_positive, prompt_positive_2, prompt_positive_3, prompt_positive_4,
+            prompt_negative, resolution_row, resolution_dropdown, hua_width, hua_height, ratio_display,
+            hua_lora_dropdown, hua_checkpoint_dropdown, hua_unet_dropdown, seed_options_col,
+            output_gallery, output_video, hua_float_input, hua_int_input,
+            hua_float_input_2, hua_int_input_2, hua_float_input_3, hua_int_input_3,
+            hua_float_input_4, hua_int_input_4
         ]
     )
 
