@@ -37,10 +37,101 @@ class Huaword:
         # 添加打印语句
         return (output_images,)
 
-NODE_CLASS_MAPPINGS = {
-    "ComfyUI_hua_boy": Huaword
-}
 
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "ComfyUI_hua_boy": "布尔图片Boolean_image"
-}
+# 浮点数输入节点
+class HuaFloatNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "float_value": ("FLOAT", {
+                    "default": 0.0,
+                    "min": -9999999999.0, # 增大最小值
+                    "max": 9999999999.0,  # 增大最大值
+                    "step": 0.01,
+                    "display": "number", # or "slider"
+                    "tooltip": "输入一个浮点数"
+                }),
+                "name": ("STRING", {"multiline": False, "default": "FloatInput", "tooltip": "节点名称"}),
+            }
+        }
+
+    RETURN_TYPES = ("FLOAT",)
+    FUNCTION = "get_float"
+    CATEGORY = icons.get("hua_boy_one")
+
+    def get_float(self, float_value, name): # 添加 name 参数
+        return (float_value,)
+
+# 浮点数输入节点 2
+class HuaFloatNode2(HuaFloatNode):
+    @classmethod
+    def INPUT_TYPES(cls):
+        types = super().INPUT_TYPES()
+        types['required']['name'] = ("STRING", {"multiline": False, "default": "FloatInput2", "tooltip": "节点名称"})
+        return types
+
+# 浮点数输入节点 3
+class HuaFloatNode3(HuaFloatNode):
+    @classmethod
+    def INPUT_TYPES(cls):
+        types = super().INPUT_TYPES()
+        types['required']['name'] = ("STRING", {"multiline": False, "default": "FloatInput3", "tooltip": "节点名称"})
+        return types
+
+# 浮点数输入节点 4
+class HuaFloatNode4(HuaFloatNode):
+    @classmethod
+    def INPUT_TYPES(cls):
+        types = super().INPUT_TYPES()
+        types['required']['name'] = ("STRING", {"multiline": False, "default": "FloatInput4", "tooltip": "节点名称"})
+        return types
+
+# 整数输入节点
+class HuaIntNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "int_value": ("INT", {
+                    "default": 0,
+                    "min": -9999999999, # 增大最小值
+                    "max": 9999999999,  # 增大最大值
+                    "step": 1,
+                    "display": "number", # or "slider"
+                    "tooltip": "输入一个整数"
+                }),
+                "name": ("STRING", {"multiline": False, "default": "IntInput", "tooltip": "节点名称"}),
+            }
+        }
+
+    RETURN_TYPES = ("INT",)
+    FUNCTION = "get_int"
+    CATEGORY = icons.get("hua_boy_one")
+
+    def get_int(self, int_value, name): # 添加 name 参数
+        return (int_value,)
+
+# 整数输入节点 2
+class HuaIntNode2(HuaIntNode):
+    @classmethod
+    def INPUT_TYPES(cls):
+        types = super().INPUT_TYPES()
+        types['required']['name'] = ("STRING", {"multiline": False, "default": "IntInput2", "tooltip": "节点名称"})
+        return types
+
+# 整数输入节点 3
+class HuaIntNode3(HuaIntNode):
+    @classmethod
+    def INPUT_TYPES(cls):
+        types = super().INPUT_TYPES()
+        types['required']['name'] = ("STRING", {"multiline": False, "default": "IntInput3", "tooltip": "节点名称"})
+        return types
+
+# 整数输入节点 4
+class HuaIntNode4(HuaIntNode):
+    @classmethod
+    def INPUT_TYPES(cls):
+        types = super().INPUT_TYPES()
+        types['required']['name'] = ("STRING", {"multiline": False, "default": "IntInput4", "tooltip": "节点名称"})
+        return types
