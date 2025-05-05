@@ -165,8 +165,8 @@ class Hua_Video_Output:
 
         if num_frames == 0:
             print("错误: 没有图像帧输入。")
-            self._write_error_to_json(unique_id, "No input frames.")
-            return ()
+            self._write_error_to_json(unique_id, "No input frames.") # 恢复写入错误 JSON
+            return self._create_error_result("No input frames.") # 同时返回 UI 错误
 
         # --- Determine Output Path ---
         output_dir = self.output_dir if save_output else self.temp_dir
@@ -180,8 +180,8 @@ class Hua_Video_Output:
 
         except Exception as e:
             print(f"错误: 设置保存路径时出错: {e}")
-            self._write_error_to_json(unique_id, f"Error setting save path: {e}")
-            return ()
+            self._write_error_to_json(unique_id, f"Error setting save path: {e}") # 恢复写入错误 JSON
+            return self._create_error_result(f"Error setting save path: {e}") # 同时返回 UI 错误
 
         # --- Prepare Frames ---
         try:
@@ -196,8 +196,8 @@ class Hua_Video_Output:
             print(f"视频帧尺寸: {width}x{height}, Alpha: {has_alpha}, 总帧数: {num_frames}")
         except Exception as e:
             print(f"错误: 准备图像帧时出错: {e}")
-            self._write_error_to_json(unique_id, f"Error preparing image frames: {e}")
-            return ()
+            self._write_error_to_json(unique_id, f"Error preparing image frames: {e}") # 恢复写入错误 JSON
+            return self._create_error_result(f"Error preparing image frames: {e}") # 同时返回 UI 错误
 
         # --- Prepare Metadata (Similar to VHS) ---
         metadata = PngImagePlugin.PngInfo()
@@ -296,8 +296,8 @@ class Hua_Video_Output:
 
             except Exception as e:
                 print(f"错误: 使用 imageio 保存 {ext.upper()} 失败: {e}")
-                self._write_error_to_json(unique_id, f"Error saving {ext.upper()}: {e}", final_paths_for_json)
-                return ()
+                self._write_error_to_json(unique_id, f"Error saving {ext.upper()}: {e}", final_paths_for_json) # 恢复写入错误 JSON
+                return self._create_error_result(f"Error saving {ext.upper()}: {e}", final_paths_for_json) # 同时返回 UI 错误
 
         elif format_type == "video" and ffmpeg_path:
             # --- Save Video using FFmpeg ---
@@ -543,13 +543,13 @@ class Hua_Video_Output:
                         print(f"错误: 终止后 communicate 失败: {comm_err_after_term}")
                         stdout, stderr = b"", b""
                     return_code = -999 # 自定义超时错误码
-                    # 记录错误到 JSON
-                    self._write_error_to_json(unique_id, f"FFmpeg timed out after {timeout_seconds} seconds.", final_paths_for_json)
+                    # 记录错误
+                    self._write_error_to_json(unique_id, f"FFmpeg timed out after {timeout_seconds} seconds.", final_paths_for_json) # 恢复写入错误 JSON
                     # 清理临时音频文件
                     if temp_audio_path and os.path.exists(temp_audio_path):
                         try: os.remove(temp_audio_path)
                         except OSError as e_clean: print(f"警告: 清理临时音频文件失败: {e_clean}")
-                    return () # 超时后直接返回
+                    return self._create_error_result(f"FFmpeg timed out after {timeout_seconds} seconds.", final_paths_for_json) # 同时返回 UI 错误
 
                 # 解码 stdout 和 stderr
                 stdout_str = stdout.decode('utf-8', errors='ignore')
@@ -572,33 +572,32 @@ class Hua_Video_Output:
                     # 可以在这里添加额外的检查，例如文件大小 > 0
                     if not os.path.exists(output_filepath) or os.path.getsize(output_filepath) == 0:
                          print(f"警告: FFmpeg 返回码为 0，但输出文件 '{output_filepath}' 不存在或大小为 0。")
-                         self._write_error_to_json(unique_id, f"FFmpeg reported success but output file is missing or empty.", final_paths_for_json)
-                         # 即使 ffmpeg 成功，如果文件有问题，也应该返回错误
+                         self._write_error_to_json(unique_id, f"FFmpeg reported success but output file is missing or empty.", final_paths_for_json) # 恢复写入错误 JSON
                          # 清理临时音频文件
                          if temp_audio_path and os.path.exists(temp_audio_path):
                              try: os.remove(temp_audio_path)
                              except OSError as e_clean: print(f"警告: 清理临时音频文件失败: {e_clean}")
-                         return ()
+                         return self._create_error_result(f"FFmpeg reported success but output file is missing or empty.", final_paths_for_json) # 同时返回 UI 错误
                 else:
                     print(f"错误: FFmpeg 执行失败 (返回码: {return_code})")
                     # stderr 已在上面打印
-                    self._write_error_to_json(unique_id, f"FFmpeg execution failed (code {return_code}). Check logs for details.", final_paths_for_json)
+                    self._write_error_to_json(unique_id, f"FFmpeg execution failed (code {return_code}). Check logs for details.", final_paths_for_json) # 恢复写入错误 JSON
                     # 清理临时音频文件
                     if temp_audio_path and os.path.exists(temp_audio_path):
                         try: os.remove(temp_audio_path)
                         except OSError as e_clean: print(f"警告: 清理临时音频文件失败: {e_clean}")
-                    return () # 执行失败，返回
+                    return self._create_error_result(f"FFmpeg execution failed (code {return_code}). Check logs for details.", final_paths_for_json) # 同时返回 UI 错误
 
             except Exception as e:
                 print(f"错误: 执行 FFmpeg 时发生 Python 异常: {e}")
                 if process and process.poll() is None:
                     process.terminate()
-                self._write_error_to_json(unique_id, f"FFmpeg execution error: {e}", final_paths_for_json)
+                self._write_error_to_json(unique_id, f"FFmpeg execution error: {e}", final_paths_for_json) # 恢复写入错误 JSON
                 # 清理临时音频文件
                 if temp_audio_path and os.path.exists(temp_audio_path):
                     try: os.remove(temp_audio_path)
                     except OSError as e_clean: print(f"警告: 清理临时音频文件失败: {e_clean}")
-                return ()
+                return self._create_error_result(f"FFmpeg execution error: {e}", final_paths_for_json) # 同时返回 UI 错误
             finally:
                  # 确保最终清理临时音频文件
                  if temp_audio_path and os.path.exists(temp_audio_path):
@@ -611,49 +610,76 @@ class Hua_Video_Output:
 
         elif not ffmpeg_path and format_type == "video":
             print(f"错误: 需要 ffmpeg 来创建 {format} 视频，但未找到 ffmpeg。")
-            self._write_error_to_json(unique_id, "FFmpeg not found, cannot create video format.", final_paths_for_json)
-            return ()
+            self._write_error_to_json(unique_id, "FFmpeg not found, cannot create video format.", final_paths_for_json) # 恢复写入错误 JSON
+            return self._create_error_result("FFmpeg not found, cannot create video format.", final_paths_for_json) # 同时返回 UI 错误
         else:
             print(f"错误: 不支持的格式 '{format}'。")
-            self._write_error_to_json(unique_id, f"Unsupported format: {format}", final_paths_for_json)
-            return ()
+            self._write_error_to_json(unique_id, f"Unsupported format: {format}", final_paths_for_json) # 恢复写入错误 JSON
+            return self._create_error_result(f"Unsupported format: {format}", final_paths_for_json) # 同时返回 UI 错误
 
-        # --- Write final paths to JSON for Gradio ---
-        if not final_paths_for_json:
-             print("错误: 没有生成任何有效的输出文件路径。")
-             # 即使没有主文件，如果元数据 PNG 失败，也可能到达这里 # Removed based on user feedback
-             # if save_metadata_png and not png_filepath:
-             #     self._write_error_to_json(unique_id, "Failed to generate output file and metadata PNG.")
-             # else:
-             self._write_error_to_json(unique_id, "No valid output files generated.")
-             return ()
+        # --- 写入 JSON 并返回结果给前端 ---
+        if output_filepath and os.path.exists(output_filepath):
+            # --- 恢复写入 JSON 的逻辑 ---
+            temp_json_path = os.path.join(self.temp_dir, f"{unique_id}.json")
+            try:
+                # 写入包含成功生成的文件列表的 JSON
+                success_data = {"generated_files": final_paths_for_json}
+                with open(temp_json_path, 'w', encoding='utf-8') as f:
+                    json.dump(success_data, f, indent=4)
+                print(f"最终文件路径列表已写入临时文件 (供 Gradio 使用): {temp_json_path}")
+                print(f"路径列表: {final_paths_for_json}")
 
-        temp_json_path = os.path.join(self.temp_dir, f"{unique_id}.json")
-        try:
-            # 写入包含成功生成的文件列表的 JSON
-            success_data = {"generated_files": final_paths_for_json}
-            with open(temp_json_path, 'w', encoding='utf-8') as f:
-                json.dump(success_data, f, indent=4)
-            print(f"最终文件路径列表已写入临时文件: {temp_json_path}")
-            print(f"路径列表: {final_paths_for_json}")
+                # 验证文件是否存在 (可选，但建议保留)
+                all_exist = True
+                for path in final_paths_for_json:
+                    if not os.path.exists(path):
+                        print(f"错误: 最终文件不存在: {path}")
+                        all_exist = False
+                if not all_exist:
+                     # 即使 JSON 写入成功，如果文件丢失也报告错误
+                     self._write_error_to_json(unique_id, "One or more output files missing after generation.", final_paths_for_json) # 写入错误 JSON
+                     return self._create_error_result("One or more output files missing after generation.", final_paths_for_json) # 返回 UI 错误
 
-            # 验证文件是否存在
-            all_exist = True
-            for path in final_paths_for_json:
-                if not os.path.exists(path):
-                    print(f"错误: 最终文件不存在: {path}")
-                    all_exist = False
-            if not all_exist:
-                 self._write_error_to_json(unique_id, "One or more output files missing after generation.", final_paths_for_json)
+            except Exception as e:
+                print(f"错误: 写入临时 JSON 文件失败 ({temp_json_path}): {e}")
+                self._write_error_to_json(unique_id, f"Failed to write result JSON: {e}", final_paths_for_json) # 写入错误 JSON
+                return self._create_error_result(f"Failed to write result JSON: {e}", final_paths_for_json) # 返回 UI 错误
+            # --- 结束写入 JSON 的逻辑 ---
 
-        except Exception as e:
-            print(f"错误: 写入临时 JSON 文件失败 ({temp_json_path}): {e}")
-            self._write_error_to_json(unique_id, f"Failed to write result JSON: {e}", final_paths_for_json)
+            # --- 准备返回给 ComfyUI 前端的结果 ---
+            file_type = "output" if save_output else "temp"
+            filename = os.path.basename(output_filepath)
+            subfolder = "" # 相对于 type 目录
 
-        return ()
+            print(f"准备返回给前端: filename={filename}, subfolder={subfolder}, type={file_type}")
 
+            result = {
+                "ui": {
+                    "videos": [{
+                        "filename": filename,
+                        "subfolder": subfolder,
+                        "type": file_type
+                    }]
+                }
+            }
+            return result
+            # --- 结束返回给 ComfyUI 前端的结果 ---
+        else:
+            # 如果最终没有有效的 output_filepath，写入错误 JSON 并返回错误结果
+            print("最终未生成有效输出文件，写入错误 JSON 并返回错误结果。")
+            error_msg = "Failed to generate output file."
+            if not final_paths_for_json:
+                error_msg = "No valid output files generated (check previous errors)."
+            elif output_filepath and not os.path.exists(output_filepath): # 检查 output_filepath 是否已定义
+                 error_msg = f"Output file missing after generation: {output_filepath}"
+
+            self._write_error_to_json(unique_id, error_msg, final_paths_for_json) # 写入错误 JSON
+            return self._create_error_result(error_msg, final_paths_for_json) # 返回 UI 错误
+
+
+    # 恢复 _write_error_to_json 函数
     def _write_error_to_json(self, unique_id, error_message, existing_paths=None):
-        """Helper to write an error structure to the JSON file."""
+        """Helper to write an error structure to the JSON file for Gradio."""
         if existing_paths is None:
             existing_paths = []
         temp_json_path = os.path.join(self.temp_dir, f"{unique_id}.json")
@@ -664,6 +690,21 @@ class Hua_Video_Output:
         try:
             with open(temp_json_path, 'w', encoding='utf-8') as f:
                 json.dump(error_data, f, indent=4)
-            print(f"错误信息已写入临时文件: {temp_json_path}")
+            print(f"错误信息已写入临时文件 (供 Gradio 使用): {temp_json_path}")
         except Exception as e:
             print(f"严重错误: 连错误信息都无法写入 JSON 文件 ({temp_json_path}): {e}")
+
+    # 保留 _create_error_result 函数用于返回 UI 错误
+    def _create_error_result(self, error_message, existing_paths=None):
+        """Helper to create an error structure for the ComfyUI UI."""
+        if existing_paths is None:
+            existing_paths = []
+        print(f"创建 UI 错误结果: {error_message}")
+        # 返回一个包含错误信息的字典，前端 onExecuted 可以检查这个
+        # 也可以包含任何已成功生成的文件，供参考
+        return {
+            "ui": {
+                "error": [error_message], # 使用列表，即使只有一个错误
+                "generated_files": existing_paths # 包含任何已成功生成的文件
+            }
+        }
