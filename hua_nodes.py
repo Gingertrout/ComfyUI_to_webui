@@ -654,6 +654,48 @@ class Hua_LoraLoaderModelOnly(Hua_LoraLoader):
         return (self.load_lora(model, None, lora_name, strength_model, 0)[0],)
 
 
+class Hua_LoraLoaderModelOnly2(Hua_LoraLoader):
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "model": ("MODEL",),
+                              "lora_name": (folder_paths.get_filename_list("loras"), ),
+                              "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
+                              }}
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "load_lora_model_only"
+    CATEGORY = icons.get("hua_boy_one")
+    def load_lora_model_only(self, model, lora_name, strength_model):
+        return (self.load_lora(model, None, lora_name, strength_model, 0)[0],)
+
+
+class Hua_LoraLoaderModelOnly3(Hua_LoraLoader):
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "model": ("MODEL",),
+                              "lora_name": (folder_paths.get_filename_list("loras"), ),
+                              "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
+                              }}
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "load_lora_model_only"
+    CATEGORY = icons.get("hua_boy_one")
+    def load_lora_model_only(self, model, lora_name, strength_model):
+        return (self.load_lora(model, None, lora_name, strength_model, 0)[0],)
+
+
+class Hua_LoraLoaderModelOnly4(Hua_LoraLoader):
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "model": ("MODEL",),
+                              "lora_name": (folder_paths.get_filename_list("loras"), ),
+                              "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
+                              }}
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "load_lora_model_only"
+    CATEGORY = icons.get("hua_boy_one")
+    def load_lora_model_only(self, model, lora_name, strength_model):
+        return (self.load_lora(model, None, lora_name, strength_model, 0)[0],)
+
+
 class Hua_CheckpointLoaderSimple:
     @classmethod
     def INPUT_TYPES(s):
