@@ -126,7 +126,7 @@ from .hua_nodes import GradioInputImage, GradioTextBad
 from .gradio_workflow import GradioTextOk
 # Added GradioInputImage, GradioTextOk, GradioTextBad to hua_nodes import
 from .hua_nodes import Hua_gradio_Seed, Hua_gradio_jsonsave, Hua_gradio_resolution
-from .hua_nodes import Hua_LoraLoader, Hua_LoraLoaderModelOnly,Hua_CheckpointLoaderSimple,Hua_UNETLoader
+from .hua_nodes import Hua_LoraLoader, Hua_LoraLoaderModelOnly, Hua_LoraLoaderModelOnly2, Hua_LoraLoaderModelOnly3, Hua_LoraLoaderModelOnly4, Hua_CheckpointLoaderSimple,Hua_UNETLoader
 from .hua_nodes import GradioTextOk2, GradioTextOk3,GradioTextOk4
 from .hua_nodes import BarcodeGeneratorNode, Barcode_seed
 from .output_image_to_gradio import Hua_Output
@@ -146,6 +146,9 @@ NODE_CLASS_MAPPINGS = {
     "Hua_gradio_resolution": Hua_gradio_resolution,
     "Hua_LoraLoader": Hua_LoraLoader,
     "Hua_LoraLoaderModelOnly": Hua_LoraLoaderModelOnly,
+    "Hua_LoraLoaderModelOnly2": Hua_LoraLoaderModelOnly2,
+    "Hua_LoraLoaderModelOnly3": Hua_LoraLoaderModelOnly3,
+    "Hua_LoraLoaderModelOnly4": Hua_LoraLoaderModelOnly4,
     "Hua_CheckpointLoaderSimple": Hua_CheckpointLoaderSimple,
     "Hua_UNETLoader": Hua_UNETLoader,
     "BarcodeGeneratorNode": BarcodeGeneratorNode, # 使用新的类名
@@ -177,6 +180,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Hua_gradio_resolution": "📜hua_gradio Resolution",
     "Hua_LoraLoader": "🌊hua_gradio_Lora Loader",
     "Hua_LoraLoaderModelOnly": "🌊hua_gradio_Lora Model Only",
+    "Hua_LoraLoaderModelOnly2": "🌊hua_gradio_Lora Model Only2",
+    "Hua_LoraLoaderModelOnly3": "🌊hua_gradio_Lora Model Only3",
+    "Hua_LoraLoaderModelOnly4": "🌊hua_gradio_Lora Model Only4",
     "Hua_CheckpointLoaderSimple": "🌊hua_gradio Checkpoint Loader",
     "Hua_UNETLoader": "🌊hua_gradio_UNET Loader",
     "BarcodeGeneratorNode": "hua_Barcode Generator", # 使用新的显示名称，与节点文件一致
