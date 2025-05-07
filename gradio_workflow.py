@@ -206,15 +206,97 @@ INPUT_DIR = folder_paths.get_input_directory()
 OUTPUT_DIR = folder_paths.get_output_directory()
 TEMP_DIR = folder_paths.get_temp_directory()
 
-resolution_presets = [
-    "512x512|1:1", "1024x1024|1:1", "1152x896|9:7", "1216x832|19:13",
-    "1344x768|7:4", "1536x640|12:5", "704x1408|1:2", "704x1344|11:21",
-    "768x1344|4:7", "768x1280|3:5", "832x1216|13:19", "832x1152|13:18",
-    "896x1152|7:9", "896x1088|14:17", "960x1088|15:17", "960x1024|15:16",
-    "1024x960|16:15", "1088x960|17:15", "1088x896|17:14", "1152x832|18:13",
-    "1280x768|5:3", "1344x704|21:11", "1408x704|2:1", "1472x704|23:11",
-    "1600x640|5:2", "1664x576|26:9", "1728x576|3:1", "custom"
+# --- Load Resolution Presets from File ---
+from math import gcd # Ensure gcd is imported
+import os # Ensure os is imported
+
+# Function to calculate aspect ratio (should already exist below, but ensure it's available)
+def calculate_aspect_ratio(width, height):
+    if width is None or height is None or width <= 0 or height <= 0:
+        return "0:0"
+    try:
+        w, h = int(width), int(height)
+        common_divisor = gcd(w, h)
+        return f"{w//common_divisor}:{h//common_divisor}"
+    except (ValueError, TypeError):
+        return "无效输入"
+
+def load_resolution_presets_from_files(relative_filepaths, prefixes):
+    """Loads resolution presets from multiple files, adding a prefix to each."""
+    presets = set() # Use a set to automatically handle duplicates if files have overlapping resolutions
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    if len(relative_filepaths) != len(prefixes):
+        print("Error: Number of filepaths and prefixes must match.")
+        return ["512x512|1:1", "1024x1024|1:1", "custom"] # Fallback
+
+    for i, relative_path in enumerate(relative_filepaths):
+        prefix = prefixes[i]
+        full_path = os.path.join(script_dir, relative_path)
+        print(f"Attempting to load resolutions from: {full_path} with prefix '{prefix}'")
+        try:
+            with open(full_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line: continue
+                    # Inner try/except block for parsing width/height for EACH line
+                    try:
+                        # Determine separator and split
+                        if '×' in line:
+                            width_str, height_str = line.split('×')
+                        elif 'x' in line: # Fallback for standard 'x'
+                            width_str, height_str = line.split('x')
+                        else:
+                            print(f"Skipping line with unknown separator in '{relative_path}': '{line}'")
+                            continue # Skip this line
+
+                        # Convert to integers and calculate ratio
+                        width = int(width_str)
+                        height = int(height_str)
+                        ratio = calculate_aspect_ratio(width, height)
+                        # Add prefix and add to set
+                        presets.add(f"{prefix}{width}x{height}|{ratio}")
+
+                    except ValueError as e: # Catch errors during int conversion or splitting
+                        print(f"Skipping invalid number format in resolution file '{relative_path}': '{line}' - Error: {e}")
+                        continue # Continue to the next line in the file
+            # This print is outside the inner loop, but inside the outer try
+            print(f"Loaded {len(presets)} unique resolutions so far after processing '{relative_path}'.")
+        except FileNotFoundError: # This except belongs to the outer try (opening the file)
+            print(f"Warning: Resolution file not found at '{full_path}'. Skipping.")
+            continue # Skip this file and continue with others
+        except Exception as e:
+            print(f"Warning: Error reading resolution file '{full_path}': {e}. Skipping.")
+            continue # Skip this file
+
+    # Convert set to list and sort alphabetically (optional, but good for consistency)
+    sorted_presets = sorted(list(presets))
+
+    # Add "custom" option at the end
+    sorted_presets.append("custom")
+
+    if not sorted_presets or len(sorted_presets) == 1: # Only "custom" was added
+        print("Error: No valid resolution presets loaded from any file. Using default.")
+        return ["512x512|1:1", "1024x1024|1:1", "custom"]
+
+    return sorted_presets
+
+# Define the paths to the resolution files relative to THIS script file
+resolution_files = [
+    "Sample_preview/flux分辨率列表.txt",
+    "Sample_preview/sdxl_1_5分辨率列表.txt"
 ]
+resolution_prefixes = [
+    "Flux - ",
+    "SDXL - "
+]
+resolution_presets = load_resolution_presets_from_files(resolution_files, resolution_prefixes)
+# Add a print statement to confirm loading
+print(f"Final resolution_presets count (including 'custom'): {len(resolution_presets)}")
+if len(resolution_presets) < 10: # Print some examples if loading failed or files are short
+    print(f"Example presets: {resolution_presets[:10]}")
+# --- End Load Resolution Presets ---
+
 
 def start_queue(prompt_workflow):
     p = {"prompt": prompt_workflow}
@@ -228,19 +310,33 @@ def start_queue(prompt_workflow):
         try:
             # 简化服务器检查，直接尝试 POST
             response = requests.post(URL, data=data, timeout=request_timeout)
-            response.raise_for_status()
+            response.raise_for_status() # 如果是 4xx 或 5xx 会抛出 HTTPError
             print(f"请求成功 (尝试 {attempt + 1}/{max_retries})")
             return True # 返回成功状态
-        except requests.exceptions.RequestException as e:
+        except requests.exceptions.HTTPError as http_err: # 特别处理 HTTP 错误
+            status_code = http_err.response.status_code
+            print(f"请求失败 (尝试 {attempt + 1}/{max_retries}, HTTP 状态码: {status_code}): {str(http_err)}")
+            if status_code == 400: # Bad Request (例如 invalid prompt)
+                print("发生 400 Bad Request 错误，通常表示 prompt 无效。停止重试。")
+                return False # 立刻返回失败，不重试
+            # 对于其他 HTTP 错误 (例如 5xx)，继续重试逻辑
+            if attempt < max_retries - 1:
+                print(f"{retry_delay}秒后重试...")
+                time.sleep(retry_delay)
+            else:
+                print("达到最大重试次数 (HTTPError)，放弃请求。")
+                return False
+        except requests.exceptions.RequestException as e: # 其他网络错误 (超时, 连接错误等)
             error_type = type(e).__name__
             print(f"请求失败 (尝试 {attempt + 1}/{max_retries}, 错误类型: {error_type}): {str(e)}")
             if attempt < max_retries - 1:
                 print(f"{retry_delay}秒后重试...")
                 time.sleep(retry_delay)
             else:
-                print("达到最大重试次数，放弃请求。")
-                print("可能原因: 服务器未运行、网络问题、工作流问题（如种子未变）。")
+                print("达到最大重试次数 (RequestException)，放弃请求。")
+                print("可能原因: 服务器未运行、网络问题。") # 保留此通用原因
                 return False # 返回失败状态
+    return False # 确保函数在所有路径都有返回值
 
 def get_json_files():
     try:
@@ -257,17 +353,28 @@ def refresh_json_files():
     new_choices = get_json_files()
     return gr.update(choices=new_choices)
 
+# Keep only the corrected parse_resolution and strip_prefix functions
+def strip_prefix(resolution_str):
+    """Removes known prefixes from the resolution string."""
+    for prefix in resolution_prefixes:
+        if resolution_str.startswith(prefix):
+            return resolution_str[len(prefix):]
+    return resolution_str # Return original if no prefix matches
+
 def parse_resolution(resolution_str):
     if resolution_str == "custom":
-        return None, None, "自定义"
+        return None, None, "自定义", "custom" # Return original string as well
     try:
-        parts = resolution_str.split("|")
-        if len(parts) != 2: return None, None, "无效格式"
+        # Strip prefix before parsing
+        cleaned_str = strip_prefix(resolution_str)
+        parts = cleaned_str.split("|")
+        if len(parts) != 2: return None, None, "无效格式", resolution_str
         width, height = map(int, parts[0].split("x"))
         ratio = parts[1]
-        return width, height, ratio
+        # Return original string along with parsed values
+        return width, height, ratio, resolution_str
     except ValueError:
-        return None, None, "无效格式"
+        return None, None, "无效格式", resolution_str
 
 def calculate_aspect_ratio(width, height):
     if width is None or height is None or width <= 0 or height <= 0:
@@ -288,31 +395,47 @@ def find_closest_preset(width, height):
     except (ValueError, TypeError):
         return "custom"
 
-    for preset in resolution_presets:
-        if preset == "custom": continue
-        preset_width, preset_height, _ = parse_resolution(preset)
-        if preset_width == w and preset_height == h:
-            return preset
+    target_aspect = calculate_aspect_ratio(w, h)
+    best_match = "custom"
+    min_diff = float('inf')
 
-    aspect = calculate_aspect_ratio(w, h)
-    for preset in resolution_presets:
-        if preset == "custom": continue
-        _, _, preset_aspect = parse_resolution(preset)
-        if preset_aspect == aspect:
-            # 找到相同比例的第一个预设
-            # 可以在这里添加逻辑选择最接近面积的预设，但目前保持简单
-            return preset
+    for preset_str_with_prefix in resolution_presets:
+        if preset_str_with_prefix == "custom": continue
+        # Use the 4th return value (original string) from parse_resolution
+        preset_width, preset_height, preset_aspect, _ = parse_resolution(preset_str_with_prefix)
+
+        if preset_width is None: continue # Skip invalid presets
+
+        # Exact match takes priority
+        if preset_width == w and preset_height == h:
+            return preset_str_with_prefix # Return the full string with prefix
+
+        # If aspect ratios match, find the one with the closest area
+        if preset_aspect == target_aspect:
+            area_diff = abs((preset_width * preset_height) - (w * h))
+            if area_diff < min_diff:
+                min_diff = area_diff
+                best_match = preset_str_with_prefix # Store the full string with prefix
+
+    # If an aspect ratio match was found, return it
+    if best_match != "custom":
+        return best_match
 
     return "custom"
 
-def update_from_preset(resolution_str):
-    if resolution_str == "custom":
+def update_from_preset(resolution_str_with_prefix):
+    if resolution_str_with_prefix == "custom":
         # 返回空更新，让用户手动输入
         return "custom", gr.update(), gr.update(), "当前比例: 自定义"
-    width, height, ratio = parse_resolution(resolution_str)
+
+    # Use the 4th return value (original string) from parse_resolution
+    width, height, ratio, original_str = parse_resolution(resolution_str_with_prefix)
+
     if width is None: # 处理无效格式的情况
         return "custom", gr.update(), gr.update(), "当前比例: 无效格式"
-    return resolution_str, width, height, f"当前比例: {ratio}"
+
+    # Return the original string with prefix for the dropdown value
+    return original_str, width, height, f"当前比例: {ratio}"
 
 def update_from_inputs(width, height):
     ratio = calculate_aspect_ratio(width, height)
@@ -585,8 +708,8 @@ def generate_image(inputimage1, input_video, prompt_text_positive, prompt_text_p
         print(f"[{execution_id}] 调用 start_queue 发送请求...")
         success = start_queue(prompt) # 发送请求到 ComfyUI
         if not success:
-             print(f"[{execution_id}] 请求发送失败。")
-             return None, None
+             print(f"[{execution_id}] 请求发送失败 (start_queue returned False). ComfyUI后端拒绝了任务或发生错误。")
+             return "COMFYUI_REJECTED", None # 特殊返回值表示后端拒绝
         print(f"[{execution_id}] 请求已发送，开始等待结果...")
     except Exception as e:
         print(f"[{execution_id}] 调用 start_queue 时发生意外错误: {e}")
@@ -1053,33 +1176,51 @@ def run_queued_tasks(inputimage1, input_video, prompt_text_positive, prompt_text
                     }
                 
                 output_type, new_paths = future.result()
-                log_message(f"[QUEUE_DEBUG] Task completed. Type: {output_type}, Result: {'Success' if new_paths else 'Failure'}")
+                # 更新日志以包含更详细的成功/失败判断
+                log_message(f"[QUEUE_DEBUG] Task completed. Type: {output_type}, Result: {'Success' if new_paths or output_type not in [None, 'COMFYUI_REJECTED'] else 'Failure'}")
                 
-                progress(1)
+                progress(1) # 任务完成（无论成功与否）
                 log_message(f"[QUEUE_DEBUG] Progress set to 1.")
 
-                if new_paths:
+                if output_type == "COMFYUI_REJECTED":
+                    log_message("[QUEUE_DEBUG] Task rejected by ComfyUI backend or critical error in start_queue. Clearing remaining Gradio queue.")
+                    with queue_lock:
+                        task_queue.clear() # 清空Gradio队列中所有剩余任务
+                        current_queue_size = len(task_queue) # 应为0
+                    # 状态更新，告知用户后端错误且队列已清空
+                    with results_lock:
+                        current_images_copy = accumulated_image_results[:]
+                        current_video = last_video_result
+                    log_message(f"[QUEUE_DEBUG] Preparing to yield COMFYUI_REJECTED update. Queue: {current_queue_size}")
+                    yield {
+                         queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: 是 (后端错误，队列已清空)"),
+                         output_gallery: gr.update(value=current_images_copy), # 保持当前结果显示
+                         output_video: gr.update(value=current_video),      # 保持当前结果显示
+                    }
+                    log_message(f"[QUEUE_DEBUG] Yielded COMFYUI_REJECTED update. Loop will now check empty queue and exit to finally.")
+                    # 循环会因为队列为空而自然结束，然后 finally 块会执行并清除 processing_event
+                elif new_paths: # 任务成功且有结果 (output_type 不是 COMFYUI_REJECTED)
                     log_message(f"[QUEUE_DEBUG] Task successful, got {len(new_paths)} new paths of type '{output_type}'.")
                     update_dict = {}
                     with results_lock:
                         if output_type == 'image':
-                            if queue_count == 1:
+                            if queue_count == 1: # 单任务模式
                                 accumulated_image_results = new_paths # 替换
-                            else:
-                                current_batch_image_results.extend(new_paths) # 累加批次
-                                accumulated_image_results = current_batch_image_results[:] # 更新全局
-                            last_video_result = None # 清除旧视频
+                            else: # 批量任务模式
+                                current_batch_image_results.extend(new_paths) # 累加到当前批次
+                                accumulated_image_results = current_batch_image_results[:] # 更新全局累积结果
+                            last_video_result = None # 清除旧视频（如果是图片任务）
                             update_dict[output_gallery] = gr.update(value=accumulated_image_results[:], visible=True)
-                            update_dict[output_video] = gr.update(value=None, visible=False) # 隐藏视频
+                            update_dict[output_video] = gr.update(value=None, visible=False) # 隐藏视频输出
                         elif output_type == 'video':
-                            # 视频只显示最新的一个
-                            last_video_result = new_paths[0] if new_paths else None
-                            accumulated_image_results = [] # 清除旧图片
-                            update_dict[output_gallery] = gr.update(value=[], visible=False) # 隐藏图片
-                            update_dict[output_video] = gr.update(value=last_video_result, visible=True) # 显示视频
-                        else: # 未知类型或失败
-                             log_message(f"[QUEUE_DEBUG] Unknown output type '{output_type}' or task failed.")
-                             # 保持现有显示不变或显示错误？暂时不变
+                            last_video_result = new_paths[0] if new_paths else None # 视频只显示最新的一个
+                            accumulated_image_results = [] # 清除旧图片（如果是视频任务）
+                            update_dict[output_gallery] = gr.update(value=[], visible=False) # 隐藏图片输出
+                            update_dict[output_video] = gr.update(value=last_video_result, visible=True) # 显示视频输出
+                        else: # 未知类型 (理论上不应发生，因为 generate_image 控制了 output_type)
+                             log_message(f"[QUEUE_DEBUG] Unknown or unexpected output type '{output_type}'. Treating as image.")
+                             # 默认为图片处理或保持原样
+                             accumulated_image_results.extend(new_paths) # 尝试添加
                              update_dict[output_gallery] = gr.update(value=accumulated_image_results[:])
                              update_dict[output_video] = gr.update(value=last_video_result)
 
@@ -1089,18 +1230,18 @@ def run_queued_tasks(inputimage1, input_video, prompt_text_positive, prompt_text
                     log_message(f"[QUEUE_DEBUG] Preparing to yield success update. Queue: {current_queue_size}")
                     yield update_dict
                     log_message(f"[QUEUE_DEBUG] Yielded success update.")
-                else:
-                    log_message("[QUEUE_DEBUG] Task failed or returned no paths.")
+                else: # 任务失败 (output_type is None, or new_paths is None/empty but not COMFYUI_REJECTED)
+                    log_message("[QUEUE_DEBUG] Task failed or returned no paths (general failure, not COMFYUI_REJECTED).")
                     with results_lock:
                         current_images_copy = accumulated_image_results[:]
                         current_video = last_video_result
-                    log_message(f"[QUEUE_DEBUG] Preparing to yield failure update. Queue: {current_queue_size}")
+                    log_message(f"[QUEUE_DEBUG] Preparing to yield general failure update. Queue: {current_queue_size}")
                     yield {
                          queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: 是 (失败)"),
                          output_gallery: gr.update(value=current_images_copy),
                          output_video: gr.update(value=current_video),
                     }
-                    log_message(f"[QUEUE_DEBUG] Yielded failure update.")
+                    log_message(f"[QUEUE_DEBUG] Yielded general failure update.")
 
     finally:
         log_message(f"[QUEUE_DEBUG] Entering finally block. Clearing processing_event (was {processing_event.is_set()}).")
