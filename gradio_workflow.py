@@ -482,8 +482,8 @@ def get_output_images():
         print(f"扫描输出目录时出错: {e}")
         return []
 
-# 修改 generate_image 函数以接受种子模式、固定种子值以及新的 Float/Int 值
-def generate_image(inputimage1, input_video, prompt_text_positive, prompt_text_positive_2, prompt_text_positive_3, prompt_text_positive_4, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_checkpoint, hua_unet, hua_float_value, hua_int_value, hua_float_value_2, hua_int_value_2, hua_float_value_3, hua_int_value_3, hua_float_value_4, hua_int_value_4, seed_mode, fixed_seed): # 添加新参数
+# 修改 generate_image 函数以接受种子模式、固定种子值、新的 Float/Int 值以及新的 Lora 值
+def generate_image(inputimage1, input_video, prompt_text_positive, prompt_text_positive_2, prompt_text_positive_3, prompt_text_positive_4, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_lora_2, hua_lora_3, hua_lora_4, hua_checkpoint, hua_unet, hua_float_value, hua_int_value, hua_float_value_2, hua_int_value_2, hua_float_value_3, hua_int_value_3, hua_float_value_4, hua_int_value_4, seed_mode, fixed_seed): # 添加新参数 hua_lora_2, hua_lora_3, hua_lora_4
     global last_used_seed # 声明使用全局变量
     execution_id = str(uuid.uuid4())
     print(f"[{execution_id}] 开始生成任务 (种子模式: {seed_mode})...")
@@ -520,6 +520,9 @@ def generate_image(inputimage1, input_video, prompt_text_positive, prompt_text_p
     if fenbianlv_key:
         print(f"[{execution_id}] 分辨率节点详情: {prompt.get(fenbianlv_key, {})}")
     lora_key = find_key_by_class_type(prompt, "Hua_LoraLoaderModelOnly") # 注意这里用的是仅模型
+    lora_key_2 = find_key_by_class_type(prompt, "Hua_LoraLoaderModelOnly2") # 新增 Lora 2 key
+    lora_key_3 = find_key_by_class_type(prompt, "Hua_LoraLoaderModelOnly3") # 新增 Lora 3 key
+    lora_key_4 = find_key_by_class_type(prompt, "Hua_LoraLoaderModelOnly4") # 新增 Lora 4 key
     checkpoint_key = find_key_by_class_type(prompt, "Hua_CheckpointLoaderSimple")
     unet_key = find_key_by_class_type(prompt, "Hua_UNETLoader")
     hua_output_key = find_key_by_class_type(prompt, "Hua_Output")
@@ -653,6 +656,9 @@ def generate_image(inputimage1, input_video, prompt_text_positive, prompt_text_p
 
     # 更新模型选择 (如果节点存在且选择了模型)
     if lora_key and hua_lora != "None": prompt[lora_key]["inputs"]["lora_name"] = hua_lora
+    if lora_key_2 and hua_lora_2 != "None": prompt[lora_key_2]["inputs"]["lora_name"] = hua_lora_2 # 新增 Lora 2
+    if lora_key_3 and hua_lora_3 != "None": prompt[lora_key_3]["inputs"]["lora_name"] = hua_lora_3 # 新增 Lora 3
+    if lora_key_4 and hua_lora_4 != "None": prompt[lora_key_4]["inputs"]["lora_name"] = hua_lora_4 # 新增 Lora 4
     if checkpoint_key and hua_checkpoint != "None": prompt[checkpoint_key]["inputs"]["ckpt_name"] = hua_checkpoint
     if unet_key and hua_unet != "None": prompt[unet_key]["inputs"]["unet_name"] = hua_unet
 
@@ -894,9 +900,15 @@ def get_workflow_defaults_and_visibility(json_file):
         "visible_neg_prompt": False,
         "visible_resolution": False,
         "visible_lora": False,
+        "visible_lora_2": False,
+        "visible_lora_3": False,
+        "visible_lora_4": False,
         "visible_checkpoint": False,
         "visible_unet": False,
         "default_lora": "None",
+        "default_lora_2": "None",
+        "default_lora_3": "None",
+        "default_lora_4": "None",
         "default_checkpoint": "None",
         "default_unet": "None",
         "visible_seed_indicator": False,
@@ -1046,6 +1058,30 @@ def get_workflow_defaults_and_visibility(json_file):
         defaults["visible_lora"] = False
         defaults["default_lora"] = "None"
 
+    lora_key_2 = find_key_by_class_type_internal(prompt, "Hua_LoraLoaderModelOnly2")
+    if lora_key_2 and lora_key_2 in prompt and "inputs" in prompt[lora_key_2]:
+        defaults["visible_lora_2"] = True
+        defaults["default_lora_2"] = prompt[lora_key_2]["inputs"].get("lora_name", "None")
+    else:
+        defaults["visible_lora_2"] = False
+        defaults["default_lora_2"] = "None"
+
+    lora_key_3 = find_key_by_class_type_internal(prompt, "Hua_LoraLoaderModelOnly3")
+    if lora_key_3 and lora_key_3 in prompt and "inputs" in prompt[lora_key_3]:
+        defaults["visible_lora_3"] = True
+        defaults["default_lora_3"] = prompt[lora_key_3]["inputs"].get("lora_name", "None")
+    else:
+        defaults["visible_lora_3"] = False
+        defaults["default_lora_3"] = "None"
+
+    lora_key_4 = find_key_by_class_type_internal(prompt, "Hua_LoraLoaderModelOnly4")
+    if lora_key_4 and lora_key_4 in prompt and "inputs" in prompt[lora_key_4]:
+        defaults["visible_lora_4"] = True
+        defaults["default_lora_4"] = prompt[lora_key_4]["inputs"].get("lora_name", "None")
+    else:
+        defaults["visible_lora_4"] = False
+        defaults["default_lora_4"] = "None"
+
     checkpoint_key = find_key_by_class_type_internal(prompt, "Hua_CheckpointLoaderSimple")
     if checkpoint_key and checkpoint_key in prompt and "inputs" in prompt[checkpoint_key]:
         defaults["visible_checkpoint"] = True
@@ -1066,8 +1102,8 @@ def get_workflow_defaults_and_visibility(json_file):
     return defaults
 
 
-# --- 队列处理函数 (更新签名以包含种子参数和新 Float/Int) ---
-def run_queued_tasks(inputimage1, input_video, prompt_text_positive, prompt_text_positive_2, prompt_text_positive_3, prompt_text_positive_4, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_checkpoint, hua_unet, hua_float_value, hua_int_value, hua_float_value_2, hua_int_value_2, hua_float_value_3, hua_int_value_3, hua_float_value_4, hua_int_value_4, seed_mode, fixed_seed, queue_count=1, progress=gr.Progress(track_tqdm=True)): # 添加新参数
+# --- 队列处理函数 (更新签名以包含种子参数、新 Float/Int 和新 Lora) ---
+def run_queued_tasks(inputimage1, input_video, prompt_text_positive, prompt_text_positive_2, prompt_text_positive_3, prompt_text_positive_4, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_lora_2, hua_lora_3, hua_lora_4, hua_checkpoint, hua_unet, hua_float_value, hua_int_value, hua_float_value_2, hua_int_value_2, hua_float_value_3, hua_int_value_3, hua_float_value_4, hua_int_value_4, seed_mode, fixed_seed, queue_count=1, progress=gr.Progress(track_tqdm=True)): # 添加新参数 hua_lora_2, hua_lora_3, hua_lora_4
     global accumulated_image_results, last_video_result # 声明我们要修改全局变量
 
     # 初始化当前批次结果 (仅用于批量图片任务)
@@ -1084,8 +1120,8 @@ def run_queued_tasks(inputimage1, input_video, prompt_text_positive, prompt_text
          with results_lock:
              last_video_result = None
 
-    # 将所有参数（包括新的种子参数和 Float/Int 值）打包到 task_params
-    task_params = (inputimage1, input_video, prompt_text_positive, prompt_text_positive_2, prompt_text_positive_3, prompt_text_positive_4, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_checkpoint, hua_unet, hua_float_value, hua_int_value, hua_float_value_2, hua_int_value_2, hua_float_value_3, hua_int_value_3, hua_float_value_4, hua_int_value_4, seed_mode, fixed_seed) # 添加新参数到元组
+    # 将所有参数（包括新的种子参数、Float/Int 值和 Lora 值）打包到 task_params
+    task_params = (inputimage1, input_video, prompt_text_positive, prompt_text_positive_2, prompt_text_positive_3, prompt_text_positive_4, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_lora_2, hua_lora_3, hua_lora_4, hua_checkpoint, hua_unet, hua_float_value, hua_int_value, hua_float_value_2, hua_int_value_2, hua_float_value_3, hua_int_value_3, hua_float_value_4, hua_int_value_4, seed_mode, fixed_seed) # 添加新参数到元组
     log_message(f"[QUEUE_DEBUG] 接收到新任务请求 (种子模式: {seed_mode})。当前队列长度 (加锁前): {len(task_queue)}")
     with queue_lock:
         for _ in range(max(1, int(queue_count))):
@@ -1403,12 +1439,15 @@ with gr.Blocks(css=hacker_css) as demo:
     
                with gr.Row():
                    with gr.Column(scale=1):
-                       hua_lora_dropdown = gr.Dropdown(choices=lora_list, label="选择 Lora 模型", value="None", elem_id="hua_lora_dropdown")
+                       hua_lora_dropdown = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 1", value="None", elem_id="hua_lora_dropdown", visible=False) # 初始隐藏
+                       hua_lora_dropdown_2 = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 2", value="None", elem_id="hua_lora_dropdown_2", visible=False) # 新增，初始隐藏
+                       hua_lora_dropdown_3 = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 3", value="None", elem_id="hua_lora_dropdown_3", visible=False) # 新增，初始隐藏
+                       hua_lora_dropdown_4 = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 4", value="None", elem_id="hua_lora_dropdown_4", visible=False) # 新增，初始隐藏
                    with gr.Column(scale=1):
-                       hua_checkpoint_dropdown = gr.Dropdown(choices=checkpoint_list, label="选择 Checkpoint 模型", value="None", elem_id="hua_checkpoint_dropdown")
+                       hua_checkpoint_dropdown = gr.Dropdown(choices=checkpoint_list, label="选择 Checkpoint 模型", value="None", elem_id="hua_checkpoint_dropdown", visible=False) # 初始隐藏
                    with gr.Column(scale=1):
-                       hua_unet_dropdown = gr.Dropdown(choices=unet_list, label="选择 UNet 模型", value="None", elem_id="hua_unet_dropdown")
-    
+                       hua_unet_dropdown = gr.Dropdown(choices=unet_list, label="选择 UNet 模型", value="None", elem_id="hua_unet_dropdown", visible=False) # 初始隐藏
+
                # --- 添加 Float 和 Int 输入组件 (初始隐藏) ---
                with gr.Row() as float_int_row:
                     with gr.Column(scale=1):
@@ -1590,6 +1629,9 @@ with gr.Blocks(css=hacker_css) as demo:
             gr.update(value=ratio_display_text), # ratio_display
             # 更新模型可见性和值
             gr.update(visible=defaults["visible_lora"], value=defaults["default_lora"]),
+            gr.update(visible=defaults["visible_lora_2"], value=defaults["default_lora_2"]), # 新增 Lora 2
+            gr.update(visible=defaults["visible_lora_3"], value=defaults["default_lora_3"]), # 新增 Lora 3
+            gr.update(visible=defaults["visible_lora_4"], value=defaults["default_lora_4"]), # 新增 Lora 4
             gr.update(visible=defaults["visible_checkpoint"], value=defaults["default_checkpoint"]),
             gr.update(visible=defaults["visible_unet"], value=defaults["default_unet"]),
             # 更新种子区域可见性
@@ -1611,7 +1653,7 @@ with gr.Blocks(css=hacker_css) as demo:
     json_dropdown.change(
         fn=update_ui_on_json_change,
         inputs=json_dropdown,
-        outputs=[ # 扩展 outputs 列表以包含所有需要更新的组件 (共 26 个)
+        outputs=[ # 扩展 outputs 列表以包含所有需要更新的组件 (共 29 个)
             image_accordion,         # 1. 图片输入 Accordion
             video_accordion,         # 2. 视频输入 Accordion
             prompt_positive,         # 3. 正向提示 1 Textbox
@@ -1624,20 +1666,23 @@ with gr.Blocks(css=hacker_css) as demo:
             hua_width,               # 10. 宽度 Number (更新值)
             hua_height,              # 11. 高度 Number (更新值)
             ratio_display,           # 12. 比例显示 Markdown (更新值)
-            hua_lora_dropdown,       # 13. Lora Dropdown
-            hua_checkpoint_dropdown, # 14. Checkpoint Dropdown
-            hua_unet_dropdown,       # 15. UNet Dropdown
-            seed_options_col,        # 16. 种子选项 Column
-            output_gallery,          # 17. 图片输出 Gallery
-            output_video,            # 18. 视频输出 Video
-            hua_float_input,         # 19. Float 输入 Number
-            hua_int_input,           # 20. Int 输入 Number
-            hua_float_input_2,       # 21. Float 输入 2 Number
-            hua_int_input_2,         # 22. Int 输入 2 Number
-            hua_float_input_3,       # 23. Float 输入 3 Number
-            hua_int_input_3,         # 24. Int 输入 3 Number
-            hua_float_input_4,       # 25. Float 输入 4 Number
-            hua_int_input_4          # 26. Int 输入 4 Number
+            hua_lora_dropdown,       # 13. Lora Dropdown 1
+            hua_lora_dropdown_2,     # 新增 Lora Dropdown 2
+            hua_lora_dropdown_3,     # 新增 Lora Dropdown 3
+            hua_lora_dropdown_4,     # 新增 Lora Dropdown 4
+            hua_checkpoint_dropdown, # 17. Checkpoint Dropdown
+            hua_unet_dropdown,       # 18. UNet Dropdown
+            seed_options_col,        # 19. 种子选项 Column
+            output_gallery,          # 20. 图片输出 Gallery
+            output_video,            # 21. 视频输出 Video
+            hua_float_input,         # 22. Float 输入 Number
+            hua_int_input,           # 23. Int 输入 Number
+            hua_float_input_2,       # 24. Float 输入 2 Number
+            hua_int_input_2,         # 25. Int 输入 2 Number
+            hua_float_input_3,       # 26. Float 输入 3 Number
+            hua_int_input_3,         # 27. Int 输入 3 Number
+            hua_float_input_4,       # 28. Float 输入 4 Number
+            hua_int_input_4          # 29. Int 输入 4 Number
         ]
     )
 
@@ -1662,6 +1707,7 @@ with gr.Blocks(css=hacker_css) as demo:
         inputs=[
             input_image, input_video, prompt_positive, prompt_positive_2, prompt_positive_3, prompt_positive_4,
             prompt_negative, json_dropdown, hua_width, hua_height, hua_lora_dropdown,
+            hua_lora_dropdown_2, hua_lora_dropdown_3, hua_lora_dropdown_4, # 添加新的 Lora 输入
             hua_checkpoint_dropdown, hua_unet_dropdown, hua_float_input, hua_int_input,
             hua_float_input_2, hua_int_input_2, hua_float_input_3, hua_int_input_3, # 添加新的 Float/Int 输入
             hua_float_input_4, hua_int_input_4, # 添加新的 Float/Int 输入
@@ -1678,12 +1724,15 @@ with gr.Blocks(css=hacker_css) as demo:
 
     refresh_model_button.click(
         lambda: (
-            gr.update(choices=get_model_list("loras")),
+            gr.update(choices=get_model_list("loras")), # Lora 1
+            gr.update(choices=get_model_list("loras")), # Lora 2
+            gr.update(choices=get_model_list("loras")), # Lora 3
+            gr.update(choices=get_model_list("loras")), # Lora 4
             gr.update(choices=get_model_list("checkpoints")),
             gr.update(choices=get_model_list("unet"))
         ),
         inputs=[],
-        outputs=[hua_lora_dropdown, hua_checkpoint_dropdown, hua_unet_dropdown]
+        outputs=[hua_lora_dropdown, hua_lora_dropdown_2, hua_lora_dropdown_3, hua_lora_dropdown_4, hua_checkpoint_dropdown, hua_unet_dropdown] # 更新 outputs
     )
 
     # --- 初始加载 ---
@@ -1706,19 +1755,22 @@ with gr.Blocks(css=hacker_css) as demo:
                 gr.update(value=512), # 11. hua_height
                 gr.update(value="当前比例: 1:1"), # 12. ratio_display
                 gr.update(visible=False, value="None"), # 13. hua_lora_dropdown
-                gr.update(visible=False, value="None"), # 14. hua_checkpoint_dropdown
-                gr.update(visible=False, value="None"), # 15. hua_unet_dropdown
-                gr.update(visible=False), # 16. seed_options_col
-                gr.update(visible=False), # 17. output_gallery
-                gr.update(visible=False), # 18. output_video
-                gr.update(visible=False, label="浮点数输入 (Float)"), # 19. hua_float_input
-                gr.update(visible=False, label="整数输入 (Int)"),  # 20. hua_int_input
-                gr.update(visible=False, label="浮点数输入 2 (Float)"), # 21. hua_float_input_2
-                gr.update(visible=False, label="整数输入 2 (Int)"),  # 22. hua_int_input_2
-                gr.update(visible=False, label="浮点数输入 3 (Float)"), # 23. hua_float_input_3
-                gr.update(visible=False, label="整数输入 3 (Int)"),  # 24. hua_int_input_3
-                gr.update(visible=False, label="浮点数输入 4 (Float)"), # 25. hua_float_input_4
-                gr.update(visible=False, label="整数输入 4 (Int)")   # 26. hua_int_input_4
+                gr.update(visible=False, value="None"), # 新增 Lora 2
+                gr.update(visible=False, value="None"), # 新增 Lora 3
+                gr.update(visible=False, value="None"), # 新增 Lora 4
+                gr.update(visible=False, value="None"), # 17. hua_checkpoint_dropdown
+                gr.update(visible=False, value="None"), # 18. hua_unet_dropdown
+                gr.update(visible=False), # 19. seed_options_col
+                gr.update(visible=False), # 20. output_gallery
+                gr.update(visible=False), # 21. output_video
+                gr.update(visible=False, label="浮点数输入 (Float)"), # 22. hua_float_input
+                gr.update(visible=False, label="整数输入 (Int)"),  # 23. hua_int_input
+                gr.update(visible=False, label="浮点数输入 2 (Float)"), # 24. hua_float_input_2
+                gr.update(visible=False, label="整数输入 2 (Int)"),  # 25. hua_int_input_2
+                gr.update(visible=False, label="浮点数输入 3 (Float)"), # 26. hua_float_input_3
+                gr.update(visible=False, label="整数输入 3 (Int)"),  # 27. hua_int_input_3
+                gr.update(visible=False, label="浮点数输入 4 (Float)"), # 28. hua_float_input_4
+                gr.update(visible=False, label="整数输入 4 (Int)")   # 29. hua_int_input_4
             )
         else:
             default_json = json_files[0]
@@ -1729,10 +1781,11 @@ with gr.Blocks(css=hacker_css) as demo:
     demo.load(
         fn=on_load_setup,
         inputs=[],
-        outputs=[ # 必须严格对应 update_ui_on_json_change 返回的 26 个组件
+        outputs=[ # 必须严格对应 update_ui_on_json_change 返回的 29 个组件
             image_accordion, video_accordion, prompt_positive, prompt_positive_2, prompt_positive_3, prompt_positive_4,
             prompt_negative, resolution_row, resolution_dropdown, hua_width, hua_height, ratio_display,
-            hua_lora_dropdown, hua_checkpoint_dropdown, hua_unet_dropdown, seed_options_col,
+            hua_lora_dropdown, hua_lora_dropdown_2, hua_lora_dropdown_3, hua_lora_dropdown_4, # 添加新的 Lora Dropdowns
+            hua_checkpoint_dropdown, hua_unet_dropdown, seed_options_col,
             output_gallery, output_video, hua_float_input, hua_int_input,
             hua_float_input_2, hua_int_input_2, hua_float_input_3, hua_int_input_3,
             hua_float_input_4, hua_int_input_4
