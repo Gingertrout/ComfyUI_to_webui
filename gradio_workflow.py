@@ -1295,44 +1295,45 @@ def run_queued_tasks(inputimage1, input_video, prompt_text_positive, prompt_text
         }
         log_message("[QUEUE_DEBUG] Yielded final status update. Exiting run_queued_tasks.")
 
-# --- 赞助码处理函数 (修改后支持显隐切换) ---
-def show_sponsor_code(current_visibility_state):
-    if current_visibility_state: # 如果当前是可见的，则隐藏
-        return gr.update(visible=False), False
-    else: # 如果当前是隐藏的，则显示
-        # 动态读取 js/icon.js 并提取 Base64 数据
-        js_icon_path = os.path.join(current_dir, 'js', 'icon.js')
-        base64_data = None
-        default_sponsor_info = """
+# --- 赞助码处理函数 ---
+def show_sponsor_code():
+    # 动态读取 js/icon.js 并提取 Base64 数据
+    js_icon_path = os.path.join(current_dir, 'js', 'icon.js')
+    base64_data = None
+    default_sponsor_info = """
 <div style='text-align: center;'>
     <h3>感谢您的支持！</h3>
     <p>无法加载赞助码图像。</p>
 </div>
 """
-        try:
-            with open(js_icon_path, 'r', encoding='utf-8') as f:
-                js_content = f.read()
-                match = re.search(r'loadImage\("(data:image/[^;]+;base64,[^"]+)"\)', js_content)
-                if match:
-                    base64_data = match.group(1)
-                else:
-                    print(f"警告: 在 {js_icon_path} 中未找到符合格式的 Base64 数据。")
-        except FileNotFoundError:
-            print(f"错误: 未找到赞助码图像文件: {js_icon_path}")
-        except Exception as e:
-            print(f"读取或解析赞助码图像文件时出错 ({js_icon_path}): {e}")
+    try:
+        with open(js_icon_path, 'r', encoding='utf-8') as f:
+            js_content = f.read()
+            # 使用正则表达式查找第一个 loadImage("data:image/...") 中的 Base64 数据
+            match = re.search(r'loadImage\("(data:image/[^;]+;base64,[^"]+)"\)', js_content)
+            if match:
+                base64_data = match.group(1)
+            else:
+                print(f"警告: 在 {js_icon_path} 中未找到符合格式的 Base64 数据。")
 
-        if base64_data:
-            sponsor_info = f"""
+    except FileNotFoundError:
+        print(f"错误: 未找到赞助码图像文件: {js_icon_path}")
+    except Exception as e:
+        print(f"读取或解析赞助码图像文件时出错 ({js_icon_path}): {e}")
+
+    if base64_data:
+        sponsor_info = f"""
 <div style='text-align: center;'>
     <h3>感谢您的支持！</h3>
     <p>请使用以下方式赞助：</p>
     <img src='{base64_data}' alt='赞助码' width='512' height='512'>
 </div>
 """
-        else:
-            sponsor_info = default_sponsor_info
-        return gr.update(value=sponsor_info, visible=True), True
+    else:
+        sponsor_info = default_sponsor_info
+
+    # 返回一个更新指令，让 Markdown 组件可见并显示内容
+    return gr.update(value=sponsor_info, visible=True)
 
 # --- 清除函数 ---
 def clear_queue():
@@ -1476,9 +1477,7 @@ with gr.Blocks(css=hacker_css) as demo:
                    # 图片和视频输出区域，初始都隐藏，根据工作流显示
                    output_gallery = gr.Gallery(label="生成图片结果", columns=3, height=600, preview=True, object_fit="contain", visible=False)
                    output_video = gr.Video(label="生成视频结果", height=600, autoplay=True, loop=True, visible=False) # 添加视频组件
-               with gr.Row():
-                   sponsor_display = gr.Markdown(visible=False) # 初始隐藏
-                   main_sponsor_visible_state = gr.State(False) # 主界面赞助码可见状态
+    
                # --- 添加队列控制按钮 ---
                with gr.Row():
                    queue_status_display = gr.Markdown("队列中: 0 | 处理中: 否") # 移到按钮上方
@@ -1518,13 +1517,12 @@ with gr.Blocks(css=hacker_css) as demo:
                            visible=False, # 初始隐藏，仅在模式为 "固定" 时显示
                            elem_id="fixed_seed_input"
                        )
-                   
+                       sponsor_display = gr.Markdown(visible=False) # 初始隐藏
                    with gr.Column(scale=1):
-                       gr.Markdown('世界因开源更精彩') # 保留这句骚话
+                       gr.Markdown('我要打十个') # 保留这句骚话
                    # with gr.Row(): # queue_status_display 已移到上方
                    #     with gr.Column(scale=1):
                    #         queue_status_display = gr.Markdown("队列中: 0 | 处理中: 否")
-
     with gr.Tab("设置"):
         with gr.Column(): # 使用 Column 布局
             gr.Markdown("## 🎛️ ComfyUI 节点徽章控制")
@@ -1576,12 +1574,7 @@ with gr.Blocks(css=hacker_css) as demo:
             # Sponsor Button & Display Area
             sponsor_info_btn = gr.Button("💖 赞助开发者")
             info_sponsor_display = gr.Markdown(visible=False) # 此选项卡中用于显示赞助信息的区域
-            info_sponsor_visible_state = gr.State(False) # 信息选项卡赞助码可见状态
-            sponsor_info_btn.click(
-                fn=show_sponsor_code,
-                inputs=[info_sponsor_visible_state],
-                outputs=[info_sponsor_display, info_sponsor_visible_state]
-            )
+            sponsor_info_btn.click(fn=show_sponsor_code, inputs=[], outputs=[info_sponsor_display]) # 目标新的显示区域
 
             # Contact Button & Display Area
             contact_btn = gr.Button("开发者联系方式")
@@ -1727,11 +1720,7 @@ with gr.Blocks(css=hacker_css) as demo:
     # --- 添加新按钮的点击事件 ---
     clear_queue_button.click(fn=clear_queue, inputs=[], outputs=[queue_status_display])
     clear_history_button.click(fn=clear_history, inputs=[], outputs=[output_gallery, output_video, queue_status_display]) # 增加 output_video
-    sponsor_button.click(
-        fn=show_sponsor_code,
-        inputs=[main_sponsor_visible_state],
-        outputs=[sponsor_display, main_sponsor_visible_state]
-    ) # 绑定赞助按钮事件
+    sponsor_button.click(fn=show_sponsor_code, inputs=[], outputs=[sponsor_display]) # 绑定赞助按钮事件
 
     refresh_model_button.click(
         lambda: (
