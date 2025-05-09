@@ -14,6 +14,12 @@ import threading
 from threading import Lock, Event # 导入 Lock 和 Event
 from concurrent.futures import ThreadPoolExecutor
 import websocket # 添加 websocket 导入
+import atexit # For NVML cleanup
+from .system_monitor import update_floating_monitors_stream, custom_css as monitor_css, cleanup_nvml # 系统监控模块
+
+# Register NVML cleanup function to be called on exit
+atexit.register(cleanup_nvml)
+
 # --- 日志轮询导入 ---
 import requests # requests 可能已导入，确认一下
 import json # json 可能已导入，确认一下
@@ -33,6 +39,7 @@ from math import gcd
 import uuid
 import fnmatch
 from .hua_word_image import HuaFloatNode, HuaIntNode, HuaFloatNode2, HuaFloatNode3, HuaFloatNode4, HuaIntNode2, HuaIntNode3, HuaIntNode4 # 导入新的节点类
+from .gradio_cancel_test import cancel_comfyui_task_action # <--- 导入中断函数
 
 # --- 全局状态变量 ---
 task_queue = deque()
@@ -44,6 +51,7 @@ processing_event = Event() # False: 空闲, True: 正在处理
 executor = ThreadPoolExecutor(max_workers=1) # 单线程执行生成任务
 last_used_seed = -1 # 用于递增/递减模式
 seed_lock = Lock() # 用于保护 last_used_seed
+interrupt_requested_event = Event() # 新增：用于用户请求中断当前任务的信号
 # --- 全局状态变量结束 ---
 
 # --- 日志轮询全局变量和函数 ---
@@ -109,37 +117,26 @@ def update_node_badge_mode(mode):
 # --- ComfyUI 节点徽章设置结束 ---
 
 # --- 重启和中断函数 ---
+COMFYUI_DEFAULT_URL_FOR_WORKFLOW = "http://127.0.0.1:8188" # 定义 ComfyUI URL 常量
+
 def reboot_manager():
     try:
         # 发送重启请求，改为 GET 方法
-        reboot_url = "http://127.0.0.1:8188/api/manager/reboot"
+        reboot_url = f"{COMFYUI_DEFAULT_URL_FOR_WORKFLOW}/api/manager/reboot" # 使用常量
         response = requests.get(reboot_url)  # 改为 GET 请求
         if response.status_code == 200:
-            # WebSocket 监听在 Gradio 中会阻塞，简化处理
-            # ws_url = "ws://127.0.0.1:8188/ws?clientId=110c8a9cbffc4e4da35ef7d2503fcccf"
-            # def on_message(ws, message):
-            #     ws.close()
-            #     # Gradio click 不能直接返回这个
-            # ws = websocket.WebSocketApp(ws_url, on_message=on_message)
-            # ws.run_forever() # 这会阻塞
-            return "重启请求已发送。请稍后检查 ComfyUI 状态。" # 简化返回信息
+            return "重启请求已发送。请稍后检查 ComfyUI 状态。"
         else:
             return f"重启请求失败，状态码: {response.status_code}"
     except Exception as e:
         return f"发生错误: {str(e)}"
 
-def interrupt_task():
-    try:
-        # 发送清理当前任务请求
-        interrupt_url = "http://127.0.0.1:8188/api/interrupt"
-        response = requests.get(interrupt_url)
-        if response.status_code == 200:
-            return "清理当前任务请求已发送成功。"
-        else:
-            return f"清理当前任务请求失败，状态码: {response.status_code}"
-    except Exception as e:
-        return f"发生错误: {str(e)}"
+def trigger_comfyui_interrupt():
+    """包装函数，用于从 Gradio 调用中断功能，使用预定义的 URL"""
+    return cancel_comfyui_task_action(COMFYUI_DEFAULT_URL_FOR_WORKFLOW)
+
 # --- 重启和中断函数结束 ---
+# handle_interrupt_click 函数将被移除，因为中断按钮被移除，其逻辑将整合到新的 clear_queue 中
 
 
 # --- 日志记录函数 ---
@@ -723,115 +720,121 @@ def generate_image(inputimage1, input_video, prompt_text_positive, prompt_text_p
 
     # --- 精确文件获取逻辑 ---
     temp_file_path = os.path.join(TEMP_DIR, f"{execution_id}.json")
-    print(f"[{execution_id}] 开始等待临时文件: {temp_file_path}")
+    # 增加日志，打印 TEMP_DIR 的实际路径
+    log_message(f"[{execution_id}] TEMP_DIR is: {TEMP_DIR}")
+    log_message(f"[{execution_id}] 开始等待临时文件: {temp_file_path}")
 
     start_time = time.time()
-    wait_timeout = 1000
+    wait_timeout = 1000 # 保持原来的超时
     check_interval = 1
+    files_in_temp_dir_logged = False # 标志位，确保只记录一次目录内容
 
     while time.time() - start_time < wait_timeout:
         if os.path.exists(temp_file_path):
-            print(f"[{execution_id}] 检测到临时文件 (耗时: {time.time() - start_time:.1f}秒)")
+            log_message(f"[{execution_id}] 检测到临时文件 (耗时: {time.time() - start_time:.1f}秒)")
             try:
-                print(f"[{execution_id}] Waiting briefly before reading {temp_file_path}...")
+                log_message(f"[{execution_id}] Waiting briefly before reading {temp_file_path}...") # 使用 log_message
                 time.sleep(1.0) # 增加等待时间到 1 秒
 
                 with open(temp_file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
                     if not content:
-                        print(f"[{execution_id}] 警告: 临时文件为空。")
+                        log_message(f"[{execution_id}] 警告: 临时文件为空。") # 使用 log_message
                         time.sleep(check_interval)
                         continue
-                    print(f"[{execution_id}] Read content: '{content[:200]}...'") # 记录原始内容
+                    log_message(f"[{execution_id}] Read content: '{content[:200]}...'") # 使用 log_message
 
                 output_paths_data = json.loads(content)
-                print(f"[{execution_id}] Parsed JSON data type: {type(output_paths_data)}")
+                log_message(f"[{execution_id}] Parsed JSON data type: {type(output_paths_data)}") # 使用 log_message
 
                 # --- 检查错误结构 ---
                 if isinstance(output_paths_data, dict) and "error" in output_paths_data:
                     error_message = output_paths_data.get("error", "Unknown error from node.")
                     generated_files = output_paths_data.get("generated_files", [])
-                    print(f"[{execution_id}] 错误: 节点返回错误: {error_message}. 文件列表 (可能不完整): {generated_files}")
+                    log_message(f"[{execution_id}] 错误: 节点返回错误: {error_message}. 文件列表 (可能不完整): {generated_files}") # 使用 log_message
                     try:
                         os.remove(temp_file_path)
-                        print(f"[{execution_id}] 已删除包含错误的临时文件。")
+                        log_message(f"[{execution_id}] 已删除包含错误的临时文件。") # 使用 log_message
                     except OSError as e:
-                        print(f"[{execution_id}] 删除包含错误的临时文件失败: {e}")
+                        log_message(f"[{execution_id}] 删除包含错误的临时文件失败: {e}") # 使用 log_message
                     return None, None # 返回失败
 
                 # --- 提取路径列表 ---
                 output_paths = []
                 if isinstance(output_paths_data, dict) and "generated_files" in output_paths_data:
                     output_paths = output_paths_data["generated_files"]
-                    print(f"[{execution_id}] Extracted 'generated_files': {output_paths} (Count: {len(output_paths)})")
+                    log_message(f"[{execution_id}] Extracted 'generated_files': {output_paths} (Count: {len(output_paths)})") # 使用 log_message
                 elif isinstance(output_paths_data, list): # 处理旧格式以防万一
                      output_paths = output_paths_data
-                     print(f"[{execution_id}] Parsed JSON directly as list: {output_paths} (Count: {len(output_paths)})")
+                     log_message(f"[{execution_id}] Parsed JSON directly as list: {output_paths} (Count: {len(output_paths)})") # 使用 log_message
                 else:
-                    print(f"[{execution_id}] 错误: 无法识别的 JSON 结构。")
+                    log_message(f"[{execution_id}] 错误: 无法识别的 JSON 结构。") # 使用 log_message
                     try: os.remove(temp_file_path)
                     except OSError: pass
                     return None, None # 无法识别的结构
 
                 # --- 详细验证路径 ---
-                print(f"[{execution_id}] Starting path validation for {len(output_paths)} paths...")
+                log_message(f"[{execution_id}] Starting path validation for {len(output_paths)} paths...") # 使用 log_message
                 valid_paths = []
                 invalid_paths = []
                 for i, p in enumerate(output_paths):
-                    # 在 Windows 上，os.path.abspath 可能不会改变 G:\... 这种已经是绝对路径的格式
-                    # 但为了跨平台和标准化，还是用它
                     abs_p = os.path.abspath(p)
                     exists = os.path.exists(abs_p)
-                    print(f"[{execution_id}] Validating path {i+1}/{len(output_paths)}: '{p}' -> Absolute: '{abs_p}' -> Exists: {exists}")
+                    log_message(f"[{execution_id}] Validating path {i+1}/{len(output_paths)}: '{p}' -> Absolute: '{abs_p}' -> Exists: {exists}") # 使用 log_message
                     if exists:
                         valid_paths.append(abs_p)
                     else:
-                        invalid_paths.append(p) # 记录原始失败路径
+                        invalid_paths.append(p)
 
-                print(f"[{execution_id}] Validation complete. Valid: {len(valid_paths)}, Invalid: {len(invalid_paths)}")
+                log_message(f"[{execution_id}] Validation complete. Valid: {len(valid_paths)}, Invalid: {len(invalid_paths)}") # 使用 log_message
 
-                # 在记录验证结果后删除临时文件
                 try:
                     os.remove(temp_file_path)
-                    print(f"[{execution_id}] 已删除临时文件。")
+                    log_message(f"[{execution_id}] 已删除临时文件。") # 使用 log_message
                 except OSError as e:
-                    print(f"[{execution_id}] 删除临时文件失败: {e}")
+                    log_message(f"[{execution_id}] 删除临时文件失败: {e}") # 使用 log_message
 
-                # 检查是否还有有效路径
                 if not valid_paths:
-                    print(f"[{execution_id}] 错误: 未找到有效的输出文件路径。Invalid paths were: {invalid_paths}")
+                    log_message(f"[{execution_id}] 错误: 未找到有效的输出文件路径。Invalid paths were: {invalid_paths}") # 使用 log_message
                     return None, None
 
-                # 确定输出类型 (基于第一个有效文件的后缀)
                 first_valid_path = valid_paths[0]
                 if first_valid_path.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp')):
                     determined_output_type = 'image'
                 elif first_valid_path.lower().endswith(('.mp4', '.webm', '.avi', '.mov', '.mkv')):
                     determined_output_type = 'video'
                 else:
-                    print(f"[{execution_id}] 警告: 未知的文件类型: {first_valid_path}。默认为图片。")
-                    determined_output_type = 'image' # 默认
+                    log_message(f"[{execution_id}] 警告: 未知的文件类型: {first_valid_path}。默认为图片。") # 使用 log_message
+                    determined_output_type = 'image'
 
-                # 如果工作流中定义的类型和文件类型不匹配，打印警告
                 if output_type and determined_output_type != output_type:
-                     print(f"[{execution_id}] 警告: 工作流输出节点类型 ({output_type}) 与实际文件类型 ({determined_output_type}) 不匹配。")
+                     log_message(f"[{execution_id}] 警告: 工作流输出节点类型 ({output_type}) 与实际文件类型 ({determined_output_type}) 不匹配。") # 使用 log_message
 
-                print(f"[{execution_id}] 任务成功完成，返回类型 '{determined_output_type}' 和 {len(valid_paths)} 个有效路径。")
-                return determined_output_type, valid_paths # *** 成功时返回类型和路径列表 ***
+                log_message(f"[{execution_id}] 任务成功完成，返回类型 '{determined_output_type}' 和 {len(valid_paths)} 个有效路径。") # 使用 log_message
+                return determined_output_type, valid_paths
 
             except json.JSONDecodeError as e:
-                print(f"[{execution_id}] 读取或解析临时文件 JSON 失败: {e}. 文件内容: '{content[:100]}...'") # 打印部分内容帮助调试
-                time.sleep(check_interval * 2) # 等待更长时间再试
+                log_message(f"[{execution_id}] 读取或解析临时文件 JSON 失败: {e}. 文件内容: '{content[:100]}...'") # 使用 log_message
+                time.sleep(check_interval * 2)
             except Exception as e:
-                print(f"[{execution_id}] 处理临时文件时发生未知错误: {e}")
+                log_message(f"[{execution_id}] 处理临时文件时发生未知错误: {e}") # 使用 log_message
                 try: os.remove(temp_file_path)
                 except OSError: pass
-                return None, None # 其他错误，返回 None
+                return None, None
+
+        # 如果等待超过 N 秒仍未找到文件，记录一下 TEMP_DIR 的内容，帮助调试
+        if not files_in_temp_dir_logged and (time.time() - start_time) > 5: # 例如等待5秒后
+            try:
+                temp_dir_contents = os.listdir(TEMP_DIR)
+                log_message(f"[{execution_id}] 等待超过5秒，TEMP_DIR ('{TEMP_DIR}') 内容: {temp_dir_contents}")
+            except Exception as e_dir:
+                log_message(f"[{execution_id}] 无法列出 TEMP_DIR 内容: {e_dir}")
+            files_in_temp_dir_logged = True # 避免重复记录
 
         time.sleep(check_interval)
 
     # 超时处理
-    print(f"[{execution_id}] 等待临时文件超时 ({wait_timeout}秒)。")
+    log_message(f"[{execution_id}] 等待临时文件超时 ({wait_timeout}秒)。TEMP_DIR ('{TEMP_DIR}') 最终内容可能已在上面记录。") # 使用 log_message
     return None, None # 超时，返回 None
 
 
@@ -938,6 +941,15 @@ def get_workflow_defaults_and_visibility(json_file):
         "default_pos_prompt_3": "",
         "default_pos_prompt_4": "",
         "default_neg_prompt": "",
+        # --- 新增：浮点数和整数的默认值 ---
+        "default_float_value": 0.0,
+        "default_int_value": 0,
+        "default_float_value_2": 0.0,
+        "default_int_value_2": 0,
+        "default_float_value_3": 0.0,
+        "default_int_value_3": 0,
+        "default_float_value_4": 0.0,
+        "default_int_value_4": 0,
         # --- 新增结束 ---
     }
     if not json_file or not os.path.exists(os.path.join(OUTPUT_DIR, json_file)):
@@ -1013,20 +1025,30 @@ def get_workflow_defaults_and_visibility(json_file):
     float_node_key = find_key_by_class_type_internal(prompt, "HuaFloatNode")
     if float_node_key and float_node_key in prompt and "inputs" in prompt[float_node_key]:
         defaults["visible_float_input"] = True
-        float_name = prompt[float_node_key]["inputs"].get("name", "FloatInput") # 获取 name，提供默认值
-        defaults["default_float_label"] = f"{float_name}: 浮点数输入 (Float)" # 设置带前缀的标签
+        float_name = prompt[float_node_key]["inputs"].get("name", "FloatInput")
+        defaults["default_float_label"] = f"{float_name}: 浮点数输入 (Float)"
+        try:
+            defaults["default_float_value"] = float(prompt[float_node_key]["inputs"].get("float_value", 0.0))
+        except (ValueError, TypeError):
+            defaults["default_float_value"] = 0.0
     else:
         defaults["visible_float_input"] = False
-        defaults["default_float_label"] = "浮点数输入 (Float)" # 默认标签
+        defaults["default_float_label"] = "浮点数输入 (Float)"
+        defaults["default_float_value"] = 0.0
 
     int_node_key = find_key_by_class_type_internal(prompt, "HuaIntNode")
     if int_node_key and int_node_key in prompt and "inputs" in prompt[int_node_key]:
         defaults["visible_int_input"] = True
-        int_name = prompt[int_node_key]["inputs"].get("name", "IntInput") # 获取 name，提供默认值
-        defaults["default_int_label"] = f"{int_name}: 整数输入 (Int)" # 设置带前缀的标签
+        int_name = prompt[int_node_key]["inputs"].get("name", "IntInput")
+        defaults["default_int_label"] = f"{int_name}: 整数输入 (Int)"
+        try:
+            defaults["default_int_value"] = int(prompt[int_node_key]["inputs"].get("int_value", 0))
+        except (ValueError, TypeError):
+            defaults["default_int_value"] = 0
     else:
         defaults["visible_int_input"] = False
-        defaults["default_int_label"] = "整数输入 (Int)" # 默认标签
+        defaults["default_int_label"] = "整数输入 (Int)"
+        defaults["default_int_value"] = 0
 
     # --- 新增：检查 Float/Int 2/3/4 节点 ---
     for i in range(2, 5):
@@ -1036,18 +1058,28 @@ def get_workflow_defaults_and_visibility(json_file):
             defaults[f"visible_float_input_{i}"] = True
             float_name_i = prompt[float_node_key_i]["inputs"].get("name", f"FloatInput{i}")
             defaults[f"default_float_label_{i}"] = f"{float_name_i}: 浮点数输入 {i} (Float)"
+            try:
+                defaults[f"default_float_value_{i}"] = float(prompt[float_node_key_i]["inputs"].get("float_value", 0.0))
+            except (ValueError, TypeError):
+                defaults[f"default_float_value_{i}"] = 0.0
         else:
             defaults[f"visible_float_input_{i}"] = False
             defaults[f"default_float_label_{i}"] = f"浮点数输入 {i} (Float)"
+            defaults[f"default_float_value_{i}"] = 0.0
         # Int
         int_node_key_i = find_key_by_class_type_internal(prompt, f"HuaIntNode{i}")
         if int_node_key_i and int_node_key_i in prompt and "inputs" in prompt[int_node_key_i]:
             defaults[f"visible_int_input_{i}"] = True
             int_name_i = prompt[int_node_key_i]["inputs"].get("name", f"IntInput{i}")
             defaults[f"default_int_label_{i}"] = f"{int_name_i}: 整数输入 {i} (Int)"
+            try:
+                defaults[f"default_int_value_{i}"] = int(prompt[int_node_key_i]["inputs"].get("int_value", 0))
+            except (ValueError, TypeError):
+                defaults[f"default_int_value_{i}"] = 0
         else:
             defaults[f"visible_int_input_{i}"] = False
             defaults[f"default_int_label_{i}"] = f"整数输入 {i} (Int)"
+            defaults[f"default_int_value_{i}"] = 0
 
     # 检查模型节点并提取默认值 (使用新的内部函数和真实类名)
     lora_key = find_key_by_class_type_internal(prompt, "Hua_LoraLoaderModelOnly")
@@ -1104,7 +1136,7 @@ def get_workflow_defaults_and_visibility(json_file):
 
 # --- 队列处理函数 (更新签名以包含种子参数、新 Float/Int 和新 Lora) ---
 def run_queued_tasks(inputimage1, input_video, prompt_text_positive, prompt_text_positive_2, prompt_text_positive_3, prompt_text_positive_4, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_lora_2, hua_lora_3, hua_lora_4, hua_checkpoint, hua_unet, hua_float_value, hua_int_value, hua_float_value_2, hua_int_value_2, hua_float_value_3, hua_int_value_3, hua_float_value_4, hua_int_value_4, seed_mode, fixed_seed, queue_count=1, progress=gr.Progress(track_tqdm=True)): # 添加新参数 hua_lora_2, hua_lora_3, hua_lora_4
-    global accumulated_image_results, last_video_result # 声明我们要修改全局变量
+    global accumulated_image_results, last_video_result, executor # 声明我们要修改全局变量
 
     # 初始化当前批次结果 (仅用于批量图片任务)
     current_batch_image_results = []
@@ -1201,41 +1233,80 @@ def run_queued_tasks(inputimage1, input_video, prompt_text_positive, prompt_text
                 # 提交任务到线程池
                 future = executor.submit(process_task, task_to_run)
                 log_message(f"[QUEUE_DEBUG] Task submitted to thread pool")
-                
-                # 等待任务完成，但每0.1秒检查一次，避免完全阻塞
+
+                task_interrupted_by_user = False
+                # 等待任务完成，但每0.1秒检查一次，并检查中断信号
                 while not future.done():
+                    if interrupt_requested_event.is_set():
+                        log_message("[QUEUE_DEBUG] User interrupt detected while waiting for future.")
+                        task_interrupted_by_user = True
+                        break
                     time.sleep(0.1)
+                    # 在等待期间，也需要从 results_lock 中获取最新的累积结果
+                    with results_lock:
+                        current_images_while_waiting = accumulated_image_results[:]
+                        current_video_while_waiting = last_video_result
                     yield {
                         queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: 是 (运行中)"),
-                        output_gallery: gr.update(value=accumulated_image_results[:]),
-                        output_video: gr.update(value=last_video_result)
+                        output_gallery: gr.update(value=current_images_while_waiting),
+                        output_video: gr.update(value=current_video_while_waiting)
                     }
                 
-                output_type, new_paths = future.result()
-                # 更新日志以包含更详细的成功/失败判断
-                log_message(f"[QUEUE_DEBUG] Task completed. Type: {output_type}, Result: {'Success' if new_paths or output_type not in [None, 'COMFYUI_REJECTED'] else 'Failure'}")
+                if task_interrupted_by_user:
+                    log_message("[QUEUE_DEBUG] Task was interrupted by user. Setting result to USER_INTERRUPTED.")
+                    output_type, new_paths = "USER_INTERRUPTED", None
+                    interrupt_requested_event.clear() # 清除标志
+
+                    # --- 新增：尝试重置 executor ---
+                    # global executor # 已在函数顶部声明
+                    log_message("[QUEUE_DEBUG] Attempting to shutdown and recreate executor due to user interrupt.")
+                    executor.shutdown(wait=False) 
+                    executor = ThreadPoolExecutor(max_workers=1)
+                    log_message("[QUEUE_DEBUG] Executor shutdown and recreated.")
+                    # --- 新增结束 ---
+                else:
+                    try:
+                        output_type, new_paths = future.result()
+                        log_message(f"[QUEUE_DEBUG] Future completed. Type: {output_type}, Paths: {'Yes' if new_paths else 'No'}")
+                    except Exception as e:
+                        log_message(f"[QUEUE_DEBUG] Exception when getting future result: {e}")
+                        output_type, new_paths = None, None # 任务执行出错
                 
-                progress(1) # 任务完成（无论成功与否）
+                progress(1) # 任务完成（无论成功与否，或被中断）
                 log_message(f"[QUEUE_DEBUG] Progress set to 1.")
 
-                if output_type == "COMFYUI_REJECTED":
+                if output_type == "USER_INTERRUPTED":
+                    log_message("[QUEUE_DEBUG] Task was interrupted by user. Updating UI.")
+                    # current_queue_size 已经是最新的（在 task_to_run = task_queue.popleft() 之后）
+                    with results_lock:
+                        current_images_copy = accumulated_image_results[:]
+                        current_video = last_video_result
+                    yield {
+                        queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: 否 (已中断)"),
+                        output_gallery: gr.update(value=current_images_copy),
+                        output_video: gr.update(value=current_video),
+                    }
+                    log_message(f"[QUEUE_DEBUG] Yielded USER_INTERRUPTED update. Queue: {current_queue_size}")
+                    # 让循环继续，以便 finally 块可以正确清理 processing_event
+                    # 如果这是最后一个任务，循环会在下一次迭代时自然结束
+
+                elif output_type == "COMFYUI_REJECTED":
                     log_message("[QUEUE_DEBUG] Task rejected by ComfyUI backend or critical error in start_queue. Clearing remaining Gradio queue.")
                     with queue_lock:
                         task_queue.clear() # 清空Gradio队列中所有剩余任务
                         current_queue_size = len(task_queue) # 应为0
-                    # 状态更新，告知用户后端错误且队列已清空
                     with results_lock:
                         current_images_copy = accumulated_image_results[:]
                         current_video = last_video_result
                     log_message(f"[QUEUE_DEBUG] Preparing to yield COMFYUI_REJECTED update. Queue: {current_queue_size}")
                     yield {
                          queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: 是 (后端错误，队列已清空)"),
-                         output_gallery: gr.update(value=current_images_copy), # 保持当前结果显示
-                         output_video: gr.update(value=current_video),      # 保持当前结果显示
+                         output_gallery: gr.update(value=current_images_copy),
+                         output_video: gr.update(value=current_video),
                     }
                     log_message(f"[QUEUE_DEBUG] Yielded COMFYUI_REJECTED update. Loop will now check empty queue and exit to finally.")
-                    # 循环会因为队列为空而自然结束，然后 finally 块会执行并清除 processing_event
-                elif new_paths: # 任务成功且有结果 (output_type 不是 COMFYUI_REJECTED)
+                
+                elif new_paths: # 任务成功且有结果 (output_type 不是 COMFYUI_REJECTED or USER_INTERRUPTED)
                     log_message(f"[QUEUE_DEBUG] Task successful, got {len(new_paths)} new paths of type '{output_type}'.")
                     update_dict = {}
                     with results_lock:
@@ -1337,12 +1408,67 @@ def show_sponsor_code():
 
 # --- 清除函数 ---
 def clear_queue():
-    global task_queue
+    global task_queue, queue_lock, interrupt_requested_event, processing_event
+    
+    action_log_messages = [] # 用于 gr.Info()
+
     with queue_lock:
-        task_queue.clear()
-        current_queue_size = 0
-    log_message("任务队列已清除。")
-    return gr.update(value=f"队列中: {current_queue_size} | 处理中: {'是' if processing_event.is_set() else '否'}")
+        is_currently_processing_a_task_in_comfyui = processing_event.is_set()
+        num_tasks_waiting_in_gradio_queue = len(task_queue)
+
+        log_message(f"[CLEAR_QUEUE] Entry. Gradio pending queue size: {num_tasks_waiting_in_gradio_queue}, ComfyUI processing active: {is_currently_processing_a_task_in_comfyui}")
+
+        if is_currently_processing_a_task_in_comfyui and num_tasks_waiting_in_gradio_queue == 0:
+            # 情况1: ComfyUI 正在处理一个任务 (该任务已从Gradio队列取出，在executor中运行), 
+            # 且 Gradio 的等待队列为空。这是“仅剩当前任务”的情况，需要中断它。
+            log_message("[CLEAR_QUEUE] Action: Interrupting the single, currently running ComfyUI task.")
+            
+            # 发送 HTTP 中断请求到 ComfyUI
+            interrupt_comfyui_status_message = trigger_comfyui_interrupt() 
+            action_log_messages.append(f"尝试中断 ComfyUI 当前任务: {interrupt_comfyui_status_message}")
+            log_message(f"[CLEAR_QUEUE] ComfyUI interrupt triggered via HTTP: {interrupt_comfyui_status_message}")
+
+            # 设置 Gradio 内部的中断标志。
+            # run_queued_tasks 中的循环会检测到这个事件，并为正在运行的 future 对象进行相应处理。
+            interrupt_requested_event.set()
+            log_message("[CLEAR_QUEUE] Gradio internal interrupt_requested_event was SET.")
+            
+            # task_queue 此时应为空，无需 clear。
+            
+        elif num_tasks_waiting_in_gradio_queue > 0:
+            # 情况2: Gradio 的等待队列中有任务。清除这些等待中的任务。
+            # 不中断可能正在 ComfyUI 中运行的任务。
+            cleared_count = num_tasks_waiting_in_gradio_queue
+            task_queue.clear() # 清空 Gradio 的等待队列
+            log_message(f"[CLEAR_QUEUE] Action: Cleared {cleared_count} task(s) from Gradio's queue. Any ComfyUI task currently processing was NOT interrupted by this action.")
+            action_log_messages.append(f"已清除 Gradio 队列中的 {cleared_count} 个等待任务。")
+            
+            # 如果之前有一个外部中断请求的标志 (例如，通过已被移除的独立中断按钮设置的，理论上不太可能发生)
+            # 并且我们这次 *没有* 尝试中断 ComfyUI，那么清除那个旧的标志是安全的。
+            if interrupt_requested_event.is_set():
+                interrupt_requested_event.clear()
+                log_message("[CLEAR_QUEUE] Cleared a pre-existing interrupt_requested_event because we are only clearing the Gradio queue this time.")
+        else:
+            # 情况3: ComfyUI 没有在处理任务，Gradio 的等待队列也为空。没什么可做的。
+            log_message("[CLEAR_QUEUE] Action: No tasks currently processing in ComfyUI and Gradio queue is empty. Nothing to clear or interrupt.")
+            action_log_messages.append("队列已为空，无任务处理中。")
+
+    # 通过 gr.Info() 显示操作摘要给用户
+    if action_log_messages:
+        gr.Info(" ".join(action_log_messages))
+
+    # 更新队列状态的UI显示
+    with queue_lock: # 重新获取锁以获得最新的队列大小 (如果清除了，应该是0)
+        current_gradio_queue_size_for_display = len(task_queue) 
+    
+    # processing_event 的状态由 run_queued_tasks 的主循环和 finally 块管理。
+    # 如果我们通过此函数中断了一个任务，run_queued_tasks 的 finally 块最终会清除 processing_event。
+    # 如果我们只清除了等待队列，processing_event 对于正在运行任务的状态会保持，直到它自然完成或被其他方式中断。
+    current_processing_status_for_display = processing_event.is_set()
+    
+    log_message(f"[CLEAR_QUEUE] Exit. Gradio queue size for display: {current_gradio_queue_size_for_display}, ComfyUI processing status for display: {current_processing_status_for_display}")
+    
+    return gr.update(value=f"队列中: {current_gradio_queue_size_for_display} | 处理中: {'是' if current_processing_status_for_display else '否'}")
 
 def clear_history():
     global accumulated_image_results, last_video_result
@@ -1373,23 +1499,40 @@ hacker_css = """
     color: #00ff00 !important;
     /* border-color: #00ff00 !important; */
 }
+
+/* 调整 Gradio Tab 间距 */
+.tabs > .tab-nav { /* Tab 按钮所在的导航栏 */
+    margin-bottom: 0px !important; /* 移除导航栏下方的外边距 */
+    border-bottom: none !important; /* 移除导航栏下方的边框 (如果存在) */
+}
+
+.tabitem { /* Tab 内容区域 */
+    padding-top: 0px !important; /* 大幅减少内容区域的上内边距，留一点点空隙 */
+    margin-top: 0px !important; /* 确保内容区域没有上外边距 */
+}
 """
 
-with gr.Blocks(css=hacker_css) as demo:
+# Combine existing CSS with monitor CSS
+combined_css = hacker_css + "\n" + monitor_css
+
+with gr.Blocks(css=combined_css) as demo:
     with gr.Tab("封装comfyui工作流"):
         with gr.Row():
            with gr.Column():  # 左侧列
-               # --- 添加实时日志显示区域 ---
+               # --- 添加实时日志显示区域 (包含系统监控) ---
                with gr.Accordion("实时日志 (ComfyUI)", open=True, elem_classes="log-display-container"):
-                   log_display = gr.Textbox(
-                       label="日志输出",
-                       lines=20,
-                       max_lines=20,
-                       autoscroll=True,
-                       interactive=False,
-                       show_copy_button=True,
-                       elem_classes="log-display-container"  # 使用 CSS 控制滚动条和高度
-                   )
+                   with gr.Group(elem_id="log_area_relative_wrapper"): # 新增内部 Group 用于定位系统监控
+                       log_display = gr.Textbox(
+                           label="日志输出",
+                           lines=20,
+                           max_lines=20,
+                           autoscroll=True,
+                           interactive=False,
+                           show_copy_button=True,
+                           elem_classes="log-display-container"
+                       )
+                       # 系统监控 HTML 输出组件
+                       floating_monitor_html_output = gr.HTML(elem_classes="floating-monitor-outer-wrapper")
                 
                image_accordion = gr.Accordion("上传图像 (折叠,有gradio传入图像节点才会显示上传)", visible=True, open=True)
                with image_accordion:
@@ -1486,20 +1629,23 @@ with gr.Blocks(css=hacker_css) as demo:
                    with gr.Row():
                        run_button = gr.Button("🚀 开始跑图 (加入队列)", variant="primary",elem_id="align-center")
                        clear_queue_button = gr.Button("🧹 清除队列",elem_id="align-center")
+                       
     
                    with gr.Row():
                        clear_history_button = gr.Button("🗑️ 清除显示历史")
                         # --- 添加赞助按钮和显示区域 ---
                        sponsor_button = gr.Button("💖 赞助作者")
-    
                    with gr.Row():
                        queue_count = gr.Number(label="队列数量", value=1, minimum=1, step=1, precision=0)
+
     
     
     
     
-    
+               sponsor_display = gr.Markdown(visible=False) # 初始隐藏
                with gr.Row():
+
+                   # interrupt_action_status Textbox 已移除，将通过 gr.Info() 显示弹窗
                    with gr.Column(scale=1, visible=False) as seed_options_col: # 种子选项列，初始隐藏
                        seed_mode_dropdown = gr.Dropdown(
                            choices=["随机", "递增", "递减", "固定"],
@@ -1517,12 +1663,18 @@ with gr.Blocks(css=hacker_css) as demo:
                            visible=False, # 初始隐藏，仅在模式为 "固定" 时显示
                            elem_id="fixed_seed_input"
                        )
-                       sponsor_display = gr.Markdown(visible=False) # 初始隐藏
-                   with gr.Column(scale=1):
-                       gr.Markdown('我要打十个') # 保留这句骚话
+                       
+
+                   with gr.Row():
+                       # interrupt_button_main_tab 已被移除
+                       gr.Markdown('我要打十个') # 保留这句骚话                       
+                       
                    # with gr.Row(): # queue_status_display 已移到上方
                    #     with gr.Column(scale=1):
                    #         queue_status_display = gr.Markdown("队列中: 0 | 处理中: 否")
+               
+               
+
     with gr.Tab("设置"):
         with gr.Column(): # 使用 Column 布局
             gr.Markdown("## 🎛️ ComfyUI 节点徽章控制")
@@ -1548,14 +1700,14 @@ with gr.Blocks(css=hacker_css) as demo:
 
             with gr.Row():
                 reboot_button = gr.Button("🔄 重启ComfyUI")
-                interrupt_button = gr.Button("🛑 清理/中断当前任务")
+                # interrupt_button (原位置) 已被移除
 
             reboot_output = gr.Textbox(label="重启结果", interactive=False)
-            interrupt_output = gr.Textbox(label="清理结果", interactive=False)
+            # interrupt_output (原位置) 已被移除
 
             # 将事件处理移到 UI 定义之后
             reboot_button.click(fn=reboot_manager, inputs=[], outputs=[reboot_output])
-            interrupt_button.click(fn=interrupt_task, inputs=[], outputs=[interrupt_output])
+            # interrupt_button.click (原位置) 已被移除
 
     with gr.Tab("信息"):
         with gr.Column():
@@ -1639,15 +1791,15 @@ with gr.Blocks(css=hacker_css) as demo:
             # 更新输出区域可见性
             gr.update(visible=defaults["visible_image_output"]),
             gr.update(visible=defaults["visible_video_output"]),
-            # 更新 Float/Int 可见性和标签 (包括 2/3/4)
-            gr.update(visible=defaults["visible_float_input"], label=defaults["default_float_label"]),
-            gr.update(visible=defaults["visible_int_input"], label=defaults["default_int_label"]),
-            gr.update(visible=defaults["visible_float_input_2"], label=defaults["default_float_label_2"]),
-            gr.update(visible=defaults["visible_int_input_2"], label=defaults["default_int_label_2"]),
-            gr.update(visible=defaults["visible_float_input_3"], label=defaults["default_float_label_3"]),
-            gr.update(visible=defaults["visible_int_input_3"], label=defaults["default_int_label_3"]),
-            gr.update(visible=defaults["visible_float_input_4"], label=defaults["default_float_label_4"]),
-            gr.update(visible=defaults["visible_int_input_4"], label=defaults["default_int_label_4"])
+            # 更新 Float/Int 可见性、标签和值 (包括 2/3/4)
+            gr.update(visible=defaults["visible_float_input"], label=defaults["default_float_label"], value=defaults["default_float_value"]),
+            gr.update(visible=defaults["visible_int_input"], label=defaults["default_int_label"], value=defaults["default_int_value"]),
+            gr.update(visible=defaults["visible_float_input_2"], label=defaults["default_float_label_2"], value=defaults["default_float_value_2"]),
+            gr.update(visible=defaults["visible_int_input_2"], label=defaults["default_int_label_2"], value=defaults["default_int_value_2"]),
+            gr.update(visible=defaults["visible_float_input_3"], label=defaults["default_float_label_3"], value=defaults["default_float_value_3"]),
+            gr.update(visible=defaults["visible_int_input_3"], label=defaults["default_int_label_3"], value=defaults["default_int_value_3"]),
+            gr.update(visible=defaults["visible_float_input_4"], label=defaults["default_float_label_4"], value=defaults["default_float_value_4"]),
+            gr.update(visible=defaults["visible_int_input_4"], label=defaults["default_int_label_4"], value=defaults["default_int_value_4"])
         )
 
     json_dropdown.change(
@@ -1716,6 +1868,8 @@ with gr.Blocks(css=hacker_css) as demo:
         ],
         outputs=[queue_status_display, output_gallery, output_video] # 增加 output_video
     )
+    
+    # interrupt_button_main_tab.click 事件处理器已被移除
 
     # --- 添加新按钮的点击事件 ---
     clear_queue_button.click(fn=clear_queue, inputs=[], outputs=[queue_status_display])
@@ -1763,14 +1917,14 @@ with gr.Blocks(css=hacker_css) as demo:
                 gr.update(visible=False), # 19. seed_options_col
                 gr.update(visible=False), # 20. output_gallery
                 gr.update(visible=False), # 21. output_video
-                gr.update(visible=False, label="浮点数输入 (Float)"), # 22. hua_float_input
-                gr.update(visible=False, label="整数输入 (Int)"),  # 23. hua_int_input
-                gr.update(visible=False, label="浮点数输入 2 (Float)"), # 24. hua_float_input_2
-                gr.update(visible=False, label="整数输入 2 (Int)"),  # 25. hua_int_input_2
-                gr.update(visible=False, label="浮点数输入 3 (Float)"), # 26. hua_float_input_3
-                gr.update(visible=False, label="整数输入 3 (Int)"),  # 27. hua_int_input_3
-                gr.update(visible=False, label="浮点数输入 4 (Float)"), # 28. hua_float_input_4
-                gr.update(visible=False, label="整数输入 4 (Int)")   # 29. hua_int_input_4
+                gr.update(visible=False, label="浮点数输入 (Float)", value=0.0), # 22. hua_float_input
+                gr.update(visible=False, label="整数输入 (Int)", value=0),  # 23. hua_int_input
+                gr.update(visible=False, label="浮点数输入 2 (Float)", value=0.0), # 24. hua_float_input_2
+                gr.update(visible=False, label="整数输入 2 (Int)", value=0),  # 25. hua_int_input_2
+                gr.update(visible=False, label="浮点数输入 3 (Float)", value=0.0), # 26. hua_float_input_3
+                gr.update(visible=False, label="整数输入 3 (Int)", value=0),  # 27. hua_int_input_3
+                gr.update(visible=False, label="浮点数输入 4 (Float)", value=0.0), # 28. hua_float_input_4
+                gr.update(visible=False, label="整数输入 4 (Int)", value=0)   # 29. hua_int_input_4
             )
         else:
             default_json = json_files[0]
@@ -1796,6 +1950,12 @@ with gr.Blocks(css=hacker_css) as demo:
     # 每 0.1 秒调用 fetch_and_format_logs，并将结果输出到 log_display (加快刷新以改善滚动)
     log_timer = gr.Timer(0.1, active=True)  # 每 0.1 秒触发一次
     log_timer.tick(fetch_and_format_logs, inputs=None, outputs=log_display)
+
+    # --- 系统监控流加载 ---
+    # outputs 需要指向在 gr.Blocks 内定义的 floating_monitor_html_output 实例
+    # 确保 floating_monitor_html_output 变量在 demo.load 调用时是可访问的
+    # (它是在 with gr.Blocks(...) 上下文中定义的，所以 demo 对象知道它)
+    demo.load(fn=update_floating_monitors_stream, inputs=None, outputs=[floating_monitor_html_output], show_progress="hidden")
 
 
     # --- Gradio 启动代码 ---
