@@ -1,8 +1,6 @@
 ![newui2](https://github.com/kungful/ComfyUI_to_webui/blob/9090013e806449047e9e80f639656ccdc7550138/Sample_preview/demo250510.png)
 你可以在我的镜像中直接使用该插件
 [免费镜像](https://www.xiangongyun.com/image/detail/7b36c1a3-da41-4676-b5b3-03ec25d6e197)
-
-![newUI](https://github.com/kungful/ComfyUI_to_webui/blob/fc8d59b572c3aa0baab7884d9994412255ac78df/Sample_preview/newUI.png)
 ![前后端原理](https://github.com/kungful/ComfyUI_to_webui/blob/9b57fff3c120bcb09d265ac3e75e4e8c04e84015/Sample_preview/%E5%89%8D%E5%90%8E%E7%AB%AF%E5%AF%B9%E6%8E%A5%E5%8E%9F%E7%90%86.png)
 ## 概述
 <span style="color:blue;">**示例工作流在**</span> Sample_preview 文件夹里面
