@@ -280,8 +280,8 @@ def load_resolution_presets_from_files(relative_filepaths, prefixes):
 
 # Define the paths to the resolution files relative to THIS script file
 resolution_files = [
-    "Sample_preview/flux分辨率列表.txt",
-    "Sample_preview/sdxl_1_5分辨率列表.txt"
+    "Sample_preview/flux_resolution.txt",
+    "Sample_preview/sdxl_1_5_resolution.txt"
 ]
 resolution_prefixes = [
     "Flux - ",
