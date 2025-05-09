@@ -5,3 +5,5 @@ numpy
 websocket
 requests
 imageio[ffmpeg]
+psutil
+pynvml
