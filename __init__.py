@@ -2,9 +2,12 @@ import subprocess
 import importlib
 import sys
 import os
-import subprocess
 import platform # 移到这里，因为下面的代码需要它
-
+import json
+import re
+import folder_paths
+import server
+from aiohttp import web
 
 # --- 改进的自动依赖安装 ---
 # 映射 PyPI 包名到导入时使用的模块名（如果不同）
@@ -12,6 +15,7 @@ package_to_module_map = {
     "python-barcode": "barcode",
     "Pillow": "PIL",
     "imageio[ffmpeg]": "imageio",
+    "websocket-client": "websocket", # 添加 websocket-client 到 websocket 的映射
     # 添加其他需要的映射
 }
 
@@ -84,21 +88,33 @@ def check_and_install_dependencies(requirements_file):
                             # 使用包含版本约束的原始行进行安装
                             subprocess.check_call([python_exe_to_use, "-m", "pip", "install", "--disable-pip-version-check", "--no-cache-dir", package_name_for_install])
                             print(f"Successfully installed '{package_name_for_install}'.")
-                            # 尝试再次导入以确认
                             importlib.invalidate_caches() # 清除导入缓存很重要
                             importlib.import_module(module_name) # 使用纯模块名再次尝试导入
                             installed_packages = True
-                        except subprocess.CalledProcessError as e:
-                            print(f"ERROR: Failed to install dependency '{package_name_for_install}'. Command failed: {e}")
-                            print("Please try installing dependencies manually:")
-                            print(f"cd \"{comfyui_root}\"")
-                            # 建议命令保持不变，因为它读取整个文件
-                            print(f"\"{python_exe_to_use}\" -m pip install -r \"{requirements_file}\"")
+                        except subprocess.CalledProcessError as e_main:
+                            print(f"## [WARN] ComfyUI_to_webui: Failed to install dependency '{package_name_for_install}' with standard method. Command failed: {e_main}. Attempting with --user.")
+                            try:
+                                # 尝试使用 --user 参数进行备用安装
+                                subprocess.check_call([python_exe_to_use, "-m", "pip", "install", "--user", "--disable-pip-version-check", "--no-cache-dir", package_name_for_install])
+                                print(f"Successfully installed '{package_name_for_install}' using --user.")
+                                importlib.invalidate_caches()
+                                importlib.import_module(module_name)
+                                installed_packages = True
+                            except subprocess.CalledProcessError as e_user:
+                                print(f"## [ERROR] ComfyUI_to_webui: Failed to install dependency '{package_name_for_install}' even with --user. Command failed: {e_user}.")
+                                print("Please try installing dependencies manually:")
+                                print(f"1. Open a terminal or command prompt.")
+                                print(f"2. (Optional) Navigate to ComfyUI root: cd \"{comfyui_root}\"")
+                                print(f"3. Run: \"{python_exe_to_use}\" -m pip install {package_name_for_install}")
+                                print(f"   Alternatively, try installing all requirements: \"{python_exe_to_use}\" -m pip install -r \"{requirements_file}\"")
+                                print("   If issues persist, you can seek help at relevant ComfyUI support channels or the node's repository.")
+                            except ImportError:
+                                print(f"## [ERROR] ComfyUI_to_webui: Could not import module '{module_name}' for package '{package_name_for_install}' even after attempting --user install. Check if the package name correctly provides the module.")
                         except ImportError:
                              # 调整错误信息，使其更清晰
-                             print(f"ERROR: Could not import module '{module_name}' even after attempting to install package '{package_name_for_install}'. Check if the package name '{package_name_for_install}' correctly provides the module '{module_name}'.")
+                             print(f"## [ERROR] ComfyUI_to_webui: Could not import module '{module_name}' after attempting to install package '{package_name_for_install}'. Check if the package name '{package_name_for_install}' correctly provides the module '{module_name}'.")
                         except Exception as e:
-                            print(f"ERROR: An unexpected error occurred during installation of '{package_name_for_install}': {e}")
+                            print(f"## [ERROR] ComfyUI_to_webui: An unexpected error occurred during installation of '{package_name_for_install}': {e}")
     except FileNotFoundError:
          print(f"Warning: requirements.txt not found at '{requirements_file}', skipping dependency check.")
     except Exception as e:
@@ -106,7 +122,7 @@ def check_and_install_dependencies(requirements_file):
 
 
     if installed_packages:
-        print("--- Dependency installation complete. You may need to restart ComfyUI. ---")
+        print("--- ComfyUI_to_webui: Dependency installation attempt complete. You may need to restart ComfyUI if new packages were installed. ---")
     else:
         print("--- All dependencies seem to be installed. ---")
 
@@ -118,87 +134,67 @@ check_and_install_dependencies(requirements_path)
 # --- 结束自动依赖安装 ---
 
 
-from .hua_word_image import Huaword, HuaFloatNode, HuaIntNode, HuaFloatNode2, HuaFloatNode3, HuaFloatNode4, HuaIntNode2, HuaIntNode3, HuaIntNode4 # 添加导入
-from .hua_word_models import Modelhua
+from .node.hua_word_image import Huaword, HuaFloatNode, HuaIntNode # 移除了 HuaFloatNode2/3/4, HuaIntNode2/3/4
+from .node.hua_word_models import Modelhua
 # Removed GradioInputImage, GradioTextOk, GradioTextBad from gradio_workflow import
-from .mind_map import Go_to_image
-from .hua_nodes import GradioInputImage, GradioTextBad
-from .gradio_workflow import GradioTextOk
+from .node.mind_map import Go_to_image
+from .node.hua_nodes import GradioInputImage, GradioTextBad
+from .gradio_workflow import GradioTextOk # GradioTextOk 现在从 gradio_workflow.py 导入 (如果它是一个节点类)
 # Added GradioInputImage, GradioTextOk, GradioTextBad to hua_nodes import
-from .hua_nodes import Hua_gradio_Seed, Hua_gradio_jsonsave, Hua_gradio_resolution
-from .hua_nodes import Hua_LoraLoader, Hua_LoraLoaderModelOnly, Hua_LoraLoaderModelOnly2, Hua_LoraLoaderModelOnly3, Hua_LoraLoaderModelOnly4, Hua_CheckpointLoaderSimple,Hua_UNETLoader
-from .hua_nodes import GradioTextOk2, GradioTextOk3,GradioTextOk4
-from .hua_nodes import BarcodeGeneratorNode, Barcode_seed
-from .output_image_to_gradio import Hua_Output
-from .output_video_to_gradio import Hua_Video_Output # 添加视频节点导入
+from .node.hua_nodes import Hua_gradio_Seed, Hua_gradio_jsonsave, Hua_gradio_resolution
+# 移除了 Hua_LoraLoaderModelOnly2/3/4 和 GradioTextOk2/3/4
+from .node.hua_nodes import Hua_LoraLoader, Hua_LoraLoaderModelOnly, Hua_CheckpointLoaderSimple,Hua_UNETLoader
+# from .hua_nodes import GradioTextOk2, GradioTextOk3,GradioTextOk4 # 这一行被移除
+from .node.hua_nodes import BarcodeGeneratorNode, Barcode_seed
+from .node.output_image_to_gradio import Hua_Output
+from .node.output_video_to_gradio import Hua_Video_Output # 添加视频节点导入
+
 NODE_CLASS_MAPPINGS = {
-    "Huaword": Huaword,
-    "Modelhua": Modelhua,
+    "Huaword": Huaword,#不加入组件
+    "Modelhua": Modelhua,#不加入组件
     "GradioInputImage": GradioInputImage,
     "Hua_Output": Hua_Output,
-    "Go_to_image": Go_to_image,
-    "GradioTextOk": GradioTextOk,
-    "GradioTextOk2": GradioTextOk2,
-    "GradioTextOk3": GradioTextOk3,
-    "GradioTextOk4": GradioTextOk4,
+    "Go_to_image": Go_to_image,#不加入组件
+    "GradioTextOk": GradioTextOk, 
     "GradioTextBad": GradioTextBad,
     "Hua_gradio_Seed": Hua_gradio_Seed,
     "Hua_gradio_resolution": Hua_gradio_resolution,
-    "Hua_LoraLoader": Hua_LoraLoader,
-    "Hua_LoraLoaderModelOnly": Hua_LoraLoaderModelOnly,
-    "Hua_LoraLoaderModelOnly2": Hua_LoraLoaderModelOnly2,
-    "Hua_LoraLoaderModelOnly3": Hua_LoraLoaderModelOnly3,
-    "Hua_LoraLoaderModelOnly4": Hua_LoraLoaderModelOnly4,
+    "Hua_LoraLoader": Hua_LoraLoader,#不加入组件
+    "Hua_LoraLoaderModelOnly": Hua_LoraLoaderModelOnly, 
     "Hua_CheckpointLoaderSimple": Hua_CheckpointLoaderSimple,
     "Hua_UNETLoader": Hua_UNETLoader,
-    "BarcodeGeneratorNode": BarcodeGeneratorNode, # 使用新的类名
-    "Barcode_seed": Barcode_seed,
+    "BarcodeGeneratorNode": BarcodeGeneratorNode,#不加入组件
+    "Barcode_seed": Barcode_seed,#不加入组件
     "Hua_gradio_jsonsave": Hua_gradio_jsonsave,
-    "Hua_Video_Output": Hua_Video_Output, # 添加视频节点类映射
-    "HuaFloatNode": HuaFloatNode, # 添加浮点数节点映射
-    "HuaIntNode": HuaIntNode, # 添加整数节点映射
-    "HuaFloatNode2": HuaFloatNode2,
-    "HuaFloatNode3": HuaFloatNode3,
-    "HuaFloatNode4": HuaFloatNode4,
-    "HuaIntNode2": HuaIntNode2,
-    "HuaIntNode3": HuaIntNode3,
-    "HuaIntNode4": HuaIntNode4,
+    "Hua_Video_Output": Hua_Video_Output,
+    "HuaFloatNode": HuaFloatNode, 
+    "HuaIntNode": HuaIntNode, 
+
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Huaword": "🌵Boolean Image",
     "Modelhua": "🌴Boolean Model",
+
+
     "GradioInputImage": "☀️Gradio Frontend Input Image",
     "Hua_Output": "🌙Image Output to Gradio Frontend",
     "Go_to_image": "⭐Mind Map",
     "GradioTextOk": "💧Gradio Positive Prompt",
-    "GradioTextOk2": "💧Gradio Positive Prompt 2",
-    "GradioTextOk3": "💧Gradio Positive Prompt 3",
-    "GradioTextOk4": "💧Gradio Positive Prompt 4",
     "GradioTextBad": "🔥Gradio Negative Prompt",
     "Hua_gradio_Seed": "🧙hua_gradio Random Seed",
     "Hua_gradio_resolution": "📜hua_gradio Resolution",
     "Hua_LoraLoader": "🌊hua_gradio_Lora Loader",
     "Hua_LoraLoaderModelOnly": "🌊hua_gradio_Lora Model Only",
-    "Hua_LoraLoaderModelOnly2": "🌊hua_gradio_Lora Model Only2",
-    "Hua_LoraLoaderModelOnly3": "🌊hua_gradio_Lora Model Only3",
-    "Hua_LoraLoaderModelOnly4": "🌊hua_gradio_Lora Model Only4",
     "Hua_CheckpointLoaderSimple": "🌊hua_gradio Checkpoint Loader",
     "Hua_UNETLoader": "🌊hua_gradio_UNET Loader",
-    "BarcodeGeneratorNode": "hua_Barcode Generator", # 使用新的显示名称，与节点文件一致
+    "BarcodeGeneratorNode": "hua_Barcode Generator",
     "Barcode_seed": "hua_Barcode Seed",
     "Hua_gradio_jsonsave": "📁hua_gradio_json Save",
-    "Hua_Video_Output": "🎬Video Output (Gradio)", # 添加视频节点显示名称
-    "HuaFloatNode": "🔢Float Input (Hua)", # 添加浮点数节点显示名称
-    "HuaIntNode": "🔢Integer Input (Hua)", # 添加整数节点显示名称
-    "HuaFloatNode2": "🔢Float Input 2 (Hua)",
-    "HuaFloatNode3": "🔢Float Input 3 (Hua)",
-    "HuaFloatNode4": "🔢Float Input 4 (Hua)",
-    "HuaIntNode2": "🔢Integer Input 2 (Hua)",
-    "HuaIntNode3": "🔢Integer Input 3 (Hua)",
-    "HuaIntNode4": "🔢Integer Input 4 (Hua)"
+    "Hua_Video_Output": "🎬Video Output (Gradio)",
+    "HuaFloatNode": "🔢Float Input (Hua)",
+    "HuaIntNode": "🔢Integer Input (Hua)",
 
-    
 }
 
 jie = """
@@ -258,6 +254,65 @@ jie = """
            
 """
 print(jie)
+
+# 之前在这里的 server, web, json, os, folder_paths, re 导入已移到文件顶部
+# --- 新增 API 端点用于保存 API JSON ---
+@server.PromptServer.instance.routes.post("/comfyui_to_webui/save_api_json")
+async def save_api_json_route(request):
+    try:
+        data = await request.json()
+        filename_base = data.get("filename")
+        api_data_str = data.get("api_data")
+
+        if not filename_base or not api_data_str:
+            return web.json_response({"detail": "文件名或 API 数据缺失"}, status=400)
+
+        # 清理文件名，防止路径遍历和非法字符
+        safe_basename = os.path.basename(filename_base)
+        # 进一步清理，只允许字母数字、下划线、连字符
+        # 移除了点号，因为我们要添加 .json 后缀。如果用户输入了点号，它会被移除。
+        safe_filename_stem = re.sub(r'[^\w\-]', '', safe_basename) 
+        if not safe_filename_stem: # 如果清理后为空
+            safe_filename_stem = "untitled_workflow_api"
+
+        output_dir = folder_paths.get_output_directory()
+        os.makedirs(output_dir, exist_ok=True)
+
+        final_filename_json = f"{safe_filename_stem}.json"
+        file_path = os.path.join(output_dir, final_filename_json)
+        
+        # 简单处理文件名冲突：如果存在则附加数字后缀
+        counter = 1
+        temp_filename_stem = safe_filename_stem
+        while os.path.exists(file_path):
+            temp_filename_stem = f"{safe_filename_stem}_{counter}"
+            final_filename_json = f"{temp_filename_stem}.json"
+            file_path = os.path.join(output_dir, final_filename_json)
+            counter += 1
+            if counter > 100: # 防止无限循环
+                 return web.json_response({"detail": "尝试生成唯一文件名失败，请尝试其他名称。"}, status=500)
+
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(api_data_str) # api_data_str 已经是格式化好的 JSON 字符串
+        
+        print(f"[ComfyUI_to_webui] API JSON saved to: {file_path}")
+        return web.json_response({
+            "message": f"API JSON 已成功保存到 {final_filename_json} (位于 output 目录)", 
+            "filename": final_filename_json,
+            "filepath": file_path
+        })
+
+    except json.JSONDecodeError:
+        return web.json_response({"detail": "无效的 JSON 请求体"}, status=400)
+    except Exception as e:
+        error_message = f"保存 API JSON 时发生服务器内部错误: {str(e)}"
+        print(f"[ComfyUI_to_webui] Error saving API JSON: {error_message}")
+        return web.json_response({"detail": error_message}, status=500)
+
+print("--- ComfyUI_to_webui: Registered API endpoint /comfyui_to_webui/save_api_json ---")
+# --- 结束 API 端点 ---
+
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", ]
 
 WEB_DIRECTORY = "./js"
