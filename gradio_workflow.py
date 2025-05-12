@@ -15,7 +15,31 @@ from threading import Lock, Event # 导入 Lock 和 Event
 from concurrent.futures import ThreadPoolExecutor
 import websocket # 添加 websocket 导入
 import atexit # For NVML cleanup
-from .system_monitor import update_floating_monitors_stream, custom_css as monitor_css, cleanup_nvml # 系统监控模块
+from .kelnel_ui.system_monitor import update_floating_monitors_stream, custom_css as monitor_css, cleanup_nvml # 系统监控模块
+from .kelnel_ui.k_Preview import ComfyUIPreviewer # <--- 导入 ComfyUIPreviewer
+from .kelnel_ui.css_html_js import HACKER_CSS, get_sponsor_html # <--- 从 css_html_js.py 导入
+from .kelnel_ui.ui_def import ( # <--- 从 ui_def.py 导入
+    calculate_aspect_ratio,
+    strip_prefix,
+    parse_resolution,
+    load_resolution_presets_from_files,
+    find_closest_preset,
+    get_output_images,
+    # fuck, # Removed as it's deprecated and its logic is integrated elsewhere
+    get_workflow_defaults_and_visibility
+)
+# 导入新的配置管理函数和常量
+from .kelnel_ui.ui_def import (
+    load_plugin_settings, 
+    save_plugin_settings, 
+    DEFAULT_MAX_DYNAMIC_COMPONENTS # 需要这个作为 MAX_DYNAMIC_COMPONENTS 的备用值
+)
+
+# --- 初始化最大动态组件数量 (从 kelnel_ui.ui_def 导入的函数加载) ---
+plugin_settings_on_load = load_plugin_settings() 
+MAX_DYNAMIC_COMPONENTS = plugin_settings_on_load.get("max_dynamic_components", DEFAULT_MAX_DYNAMIC_COMPONENTS)
+print(f"插件启动：最大动态组件数量从配置加载为: {MAX_DYNAMIC_COMPONENTS} (通过 kelnel_ui.ui_def)")
+# --- 初始化最大动态组件数量结束 ---
 
 # Register NVML cleanup function to be called on exit
 atexit.register(cleanup_nvml)
@@ -38,8 +62,8 @@ from datetime import datetime
 from math import gcd
 import uuid
 import fnmatch
-from .hua_word_image import HuaFloatNode, HuaIntNode, HuaFloatNode2, HuaFloatNode3, HuaFloatNode4, HuaIntNode2, HuaIntNode3, HuaIntNode4 # 导入新的节点类
-from .gradio_cancel_test import cancel_comfyui_task_action # <--- 导入中断函数
+from .kelnel_ui.gradio_cancel_test import cancel_comfyui_task_action # <--- 导入中断函数
+from .kelnel_ui.api_json_manage import define_api_json_management_ui # <--- 导入 API JSON 管理 UI 定义函数
 
 # --- 全局状态变量 ---
 task_queue = deque()
@@ -52,6 +76,10 @@ executor = ThreadPoolExecutor(max_workers=1) # 单线程执行生成任务
 last_used_seed = -1 # 用于递增/递减模式
 seed_lock = Lock() # 用于保护 last_used_seed
 interrupt_requested_event = Event() # 新增：用于用户请求中断当前任务的信号
+
+# --- ComfyUI 实时预览器实例 ---
+# 使用一个独特的 client_id_suffix 以避免与 k_Preview.py 的独立测试冲突
+comfyui_previewer = ComfyUIPreviewer(client_id_suffix="gradio_workflow_integration", min_yield_interval=0.1)
 # --- 全局状态变量结束 ---
 
 # --- 日志轮询全局变量和函数 ---
@@ -179,7 +207,7 @@ except ImportError:
 
 # 尝试导入图标，如果失败则使用默认值
 try:
-    from .hua_icons import icons
+    from .node.hua_icons import icons
 except ImportError:
     print("无法导入 .hua_icons，将使用默认分类名称。")
     icons = {"hua_boy_one": "Gradio"} # 提供一个默认值
@@ -190,13 +218,14 @@ class GradioTextOk:
         return {
             "required": {
                 "string": ("STRING", {"multiline": True, "dynamicPrompts": True, "tooltip": "The text to be encoded."}),
+                "name": ("STRING", {"multiline": False, "default": "GradioTextOk", "tooltip": "节点名称"}),
             }
         }
     RETURN_TYPES = ("STRING",)
     FUNCTION = "encode"
     CATEGORY = icons.get("hua_boy_one", "Gradio") # 使用 get 提供默认值
     DESCRIPTION = "Encodes a text prompt..."
-    def encode(self,string):
+    def encode(self, string, name):
         return (string,)
 
 INPUT_DIR = folder_paths.get_input_directory()
@@ -204,81 +233,7 @@ OUTPUT_DIR = folder_paths.get_output_directory()
 TEMP_DIR = folder_paths.get_temp_directory()
 
 # --- Load Resolution Presets from File ---
-from math import gcd # Ensure gcd is imported
-import os # Ensure os is imported
-
-# Function to calculate aspect ratio (should already exist below, but ensure it's available)
-def calculate_aspect_ratio(width, height):
-    if width is None or height is None or width <= 0 or height <= 0:
-        return "0:0"
-    try:
-        w, h = int(width), int(height)
-        common_divisor = gcd(w, h)
-        return f"{w//common_divisor}:{h//common_divisor}"
-    except (ValueError, TypeError):
-        return "无效输入"
-
-def load_resolution_presets_from_files(relative_filepaths, prefixes):
-    """Loads resolution presets from multiple files, adding a prefix to each."""
-    presets = set() # Use a set to automatically handle duplicates if files have overlapping resolutions
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-
-    if len(relative_filepaths) != len(prefixes):
-        print("Error: Number of filepaths and prefixes must match.")
-        return ["512x512|1:1", "1024x1024|1:1", "custom"] # Fallback
-
-    for i, relative_path in enumerate(relative_filepaths):
-        prefix = prefixes[i]
-        full_path = os.path.join(script_dir, relative_path)
-        print(f"Attempting to load resolutions from: {full_path} with prefix '{prefix}'")
-        try:
-            with open(full_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line: continue
-                    # Inner try/except block for parsing width/height for EACH line
-                    try:
-                        # Determine separator and split
-                        if '×' in line:
-                            width_str, height_str = line.split('×')
-                        elif 'x' in line: # Fallback for standard 'x'
-                            width_str, height_str = line.split('x')
-                        else:
-                            print(f"Skipping line with unknown separator in '{relative_path}': '{line}'")
-                            continue # Skip this line
-
-                        # Convert to integers and calculate ratio
-                        width = int(width_str)
-                        height = int(height_str)
-                        ratio = calculate_aspect_ratio(width, height)
-                        # Add prefix and add to set
-                        presets.add(f"{prefix}{width}x{height}|{ratio}")
-
-                    except ValueError as e: # Catch errors during int conversion or splitting
-                        print(f"Skipping invalid number format in resolution file '{relative_path}': '{line}' - Error: {e}")
-                        continue # Continue to the next line in the file
-            # This print is outside the inner loop, but inside the outer try
-            print(f"Loaded {len(presets)} unique resolutions so far after processing '{relative_path}'.")
-        except FileNotFoundError: # This except belongs to the outer try (opening the file)
-            print(f"Warning: Resolution file not found at '{full_path}'. Skipping.")
-            continue # Skip this file and continue with others
-        except Exception as e:
-            print(f"Warning: Error reading resolution file '{full_path}': {e}. Skipping.")
-            continue # Skip this file
-
-    # Convert set to list and sort alphabetically (optional, but good for consistency)
-    sorted_presets = sorted(list(presets))
-
-    # Add "custom" option at the end
-    sorted_presets.append("custom")
-
-    if not sorted_presets or len(sorted_presets) == 1: # Only "custom" was added
-        print("Error: No valid resolution presets loaded from any file. Using default.")
-        return ["512x512|1:1", "1024x1024|1:1", "custom"]
-
-    return sorted_presets
-
-# Define the paths to the resolution files relative to THIS script file
+# resolution_files and resolution_prefixes are defined here
 resolution_files = [
     "Sample_preview/flux_resolution.txt",
     "Sample_preview/sdxl_1_5_resolution.txt"
@@ -287,7 +242,9 @@ resolution_prefixes = [
     "Flux - ",
     "SDXL - "
 ]
-resolution_presets = load_resolution_presets_from_files(resolution_files, resolution_prefixes)
+# load_resolution_presets_from_files is now imported from ui_def
+# It needs current_dir (script_dir)
+resolution_presets = load_resolution_presets_from_files(resolution_files, resolution_prefixes, current_dir)
 # Add a print statement to confirm loading
 print(f"Final resolution_presets count (including 'custom'): {len(resolution_presets)}")
 if len(resolution_presets) < 10: # Print some examples if loading failed or files are short
@@ -350,83 +307,15 @@ def refresh_json_files():
     new_choices = get_json_files()
     return gr.update(choices=new_choices)
 
-# Keep only the corrected parse_resolution and strip_prefix functions
-def strip_prefix(resolution_str):
-    """Removes known prefixes from the resolution string."""
-    for prefix in resolution_prefixes:
-        if resolution_str.startswith(prefix):
-            return resolution_str[len(prefix):]
-    return resolution_str # Return original if no prefix matches
-
-def parse_resolution(resolution_str):
-    if resolution_str == "custom":
-        return None, None, "自定义", "custom" # Return original string as well
-    try:
-        # Strip prefix before parsing
-        cleaned_str = strip_prefix(resolution_str)
-        parts = cleaned_str.split("|")
-        if len(parts) != 2: return None, None, "无效格式", resolution_str
-        width, height = map(int, parts[0].split("x"))
-        ratio = parts[1]
-        # Return original string along with parsed values
-        return width, height, ratio, resolution_str
-    except ValueError:
-        return None, None, "无效格式", resolution_str
-
-def calculate_aspect_ratio(width, height):
-    if width is None or height is None or width <= 0 or height <= 0:
-        return "0:0"
-    try:
-        w, h = int(width), int(height)
-        common_divisor = gcd(w, h)
-        return f"{w//common_divisor}:{h//common_divisor}"
-    except (ValueError, TypeError):
-        return "无效输入"
-
-
-def find_closest_preset(width, height):
-    if width is None or height is None or width <= 0 or height <= 0:
-        return "custom"
-    try:
-        w, h = int(width), int(height)
-    except (ValueError, TypeError):
-        return "custom"
-
-    target_aspect = calculate_aspect_ratio(w, h)
-    best_match = "custom"
-    min_diff = float('inf')
-
-    for preset_str_with_prefix in resolution_presets:
-        if preset_str_with_prefix == "custom": continue
-        # Use the 4th return value (original string) from parse_resolution
-        preset_width, preset_height, preset_aspect, _ = parse_resolution(preset_str_with_prefix)
-
-        if preset_width is None: continue # Skip invalid presets
-
-        # Exact match takes priority
-        if preset_width == w and preset_height == h:
-            return preset_str_with_prefix # Return the full string with prefix
-
-        # If aspect ratios match, find the one with the closest area
-        if preset_aspect == target_aspect:
-            area_diff = abs((preset_width * preset_height) - (w * h))
-            if area_diff < min_diff:
-                min_diff = area_diff
-                best_match = preset_str_with_prefix # Store the full string with prefix
-
-    # If an aspect ratio match was found, return it
-    if best_match != "custom":
-        return best_match
-
-    return "custom"
+# strip_prefix, parse_resolution, calculate_aspect_ratio, find_closest_preset are now imported from ui_def
 
 def update_from_preset(resolution_str_with_prefix):
     if resolution_str_with_prefix == "custom":
         # 返回空更新，让用户手动输入
         return "custom", gr.update(), gr.update(), "当前比例: 自定义"
 
-    # Use the 4th return value (original string) from parse_resolution
-    width, height, ratio, original_str = parse_resolution(resolution_str_with_prefix)
+    # parse_resolution is imported, needs resolution_prefixes
+    width, height, ratio, original_str = parse_resolution(resolution_str_with_prefix, resolution_prefixes)
 
     if width is None: # 处理无效格式的情况
         return "custom", gr.update(), gr.update(), "当前比例: 无效格式"
@@ -435,8 +324,10 @@ def update_from_preset(resolution_str_with_prefix):
     return original_str, width, height, f"当前比例: {ratio}"
 
 def update_from_inputs(width, height):
+    # calculate_aspect_ratio and find_closest_preset are imported
+    # find_closest_preset needs resolution_presets and resolution_prefixes
     ratio = calculate_aspect_ratio(width, height)
-    closest_preset = find_closest_preset(width, height)
+    closest_preset = find_closest_preset(width, height, resolution_presets, resolution_prefixes)
     return closest_preset, f"当前比例: {ratio}"
 
 def flip_resolution(width, height):
@@ -461,26 +352,21 @@ lora_list = get_model_list("loras")
 checkpoint_list = get_model_list("checkpoints")
 unet_list = get_model_list("unet") # 假设 UNet 模型在 'unet' 目录
 
-def get_output_images():
-    image_files = []
-    supported_formats = ['*.png', '*.jpg', '*.jpeg', '*.gif', '*.webp', '*.bmp']
-    if not os.path.exists(OUTPUT_DIR):
-        print(f"警告: 输出目录 {OUTPUT_DIR} 不存在。")
-        return []
-    try:
-        for fmt in supported_formats:
-            pattern = os.path.join(OUTPUT_DIR, fmt)
-            image_files.extend(glob.glob(pattern))
-        image_files.sort(key=os.path.getmtime, reverse=True)
-        print(f"在 {OUTPUT_DIR} 中找到 {len(image_files)} 张图片。")
-        # 返回绝对路径
-        return [os.path.abspath(f) for f in image_files]
-    except Exception as e:
-        print(f"扫描输出目录时出错: {e}")
-        return []
+# get_output_images is now imported from ui_def
 
-# 修改 generate_image 函数以接受种子模式、固定种子值、新的 Float/Int 值以及新的 Lora 值
-def generate_image(inputimage1, input_video, prompt_text_positive, prompt_text_positive_2, prompt_text_positive_3, prompt_text_positive_4, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_lora_2, hua_lora_3, hua_lora_4, hua_checkpoint, hua_unet, hua_float_value, hua_int_value, hua_float_value_2, hua_int_value_2, hua_float_value_3, hua_int_value_3, hua_float_value_4, hua_int_value_4, seed_mode, fixed_seed): # 添加新参数 hua_lora_2, hua_lora_3, hua_lora_4
+# 修改 generate_image 函数以接受动态组件列表
+def generate_image(
+    inputimage1, input_video, 
+    dynamic_positive_prompts_values: list, # 列表，包含所有 positive_prompt_texts 的值
+    prompt_text_negative, 
+    json_file, 
+    hua_width, hua_height, 
+    dynamic_loras_values: list,           # 列表，包含所有 lora_dropdowns 的值
+    hua_checkpoint, hua_unet, 
+    dynamic_float_nodes_values: list,     # 列表，包含所有 float_inputs 的值
+    dynamic_int_nodes_values: list,       # 列表，包含所有 int_inputs 的值
+    seed_mode, fixed_seed
+):
     global last_used_seed # 声明使用全局变量
     execution_id = str(uuid.uuid4())
     print(f"[{execution_id}] 开始生成任务 (种子模式: {seed_mode})...")
@@ -502,39 +388,26 @@ def generate_image(inputimage1, input_video, prompt_text_positive, prompt_text_p
         print(f"[{execution_id}] 读取或解析 JSON 文件时出错 ({json_path}): {e}")
         return None, None
 
-    # --- 节点查找 (使用新的函数和真实类名) ---
-    image_input_key = find_key_by_class_type(prompt, "GradioInputImage")
-    video_input_key = find_key_by_class_type(prompt, "VHS_LoadVideo") # 查找视频输入节点
-    seed_key = find_key_by_class_type(prompt, "Hua_gradio_Seed")
-    text_ok_key = find_key_by_class_type(prompt, "GradioTextOk")
-    text_ok_key_2 = find_key_by_class_type(prompt, "GradioTextOk2")
-    text_ok_key_3 = find_key_by_class_type(prompt, "GradioTextOk3")
-    text_ok_key_4 = find_key_by_class_type(prompt, "GradioTextOk4")
-    text_bad_key = find_key_by_class_type(prompt, "GradioTextBad")
-    # 查找分辨率节点并打印调试信息
-    fenbianlv_key = find_key_by_class_type(prompt, "Hua_gradio_resolution")
-    print(f"[{execution_id}] 查找分辨率节点结果: {fenbianlv_key}")
-    if fenbianlv_key:
-        print(f"[{execution_id}] 分辨率节点详情: {prompt.get(fenbianlv_key, {})}")
-    lora_key = find_key_by_class_type(prompt, "Hua_LoraLoaderModelOnly") # 注意这里用的是仅模型
-    lora_key_2 = find_key_by_class_type(prompt, "Hua_LoraLoaderModelOnly2") # 新增 Lora 2 key
-    lora_key_3 = find_key_by_class_type(prompt, "Hua_LoraLoaderModelOnly3") # 新增 Lora 3 key
-    lora_key_4 = find_key_by_class_type(prompt, "Hua_LoraLoaderModelOnly4") # 新增 Lora 4 key
-    checkpoint_key = find_key_by_class_type(prompt, "Hua_CheckpointLoaderSimple")
-    unet_key = find_key_by_class_type(prompt, "Hua_UNETLoader")
-    hua_output_key = find_key_by_class_type(prompt, "Hua_Output")
-    hua_video_output_key = find_key_by_class_type(prompt, "Hua_Video_Output") # 查找视频输出节点
-    # --- 新增：查找 Float 和 Int 节点 (包括 2/3/4) ---
-    float_node_key = find_key_by_class_type(prompt, "HuaFloatNode")
-    int_node_key = find_key_by_class_type(prompt, "HuaIntNode")
-    float_node_key_2 = find_key_by_class_type(prompt, "HuaFloatNode2")
-    int_node_key_2 = find_key_by_class_type(prompt, "HuaIntNode2")
-    float_node_key_3 = find_key_by_class_type(prompt, "HuaFloatNode3")
-    int_node_key_3 = find_key_by_class_type(prompt, "HuaIntNode3")
-    float_node_key_4 = find_key_by_class_type(prompt, "HuaFloatNode4")
-    int_node_key_4 = find_key_by_class_type(prompt, "HuaIntNode4")
-
     # --- 更新 Prompt ---
+    # 首先获取工作流中实际存在的动态节点的定义
+    # 注意：get_workflow_defaults_and_visibility 现在返回更详细的动态组件信息
+    # 我们需要从 prompt (原始JSON) 中直接查找节点ID，或者依赖 get_workflow_defaults_and_visibility 返回的ID
+    # 为简化，这里假设 get_workflow_defaults_and_visibility 返回的 dynamic_components 包含节点ID
+    # 并且 dynamic_*_values 列表中的顺序与 get_workflow_defaults_and_visibility 找到的节点顺序一致
+
+    workflow_info = get_workflow_defaults_and_visibility(json_file, OUTPUT_DIR, resolution_prefixes, resolution_presets, MAX_DYNAMIC_COMPONENTS)
+    
+    # --- 单例节点查找 ---
+    image_input_key = find_key_by_class_type(prompt, "GradioInputImage")
+    video_input_key = find_key_by_class_type(prompt, "VHS_LoadVideo")
+    seed_key = find_key_by_class_type(prompt, "Hua_gradio_Seed")
+    text_bad_key = find_key_by_class_type(prompt, "GradioTextBad")
+    fenbianlv_key = find_key_by_class_type(prompt, "Hua_gradio_resolution")
+    checkpoint_key = find_key_by_class_type(prompt, "Hua_CheckpointLoaderSimple")
+    unet_key = find_key_by_class_type(prompt, "Hua_UNETLoader") # 确保类名正确
+    hua_output_key = find_key_by_class_type(prompt, "Hua_Output")
+    hua_video_output_key = find_key_by_class_type(prompt, "Hua_Video_Output")
+    
     inputfilename = None # 初始化
     if image_input_key:
         if inputimage1 is not None:
@@ -628,12 +501,22 @@ def generate_image(inputimage1, input_video, prompt_text_positive, prompt_text_p
                 print(f"[{execution_id}] 未知种子模式 '{seed_mode}'. 回退到随机种子: {current_seed}")
 
             prompt[seed_key]["inputs"]["seed"] = current_seed
+    
+    # 更新动态正向提示词
+    actual_positive_prompt_nodes = workflow_info["dynamic_components"]["GradioTextOk"]
+    for i, node_info in enumerate(actual_positive_prompt_nodes):
+        if i < len(dynamic_positive_prompts_values):
+            node_id_to_update = node_info["id"]
+            if node_id_to_update in prompt:
+                prompt[node_id_to_update]["inputs"]["string"] = dynamic_positive_prompts_values[i]
+                print(f"[{execution_id}] 更新正向提示节点 {node_id_to_update} (UI组件 {i+1}) 为: '{dynamic_positive_prompts_values[i]}'")
+            else:
+                print(f"[{execution_id}] 警告: 未在prompt中找到正向提示节点ID {node_id_to_update}")
+        else:
+            # 通常不应发生，因为 dynamic_positive_prompts_values 应该与可见组件数量匹配
+            print(f"[{execution_id}] 警告: 正向提示值列表长度不足以覆盖节点 {node_info['id']}")
 
-    # 更新文本提示词 (如果节点存在)
-    if text_ok_key: prompt[text_ok_key]["inputs"]["string"] = prompt_text_positive
-    if text_ok_key_2: prompt[text_ok_key_2]["inputs"]["string"] = prompt_text_positive_2
-    if text_ok_key_3: prompt[text_ok_key_3]["inputs"]["string"] = prompt_text_positive_3
-    if text_ok_key_4: prompt[text_ok_key_4]["inputs"]["string"] = prompt_text_positive_4
+
     if text_bad_key: prompt[text_bad_key]["inputs"]["string"] = prompt_text_negative
 
     if fenbianlv_key:
@@ -651,47 +534,52 @@ def generate_image(inputimage1, input_video, prompt_text_positive, prompt_text_p
              # 打印当前prompt结构帮助调试
              print(f"[{execution_id}] 当前prompt结构: {json.dumps(prompt, indent=2, ensure_ascii=False)}")
 
-    # 更新模型选择 (如果节点存在且选择了模型)
-    if lora_key and hua_lora != "None": prompt[lora_key]["inputs"]["lora_name"] = hua_lora
-    if lora_key_2 and hua_lora_2 != "None": prompt[lora_key_2]["inputs"]["lora_name"] = hua_lora_2 # 新增 Lora 2
-    if lora_key_3 and hua_lora_3 != "None": prompt[lora_key_3]["inputs"]["lora_name"] = hua_lora_3 # 新增 Lora 3
-    if lora_key_4 and hua_lora_4 != "None": prompt[lora_key_4]["inputs"]["lora_name"] = hua_lora_4 # 新增 Lora 4
+    # 更新动态Lora模型选择
+    actual_lora_nodes = workflow_info["dynamic_components"]["Hua_LoraLoaderModelOnly"]
+    for i, node_info in enumerate(actual_lora_nodes):
+        if i < len(dynamic_loras_values):
+            node_id_to_update = node_info["id"]
+            lora_name_from_ui = dynamic_loras_values[i]
+            if node_id_to_update in prompt and lora_name_from_ui != "None":
+                prompt[node_id_to_update]["inputs"]["lora_name"] = lora_name_from_ui
+                print(f"[{execution_id}] 更新Lora节点 {node_id_to_update} (UI组件 {i+1}) 为: '{lora_name_from_ui}'")
+            elif lora_name_from_ui == "None":
+                 print(f"[{execution_id}] Lora节点 {node_id_to_update} (UI组件 {i+1}) 选择为 'None'，不更新。")
+            else:
+                print(f"[{execution_id}] 警告: 未在prompt中找到Lora节点ID {node_id_to_update}")
+
     if checkpoint_key and hua_checkpoint != "None": prompt[checkpoint_key]["inputs"]["ckpt_name"] = hua_checkpoint
     if unet_key and hua_unet != "None": prompt[unet_key]["inputs"]["unet_name"] = hua_unet
 
-    # --- 新增：更新 Float 和 Int 节点输入 ---
-    if float_node_key and hua_float_value is not None:
-        try:
-            prompt[float_node_key]["inputs"]["float_value"] = float(hua_float_value)
-            print(f"[{execution_id}] 设置浮点数输入: {hua_float_value}")
-        except (ValueError, TypeError, KeyError) as e:
-            print(f"[{execution_id}] 更新浮点数输入时出错: {e}. 使用默认值或跳过。")
-
-    if int_node_key and hua_int_value is not None:
-        try:
-            prompt[int_node_key]["inputs"]["int_value"] = int(hua_int_value)
-            print(f"[{execution_id}] 设置整数输入: {hua_int_value}")
-        except (ValueError, TypeError, KeyError) as e:
-            print(f"[{execution_id}] 更新整数输入时出错: {e}. 使用默认值或跳过。")
-
-    # --- 新增：更新 Float/Int 2/3/4 节点输入 ---
-    new_inputs = {
-        float_node_key_2: hua_float_value_2, int_node_key_2: hua_int_value_2,
-        float_node_key_3: hua_float_value_3, int_node_key_3: hua_int_value_3,
-        float_node_key_4: hua_float_value_4, int_node_key_4: hua_int_value_4,
-    }
-    for node_key, value in new_inputs.items():
-        if node_key and value is not None:
-            node_info = prompt.get(node_key, {})
-            node_type = node_info.get("class_type", "Unknown")
-            input_field = "float_value" if "Float" in node_type else "int_value"
-            try:
-                converted_value = float(value) if "Float" in node_type else int(value)
-                prompt[node_key]["inputs"][input_field] = converted_value
-                print(f"[{execution_id}] 设置 {node_type} 输入 ({input_field}): {converted_value}")
-            except (ValueError, TypeError, KeyError) as e:
-                print(f"[{execution_id}] 更新 {node_type} 输入时出错: {e}. 使用默认值或跳过。")
-
+    # 更新动态Int节点输入
+    actual_int_nodes = workflow_info["dynamic_components"]["HuaIntNode"]
+    for i, node_info in enumerate(actual_int_nodes):
+        if i < len(dynamic_int_nodes_values):
+            node_id_to_update = node_info["id"]
+            int_value_from_ui = dynamic_int_nodes_values[i]
+            if node_id_to_update in prompt and int_value_from_ui is not None:
+                try:
+                    prompt[node_id_to_update]["inputs"]["int_value"] = int(int_value_from_ui)
+                    print(f"[{execution_id}] 更新Int节点 {node_id_to_update} (UI组件 {i+1}) 为: {int(int_value_from_ui)}")
+                except (ValueError, TypeError, KeyError) as e:
+                    print(f"[{execution_id}] 更新Int节点 {node_id_to_update} 时出错: {e}. 使用默认值或跳过。")
+            else:
+                 print(f"[{execution_id}] 警告: 未在prompt中找到Int节点ID {node_id_to_update} 或值为None")
+    
+    # 更新动态Float节点输入
+    actual_float_nodes = workflow_info["dynamic_components"]["HuaFloatNode"]
+    for i, node_info in enumerate(actual_float_nodes):
+        if i < len(dynamic_float_nodes_values):
+            node_id_to_update = node_info["id"]
+            float_value_from_ui = dynamic_float_nodes_values[i]
+            if node_id_to_update in prompt and float_value_from_ui is not None:
+                try:
+                    prompt[node_id_to_update]["inputs"]["float_value"] = float(float_value_from_ui)
+                    print(f"[{execution_id}] 更新Float节点 {node_id_to_update} (UI组件 {i+1}) 为: {float(float_value_from_ui)}")
+                except (ValueError, TypeError, KeyError) as e:
+                    print(f"[{execution_id}] 更新Float节点 {node_id_to_update} 时出错: {e}. 使用默认值或跳过。")
+            else:
+                print(f"[{execution_id}] 警告: 未在prompt中找到Float节点ID {node_id_to_update} 或值为None")
 
     # --- 设置输出节点的 unique_id ---
     if hua_output_key:
@@ -837,308 +725,56 @@ def generate_image(inputimage1, input_video, prompt_text_positive, prompt_text_p
     log_message(f"[{execution_id}] 等待临时文件超时 ({wait_timeout}秒)。TEMP_DIR ('{TEMP_DIR}') 最终内容可能已在上面记录。") # 使用 log_message
     return None, None # 超时，返回 None
 
+# fuck and get_workflow_defaults_and_visibility are now imported from ui_def.
+# The helper find_key_by_class_type_internal was moved to ui_def.py as it's used by them.
 
-def fuck(json_file):
-    # 检查文件是否存在且有效
-    if not json_file or not os.path.exists(os.path.join(OUTPUT_DIR, json_file)):
-        print(f"JSON 文件无效或不存在: {json_file}")
-        # 返回所有组件都不可见的状态
-        return (gr.update(visible=False),) * 10 # 10 个动态组件
+# --- 队列处理函数 (更新签名以包含动态组件列表) ---
+def run_queued_tasks(
+    inputimage1, input_video, 
+    # Capture all dynamic positive prompts using *args or by naming them if MAX_DYNAMIC_COMPONENTS is fixed
+    # Assuming run_button.click inputs are: input_image, input_video, *positive_prompt_texts, prompt_negative, ...
+    # So, we need to capture these based on MAX_DYNAMIC_COMPONENTS
+    # Let's define them explicitly for clarity up to MAX_DYNAMIC_COMPONENTS
+    # This requires knowing the exact order from run_button.click
+    # The order in run_button.click is:
+    # input_image, input_video, 
+    # *positive_prompt_texts, (size MAX_DYNAMIC_COMPONENTS)
+    # prompt_negative, 
+    # json_dropdown, hua_width, hua_height, 
+    # *lora_dropdowns, (size MAX_DYNAMIC_COMPONENTS)
+    # hua_checkpoint_dropdown, hua_unet_dropdown, 
+    # *float_inputs, (size MAX_DYNAMIC_COMPONENTS)
+    # *int_inputs, (size MAX_DYNAMIC_COMPONENTS)
+    # seed_mode_dropdown, fixed_seed_input,
+    # queue_count
 
-    json_path = os.path.join(OUTPUT_DIR, json_file)
-    try:
-        with open(json_path, "r", encoding="utf-8") as file_json:
-            prompt = json.load(file_json)
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        print(f"读取或解析 JSON 文件时出错 ({json_file}): {e}")
-        # 返回所有组件都不可见的状态，并为模型设置默认值 "None"
-        visibility_updates = [gr.update(visible=False)] * 7 # 7 non-model dynamic components
-        model_updates = [gr.update(visible=False, value="None")] * 3 # 3 model dropdowns
-        return tuple(visibility_updates + model_updates) # 10 个动态组件
+    # We'll use *args and slicing for dynamic parts if function signature becomes too long,
+    # or list them all if MAX_DYNAMIC_COMPONENTS is small and fixed.
+    # For now, let's assume they are passed positionally and we'll reconstruct lists.
+    # This is tricky. A better way is to pass *args to run_queued_tasks and then unpack.
+    # Or, more simply, modify run_button.click to pass lists directly if Gradio allows.
+    # Since Gradio passes them as individual args, we must list them or use *args.
+    
+    # Let's list them out based on run_button.click inputs:
+    dynamic_prompt_1, dynamic_prompt_2, dynamic_prompt_3, dynamic_prompt_4, dynamic_prompt_5, # From *positive_prompt_texts
+    prompt_text_negative, 
+    json_file, 
+    hua_width, hua_height, 
+    dynamic_lora_1, dynamic_lora_2, dynamic_lora_3, dynamic_lora_4, dynamic_lora_5,       # From *lora_dropdowns
+    hua_checkpoint, hua_unet, 
+    dynamic_float_1, dynamic_float_2, dynamic_float_3, dynamic_float_4, dynamic_float_5, # From *float_inputs
+    dynamic_int_1, dynamic_int_2, dynamic_int_3, dynamic_int_4, dynamic_int_5,         # From *int_inputs
+    seed_mode, fixed_seed, 
+    queue_count=1, progress=gr.Progress(track_tqdm=True)
+):
+    global accumulated_image_results, last_video_result, executor
 
-    # 内部辅助函数 (修改为按 class_type 查找)
-    def find_key_by_class_type_internal(p, class_type):
-        for k, v in p.items():
-            if isinstance(v, dict) and v.get("class_type") == class_type:
-                return k
-        return None
+    # Reconstruct lists for dynamic components
+    dynamic_positive_prompts_values = [dynamic_prompt_1, dynamic_prompt_2, dynamic_prompt_3, dynamic_prompt_4, dynamic_prompt_5]
+    dynamic_loras_values = [dynamic_lora_1, dynamic_lora_2, dynamic_lora_3, dynamic_lora_4, dynamic_lora_5]
+    dynamic_float_nodes_values = [dynamic_float_1, dynamic_float_2, dynamic_float_3, dynamic_float_4, dynamic_float_5]
+    dynamic_int_nodes_values = [dynamic_int_1, dynamic_int_2, dynamic_int_3, dynamic_int_4, dynamic_int_5]
 
-    # 检查各个节点是否存在 (使用新的内部函数和真实类名)
-    has_image_input = find_key_by_class_type_internal(prompt, "GradioInputImage") is not None
-    has_pos_prompt_1 = find_key_by_class_type_internal(prompt, "GradioTextOk") is not None
-    has_pos_prompt_2 = find_key_by_class_type_internal(prompt, "GradioTextOk2") is not None
-    has_pos_prompt_3 = find_key_by_class_type_internal(prompt, "GradioTextOk3") is not None
-    has_pos_prompt_4 = find_key_by_class_type_internal(prompt, "GradioTextOk4") is not None
-    has_neg_prompt = find_key_by_class_type_internal(prompt, "GradioTextBad") is not None
-    has_resolution = find_key_by_class_type_internal(prompt, "Hua_gradio_resolution") is not None
-    has_lora = find_key_by_class_type_internal(prompt, "Hua_LoraLoaderModelOnly") is not None
-    has_checkpoint = find_key_by_class_type_internal(prompt, "Hua_CheckpointLoaderSimple") is not None
-    has_unet = find_key_by_class_type_internal(prompt, "Hua_UNETLoader") is not None
-
-    print(f"检查结果 for {json_file}: Image={has_image_input}, PosP1={has_pos_prompt_1}, PosP2={has_pos_prompt_2}, PosP3={has_pos_prompt_3}, PosP4={has_pos_prompt_4}, NegP={has_neg_prompt}, Res={has_resolution}, Lora={has_lora}, Ckpt={has_checkpoint}, Unet={has_unet}")
-
-    # 返回 gr.update 对象元组，顺序必须与 outputs 列表对应
-    return (
-        gr.update(visible=has_image_input),
-        gr.update(visible=has_pos_prompt_1),
-        gr.update(visible=has_pos_prompt_2),
-        gr.update(visible=has_pos_prompt_3),
-        gr.update(visible=has_pos_prompt_4),
-        gr.update(visible=has_neg_prompt),
-        gr.update(visible=has_resolution),
-        gr.update(visible=has_lora),
-        gr.update(visible=has_checkpoint),
-        gr.update(visible=has_unet)
-    )
-
-# --- 新函数：获取工作流默认值和可见性 ---
-def get_workflow_defaults_and_visibility(json_file):
-    defaults = {
-        "visible_image_input": False,
-        "visible_video_input": False, # 新增视频输入可见性
-        "visible_pos_prompt_1": False,
-        "visible_pos_prompt_2": False,
-        "visible_pos_prompt_3": False,
-        "visible_pos_prompt_4": False,
-        "visible_neg_prompt": False,
-        "visible_resolution": False,
-        "visible_lora": False,
-        "visible_lora_2": False,
-        "visible_lora_3": False,
-        "visible_lora_4": False,
-        "visible_checkpoint": False,
-        "visible_unet": False,
-        "default_lora": "None",
-        "default_lora_2": "None",
-        "default_lora_3": "None",
-        "default_lora_4": "None",
-        "default_checkpoint": "None",
-        "default_unet": "None",
-        "visible_seed_indicator": False,
-        "visible_image_output": False, # 新增
-        "visible_video_output": False, # 新增
-        "visible_float_input": False, # 新增 Float 可见性
-        "default_float_label": "浮点数输入 (Float)", # 新增 Float 默认标签
-        "visible_int_input": False,   # 新增 Int 可见性
-        "default_int_label": "整数输入 (Int)",     # 新增 Int 默认标签
-        "visible_float_input_2": False,
-        "default_float_label_2": "浮点数输入 2 (Float)",
-        "visible_float_input_3": False,
-        "default_float_label_3": "浮点数输入 3 (Float)",
-        "visible_float_input_4": False,
-        "default_float_label_4": "浮点数输入 4 (Float)",
-        "visible_int_input_2": False,
-        "default_int_label_2": "整数输入 2 (Int)",
-        "visible_int_input_3": False,
-        "default_int_label_3": "整数输入 3 (Int)",
-        "visible_int_input_4": False,
-        "default_int_label_4": "整数输入 4 (Int)",
-        # --- 新增：分辨率和提示词默认值 ---
-        "default_width": 512,
-        "default_height": 512,
-        "default_pos_prompt_1": "",
-        "default_pos_prompt_2": "",
-        "default_pos_prompt_3": "",
-        "default_pos_prompt_4": "",
-        "default_neg_prompt": "",
-        # --- 新增：浮点数和整数的默认值 ---
-        "default_float_value": 0.0,
-        "default_int_value": 0,
-        "default_float_value_2": 0.0,
-        "default_int_value_2": 0,
-        "default_float_value_3": 0.0,
-        "default_int_value_3": 0,
-        "default_float_value_4": 0.0,
-        "default_int_value_4": 0,
-        # --- 新增结束 ---
-    }
-    if not json_file or not os.path.exists(os.path.join(OUTPUT_DIR, json_file)):
-        print(f"JSON 文件无效或不存在: {json_file}")
-        return defaults # 返回所有都不可见/默认
-
-    json_path = os.path.join(OUTPUT_DIR, json_file)
-    try:
-        with open(json_path, "r", encoding="utf-8") as file_json:
-            prompt = json.load(file_json)
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        print(f"读取或解析 JSON 文件时出错 ({json_file}): {e}")
-        return defaults # 返回所有都不可见/默认
-
-    # 内部辅助函数 (修改为按 class_type 查找)
-    def find_key_by_class_type_internal(p, class_type):
-        for k, v in p.items():
-            if isinstance(v, dict) and v.get("class_type") == class_type:
-                return k
-        return None
-
-    # 检查节点存在性并更新可见性 (使用新的内部函数和真实类名)
-    defaults["visible_image_input"] = find_key_by_class_type_internal(prompt, "GradioInputImage") is not None
-    defaults["visible_video_input"] = find_key_by_class_type_internal(prompt, "VHS_LoadVideo") is not None # 检查视频输入节点
-
-    # --- 检查提示词节点并提取默认值 ---
-    pos_prompt_1_key = find_key_by_class_type_internal(prompt, "GradioTextOk")
-    if pos_prompt_1_key and pos_prompt_1_key in prompt and "inputs" in prompt[pos_prompt_1_key]:
-        defaults["visible_pos_prompt_1"] = True
-        defaults["default_pos_prompt_1"] = prompt[pos_prompt_1_key]["inputs"].get("string", "")
-    else: defaults["visible_pos_prompt_1"] = False
-
-    pos_prompt_2_key = find_key_by_class_type_internal(prompt, "GradioTextOk2")
-    if pos_prompt_2_key and pos_prompt_2_key in prompt and "inputs" in prompt[pos_prompt_2_key]:
-        defaults["visible_pos_prompt_2"] = True
-        defaults["default_pos_prompt_2"] = prompt[pos_prompt_2_key]["inputs"].get("string", "")
-    else: defaults["visible_pos_prompt_2"] = False
-
-    pos_prompt_3_key = find_key_by_class_type_internal(prompt, "GradioTextOk3")
-    if pos_prompt_3_key and pos_prompt_3_key in prompt and "inputs" in prompt[pos_prompt_3_key]:
-        defaults["visible_pos_prompt_3"] = True
-        defaults["default_pos_prompt_3"] = prompt[pos_prompt_3_key]["inputs"].get("string", "")
-    else: defaults["visible_pos_prompt_3"] = False
-
-    pos_prompt_4_key = find_key_by_class_type_internal(prompt, "GradioTextOk4")
-    if pos_prompt_4_key and pos_prompt_4_key in prompt and "inputs" in prompt[pos_prompt_4_key]:
-        defaults["visible_pos_prompt_4"] = True
-        defaults["default_pos_prompt_4"] = prompt[pos_prompt_4_key]["inputs"].get("string", "")
-    else: defaults["visible_pos_prompt_4"] = False
-
-    neg_prompt_key = find_key_by_class_type_internal(prompt, "GradioTextBad")
-    if neg_prompt_key and neg_prompt_key in prompt and "inputs" in prompt[neg_prompt_key]:
-        defaults["visible_neg_prompt"] = True
-        defaults["default_neg_prompt"] = prompt[neg_prompt_key]["inputs"].get("string", "")
-    else: defaults["visible_neg_prompt"] = False
-
-    # --- 检查分辨率节点并提取默认值 ---
-    resolution_key = find_key_by_class_type_internal(prompt, "Hua_gradio_resolution")
-    if resolution_key and resolution_key in prompt and "inputs" in prompt[resolution_key]:
-        defaults["visible_resolution"] = True
-        # 尝试提取，如果失败则保留默认值 512
-        try: defaults["default_width"] = int(prompt[resolution_key]["inputs"].get("custom_width", 512))
-        except (ValueError, TypeError): pass
-        try: defaults["default_height"] = int(prompt[resolution_key]["inputs"].get("custom_height", 512))
-        except (ValueError, TypeError): pass
-    else: defaults["visible_resolution"] = False
-
-    defaults["visible_seed_indicator"] = find_key_by_class_type_internal(prompt, "Hua_gradio_Seed") is not None
-    defaults["visible_image_output"] = find_key_by_class_type_internal(prompt, "Hua_Output") is not None # 检查图片输出
-    defaults["visible_video_output"] = find_key_by_class_type_internal(prompt, "Hua_Video_Output") is not None # 检查视频输出
-
-    # --- 新增：检查 Float 和 Int 节点可见性并提取 name ---
-    float_node_key = find_key_by_class_type_internal(prompt, "HuaFloatNode")
-    if float_node_key and float_node_key in prompt and "inputs" in prompt[float_node_key]:
-        defaults["visible_float_input"] = True
-        float_name = prompt[float_node_key]["inputs"].get("name", "FloatInput")
-        defaults["default_float_label"] = f"{float_name}: 浮点数输入 (Float)"
-        try:
-            defaults["default_float_value"] = float(prompt[float_node_key]["inputs"].get("float_value", 0.0))
-        except (ValueError, TypeError):
-            defaults["default_float_value"] = 0.0
-    else:
-        defaults["visible_float_input"] = False
-        defaults["default_float_label"] = "浮点数输入 (Float)"
-        defaults["default_float_value"] = 0.0
-
-    int_node_key = find_key_by_class_type_internal(prompt, "HuaIntNode")
-    if int_node_key and int_node_key in prompt and "inputs" in prompt[int_node_key]:
-        defaults["visible_int_input"] = True
-        int_name = prompt[int_node_key]["inputs"].get("name", "IntInput")
-        defaults["default_int_label"] = f"{int_name}: 整数输入 (Int)"
-        try:
-            defaults["default_int_value"] = int(prompt[int_node_key]["inputs"].get("int_value", 0))
-        except (ValueError, TypeError):
-            defaults["default_int_value"] = 0
-    else:
-        defaults["visible_int_input"] = False
-        defaults["default_int_label"] = "整数输入 (Int)"
-        defaults["default_int_value"] = 0
-
-    # --- 新增：检查 Float/Int 2/3/4 节点 ---
-    for i in range(2, 5):
-        # Float
-        float_node_key_i = find_key_by_class_type_internal(prompt, f"HuaFloatNode{i}")
-        if float_node_key_i and float_node_key_i in prompt and "inputs" in prompt[float_node_key_i]:
-            defaults[f"visible_float_input_{i}"] = True
-            float_name_i = prompt[float_node_key_i]["inputs"].get("name", f"FloatInput{i}")
-            defaults[f"default_float_label_{i}"] = f"{float_name_i}: 浮点数输入 {i} (Float)"
-            try:
-                defaults[f"default_float_value_{i}"] = float(prompt[float_node_key_i]["inputs"].get("float_value", 0.0))
-            except (ValueError, TypeError):
-                defaults[f"default_float_value_{i}"] = 0.0
-        else:
-            defaults[f"visible_float_input_{i}"] = False
-            defaults[f"default_float_label_{i}"] = f"浮点数输入 {i} (Float)"
-            defaults[f"default_float_value_{i}"] = 0.0
-        # Int
-        int_node_key_i = find_key_by_class_type_internal(prompt, f"HuaIntNode{i}")
-        if int_node_key_i and int_node_key_i in prompt and "inputs" in prompt[int_node_key_i]:
-            defaults[f"visible_int_input_{i}"] = True
-            int_name_i = prompt[int_node_key_i]["inputs"].get("name", f"IntInput{i}")
-            defaults[f"default_int_label_{i}"] = f"{int_name_i}: 整数输入 {i} (Int)"
-            try:
-                defaults[f"default_int_value_{i}"] = int(prompt[int_node_key_i]["inputs"].get("int_value", 0))
-            except (ValueError, TypeError):
-                defaults[f"default_int_value_{i}"] = 0
-        else:
-            defaults[f"visible_int_input_{i}"] = False
-            defaults[f"default_int_label_{i}"] = f"整数输入 {i} (Int)"
-            defaults[f"default_int_value_{i}"] = 0
-
-    # 检查模型节点并提取默认值 (使用新的内部函数和真实类名)
-    lora_key = find_key_by_class_type_internal(prompt, "Hua_LoraLoaderModelOnly")
-    if lora_key and lora_key in prompt and "inputs" in prompt[lora_key]:
-        defaults["visible_lora"] = True
-        defaults["default_lora"] = prompt[lora_key]["inputs"].get("lora_name", "None")
-    else:
-        defaults["visible_lora"] = False
-        defaults["default_lora"] = "None"
-
-    lora_key_2 = find_key_by_class_type_internal(prompt, "Hua_LoraLoaderModelOnly2")
-    if lora_key_2 and lora_key_2 in prompt and "inputs" in prompt[lora_key_2]:
-        defaults["visible_lora_2"] = True
-        defaults["default_lora_2"] = prompt[lora_key_2]["inputs"].get("lora_name", "None")
-    else:
-        defaults["visible_lora_2"] = False
-        defaults["default_lora_2"] = "None"
-
-    lora_key_3 = find_key_by_class_type_internal(prompt, "Hua_LoraLoaderModelOnly3")
-    if lora_key_3 and lora_key_3 in prompt and "inputs" in prompt[lora_key_3]:
-        defaults["visible_lora_3"] = True
-        defaults["default_lora_3"] = prompt[lora_key_3]["inputs"].get("lora_name", "None")
-    else:
-        defaults["visible_lora_3"] = False
-        defaults["default_lora_3"] = "None"
-
-    lora_key_4 = find_key_by_class_type_internal(prompt, "Hua_LoraLoaderModelOnly4")
-    if lora_key_4 and lora_key_4 in prompt and "inputs" in prompt[lora_key_4]:
-        defaults["visible_lora_4"] = True
-        defaults["default_lora_4"] = prompt[lora_key_4]["inputs"].get("lora_name", "None")
-    else:
-        defaults["visible_lora_4"] = False
-        defaults["default_lora_4"] = "None"
-
-    checkpoint_key = find_key_by_class_type_internal(prompt, "Hua_CheckpointLoaderSimple")
-    if checkpoint_key and checkpoint_key in prompt and "inputs" in prompt[checkpoint_key]:
-        defaults["visible_checkpoint"] = True
-        defaults["default_checkpoint"] = prompt[checkpoint_key]["inputs"].get("ckpt_name", "None")
-    else:
-        defaults["visible_checkpoint"] = False
-        defaults["default_checkpoint"] = "None"
-
-    unet_key = find_key_by_class_type_internal(prompt, "Hua_UNETLoader")
-    if unet_key and unet_key in prompt and "inputs" in prompt[unet_key]:
-        defaults["visible_unet"] = True
-        defaults["default_unet"] = prompt[unet_key]["inputs"].get("unet_name", "None")
-    else:
-        defaults["visible_unet"] = False
-        defaults["default_unet"] = "None"
-
-    print(f"检查结果 for {json_file}: Defaults={defaults}")
-    return defaults
-
-
-# --- 队列处理函数 (更新签名以包含种子参数、新 Float/Int 和新 Lora) ---
-def run_queued_tasks(inputimage1, input_video, prompt_text_positive, prompt_text_positive_2, prompt_text_positive_3, prompt_text_positive_4, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_lora_2, hua_lora_3, hua_lora_4, hua_checkpoint, hua_unet, hua_float_value, hua_int_value, hua_float_value_2, hua_int_value_2, hua_float_value_3, hua_int_value_3, hua_float_value_4, hua_int_value_4, seed_mode, fixed_seed, queue_count=1, progress=gr.Progress(track_tqdm=True)): # 添加新参数 hua_lora_2, hua_lora_3, hua_lora_4
-    global accumulated_image_results, last_video_result, executor # 声明我们要修改全局变量
-
-    # 初始化当前批次结果 (仅用于批量图片任务)
     current_batch_image_results = []
 
     # 1. 将新任务加入队列
@@ -1152,26 +788,39 @@ def run_queued_tasks(inputimage1, input_video, prompt_text_positive, prompt_text
          with results_lock:
              last_video_result = None
 
-    # 将所有参数（包括新的种子参数、Float/Int 值和 Lora 值）打包到 task_params
-    task_params = (inputimage1, input_video, prompt_text_positive, prompt_text_positive_2, prompt_text_positive_3, prompt_text_positive_4, prompt_text_negative, json_file, hua_width, hua_height, hua_lora, hua_lora_2, hua_lora_3, hua_lora_4, hua_checkpoint, hua_unet, hua_float_value, hua_int_value, hua_float_value_2, hua_int_value_2, hua_float_value_3, hua_int_value_3, hua_float_value_4, hua_int_value_4, seed_mode, fixed_seed) # 添加新参数到元组
+    # 将所有参数打包到 task_params_tuple for generate_image
+    task_params_tuple = (
+        inputimage1, input_video,
+        dynamic_positive_prompts_values, # Pass the list
+        prompt_text_negative,
+        json_file,
+        hua_width, hua_height,
+        dynamic_loras_values,            # Pass the list
+        hua_checkpoint, hua_unet,
+        dynamic_float_nodes_values,      # Pass the list
+        dynamic_int_nodes_values,        # Pass the list
+        seed_mode, fixed_seed
+    )
     log_message(f"[QUEUE_DEBUG] 接收到新任务请求 (种子模式: {seed_mode})。当前队列长度 (加锁前): {len(task_queue)}")
     with queue_lock:
         for _ in range(max(1, int(queue_count))):
-            task_queue.append(task_params)
+            task_queue.append(task_params_tuple) 
         current_queue_size = len(task_queue)
         log_message(f"[QUEUE_DEBUG] 已添加 {queue_count} 个任务到队列。当前队列长度 (加锁后): {current_queue_size}")
     log_message(f"[QUEUE_DEBUG] 任务添加完成，释放锁。")
 
     # 初始状态更新：显示当前累积结果和队列信息
-    with results_lock:
-        current_images_copy = accumulated_image_results[:]
-        current_video = last_video_result
-    log_message(f"[QUEUE_DEBUG] 准备 yield 初始状态更新。队列: {current_queue_size}, 处理中: {processing_event.is_set()}")
-    yield {
+    # Default to results tab initially
+    initial_updates = {
         queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: {'是' if processing_event.is_set() else '否'}"),
-        output_gallery: gr.update(value=current_images_copy),
-        output_video: gr.update(value=current_video) # 显示当前视频
+        main_output_tabs_component: gr.Tabs(selected="tab_generate_result") # Default to results tab
     }
+    with results_lock:
+        initial_updates[output_gallery] = gr.update(value=accumulated_image_results[:])
+        initial_updates[output_video] = gr.update(value=last_video_result)
+
+    log_message(f"[QUEUE_DEBUG] 准备 yield 初始状态更新。队列: {current_queue_size}, 处理中: {processing_event.is_set()}")
+    yield initial_updates
     log_message(f"[QUEUE_DEBUG] 已 yield 初始状态更新。")
 
     # 2. 检查是否已有进程在处理队列
@@ -1227,6 +876,34 @@ def run_queued_tasks(inputimage1, input_video, prompt_text_positive, prompt_text
 
             if task_to_run:
                 log_message(f"[QUEUE_DEBUG] Starting execution for popped task. Remaining queue: {current_queue_size}")
+                
+                # --- KSampler Check and Tab Switch ---
+                # task_to_run is the tuple: (inputimage1, input_video, dynamic_positive_prompts_values, 
+                #                           prompt_text_negative, json_file, hua_width, hua_height, 
+                #                           dynamic_loras_values, ...)
+                # json_file is at index 4 of task_to_run (0-indexed)
+                current_task_json_file = task_to_run[4] 
+                should_switch_to_preview = False
+                if current_task_json_file and isinstance(current_task_json_file, str): # Ensure it's a string before using
+                    json_path_for_check = os.path.join(OUTPUT_DIR, current_task_json_file)
+                    if os.path.exists(json_path_for_check):
+                        try:
+                            with open(json_path_for_check, "r", encoding="utf-8") as f_check:
+                                workflow_prompt = json.load(f_check)
+                            VALID_KSAMPLER_CLASS_TYPES = ["KSampler", "KSamplerAdvanced", "KSamplerSelect"]
+                            for node_id, node_data in workflow_prompt.items():
+                                class_type = node_data.get("class_type")
+                                if isinstance(node_data, dict) and class_type in VALID_KSAMPLER_CLASS_TYPES:
+                                    should_switch_to_preview = True
+                                    log_message(f"[QUEUE_DEBUG] KSampler-like node (type: {class_type}) found in {current_task_json_file}. Will switch to preview tab.")
+                                    break
+                        except Exception as e_json_check:
+                            log_message(f"[QUEUE_DEBUG] Error checking for KSampler in {current_task_json_file}: {e_json_check}")
+                
+                if should_switch_to_preview:
+                    yield { main_output_tabs_component: gr.Tabs(selected="tab_k_sampler_preview") }
+                # --- End KSampler Check ---
+
                 progress(0, desc=f"处理任务 (队列剩余 {current_queue_size})")
                 log_message(f"[QUEUE_DEBUG] Progress set to 0. Desc: Processing task (Queue remaining {current_queue_size})")
                 
@@ -1358,51 +1035,18 @@ def run_queued_tasks(inputimage1, input_video, prompt_text_positive, prompt_text
         with results_lock:
             final_images = accumulated_image_results[:]
             final_video = last_video_result
-        log_message(f"[QUEUE_DEBUG] Preparing to yield final status update. Queue: {current_queue_size}, Processing: No")
+        log_message(f"[QUEUE_DEBUG] Preparing to yield final status update. Queue: {current_queue_size}, Processing: No. Switching to results tab.")
         yield {
             queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: 否"),
             output_gallery: gr.update(value=final_images),
-            output_video: gr.update(value=final_video)
+            output_video: gr.update(value=final_video),
+            main_output_tabs_component: gr.Tabs(selected="tab_generate_result") # Switch back to results tab
         }
         log_message("[QUEUE_DEBUG] Yielded final status update. Exiting run_queued_tasks.")
 
 # --- 赞助码处理函数 ---
 def show_sponsor_code():
-    # 动态读取 js/icon.js 并提取 Base64 数据
-    js_icon_path = os.path.join(current_dir, 'js', 'icon.js')
-    base64_data = None
-    default_sponsor_info = """
-<div style='text-align: center;'>
-    <h3>感谢您的支持！</h3>
-    <p>无法加载赞助码图像。</p>
-</div>
-"""
-    try:
-        with open(js_icon_path, 'r', encoding='utf-8') as f:
-            js_content = f.read()
-            # 使用正则表达式查找第一个 loadImage("data:image/...") 中的 Base64 数据
-            match = re.search(r'loadImage\("(data:image/[^;]+;base64,[^"]+)"\)', js_content)
-            if match:
-                base64_data = match.group(1)
-            else:
-                print(f"警告: 在 {js_icon_path} 中未找到符合格式的 Base64 数据。")
-
-    except FileNotFoundError:
-        print(f"错误: 未找到赞助码图像文件: {js_icon_path}")
-    except Exception as e:
-        print(f"读取或解析赞助码图像文件时出错 ({js_icon_path}): {e}")
-
-    if base64_data:
-        sponsor_info = f"""
-<div style='text-align: center;'>
-    <h3>感谢您的支持！</h3>
-    <p>请使用以下方式赞助：</p>
-    <img src='{base64_data}' alt='赞助码' width='512' height='512'>
-</div>
-"""
-    else:
-        sponsor_info = default_sponsor_info
-
+    sponsor_info = get_sponsor_html()
     # 返回一个更新指令，让 Markdown 组件可见并显示内容
     return gr.update(value=sponsor_info, visible=True)
 
@@ -1485,42 +1129,16 @@ def clear_history():
 
 
 # --- Gradio 界面 ---
-# 黑客风格CSS - 黑底绿字
-hacker_css = """
-.log-display-container {
-    background-color: black !important;
-    color: #00ff00 !important;
-}
-.log-display-container h4 {
-    color: #00ff00 !important;
-}
-.log-display-container textarea {
-    background-color: black !important;
-    color: #00ff00 !important;
-    /* border-color: #00ff00 !important; */
-}
 
-/* 调整 Gradio Tab 间距 */
-.tabs > .tab-nav { /* Tab 按钮所在的导航栏 */
-    margin-bottom: 0px !important; /* 移除导航栏下方的外边距 */
-    border-bottom: none !important; /* 移除导航栏下方的边框 (如果存在) */
-}
-
-.tabitem { /* Tab 内容区域 */
-    padding-top: 0px !important; /* 大幅减少内容区域的上内边距，留一点点空隙 */
-    margin-top: 0px !important; /* 确保内容区域没有上外边距 */
-}
-"""
-
-# Combine existing CSS with monitor CSS
-combined_css = hacker_css + "\n" + monitor_css
+# Combine imported HACKER_CSS with monitor CSS
+combined_css = HACKER_CSS + "\n" + monitor_css
 
 with gr.Blocks(css=combined_css) as demo:
     with gr.Tab("封装comfyui工作流"):
         with gr.Row():
            with gr.Column():  # 左侧列
                # --- 添加实时日志显示区域 (包含系统监控) ---
-               with gr.Accordion("实时日志 (ComfyUI)", open=True, elem_classes="log-display-container"):
+               with gr.Accordion("实时日志 (ComfyUI)", open=True, elem_classes="log-display-container"): # 保持日志区域打开
                    with gr.Group(elem_id="log_area_relative_wrapper"): # 新增内部 Group 用于定位系统监控
                        log_display = gr.Textbox(
                            label="日志输出",
@@ -1558,11 +1176,18 @@ with gr.Blocks(css=combined_css) as demo:
     
                with gr.Row():
                    with gr.Accordion("正向提示文本(折叠)", open=True) as positive_prompt_col:
-                       prompt_positive = gr.Textbox(label="正向提示文本 1", elem_id="prompt_positive_1")
-                       prompt_positive_2 = gr.Textbox(label="正向提示文本 2", elem_id="prompt_positive_2")
-                       prompt_positive_3 = gr.Textbox(label="正向提示文本 3", elem_id="prompt_positive_3")
-                       prompt_positive_4 = gr.Textbox(label="正向提示文本 4", elem_id="prompt_positive_4")
-               with gr.Column() as negative_prompt_col:
+                       # prompt_positive = gr.Textbox(label="正向提示文本 1", elem_id="prompt_positive_1") # 将被动态组件取代
+                       # prompt_positive_2 = gr.Textbox(label="正向提示文本 2", elem_id="prompt_positive_2")
+                       # prompt_positive_3 = gr.Textbox(label="正向提示文本 3", elem_id="prompt_positive_3")
+                       # prompt_positive_4 = gr.Textbox(label="正向提示文本 4", elem_id="prompt_positive_4")
+                       # --- 动态正向提示词组件 ---
+                       positive_prompt_texts = []
+                       for i in range(MAX_DYNAMIC_COMPONENTS):
+                           positive_prompt_texts.append(
+                               gr.Textbox(label=f"正向提示 {i+1}", visible=False, elem_id=f"dynamic_positive_prompt_{i+1}")
+                           )
+                       # --- 动态正向提示词组件结束 ---
+               with gr.Column() as negative_prompt_col: # 负向提示保持单个
                    prompt_negative = gr.Textbox(label="负向提示文本", elem_id="prompt_negative")
     
                with gr.Row() as resolution_row:
@@ -1582,27 +1207,48 @@ with gr.Blocks(css=combined_css) as demo:
     
                with gr.Row():
                    with gr.Column(scale=1):
-                       hua_lora_dropdown = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 1", value="None", elem_id="hua_lora_dropdown", visible=False) # 初始隐藏
-                       hua_lora_dropdown_2 = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 2", value="None", elem_id="hua_lora_dropdown_2", visible=False) # 新增，初始隐藏
-                       hua_lora_dropdown_3 = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 3", value="None", elem_id="hua_lora_dropdown_3", visible=False) # 新增，初始隐藏
-                       hua_lora_dropdown_4 = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 4", value="None", elem_id="hua_lora_dropdown_4", visible=False) # 新增，初始隐藏
-                   with gr.Column(scale=1):
+                       # hua_lora_dropdown = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 1", value="None", elem_id="hua_lora_dropdown", visible=False) # 初始隐藏
+                       # hua_lora_dropdown_2 = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 2", value="None", elem_id="hua_lora_dropdown_2", visible=False) # 新增，初始隐藏
+                       # hua_lora_dropdown_3 = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 3", value="None", elem_id="hua_lora_dropdown_3", visible=False) # 新增，初始隐藏
+                       # hua_lora_dropdown_4 = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 4", value="None", elem_id="hua_lora_dropdown_4", visible=False) # 新增，初始隐藏
+                       # --- 动态 Lora 下拉框 ---
+                       lora_dropdowns = []
+                       for i in range(MAX_DYNAMIC_COMPONENTS):
+                           lora_dropdowns.append(
+                               gr.Dropdown(choices=lora_list, label=f"Lora {i+1}", value="None", visible=False, elem_id=f"dynamic_lora_dropdown_{i+1}")
+                           )
+                       # --- 动态 Lora 下拉框结束 ---
+                   with gr.Column(scale=1): # Checkpoint 和 Unet 保持单例
                        hua_checkpoint_dropdown = gr.Dropdown(choices=checkpoint_list, label="选择 Checkpoint 模型", value="None", elem_id="hua_checkpoint_dropdown", visible=False) # 初始隐藏
                    with gr.Column(scale=1):
                        hua_unet_dropdown = gr.Dropdown(choices=unet_list, label="选择 UNet 模型", value="None", elem_id="hua_unet_dropdown", visible=False) # 初始隐藏
 
                # --- 添加 Float 和 Int 输入组件 (初始隐藏) ---
-               with gr.Row() as float_int_row:
+               with gr.Row() as float_int_row: # 保持此行用于整体可见性控制（如果需要）
                     with gr.Column(scale=1):
-                        hua_float_input = gr.Number(label="浮点数输入 (Float)", visible=False, elem_id="hua_float_input")
-                        hua_float_input_2 = gr.Number(label="浮点数输入 2 (Float)", visible=False, elem_id="hua_float_input_2")
-                        hua_float_input_3 = gr.Number(label="浮点数输入 3 (Float)", visible=False, elem_id="hua_float_input_3")
-                        hua_float_input_4 = gr.Number(label="浮点数输入 4 (Float)", visible=False, elem_id="hua_float_input_4")
+                        # hua_float_input = gr.Number(label="浮点数输入 (Float)", visible=False, elem_id="hua_float_input")
+                        # hua_float_input_2 = gr.Number(label="浮点数输入 2 (Float)", visible=False, elem_id="hua_float_input_2")
+                        # hua_float_input_3 = gr.Number(label="浮点数输入 3 (Float)", visible=False, elem_id="hua_float_input_3")
+                        # hua_float_input_4 = gr.Number(label="浮点数输入 4 (Float)", visible=False, elem_id="hua_float_input_4")
+                        # --- 动态 Float 输入 ---
+                        float_inputs = []
+                        for i in range(MAX_DYNAMIC_COMPONENTS):
+                            float_inputs.append(
+                                gr.Number(label=f"浮点数 {i+1}", visible=False, elem_id=f"dynamic_float_input_{i+1}")
+                            )
+                        # --- 动态 Float 输入结束 ---
                     with gr.Column(scale=1):
-                        hua_int_input = gr.Number(label="整数输入 (Int)", precision=0, visible=False, elem_id="hua_int_input") # precision=0 for integer
-                        hua_int_input_2 = gr.Number(label="整数输入 2 (Int)", precision=0, visible=False, elem_id="hua_int_input_2")
-                        hua_int_input_3 = gr.Number(label="整数输入 3 (Int)", precision=0, visible=False, elem_id="hua_int_input_3")
-                        hua_int_input_4 = gr.Number(label="整数输入 4 (Int)", precision=0, visible=False, elem_id="hua_int_input_4")
+                        # hua_int_input = gr.Number(label="整数输入 (Int)", precision=0, visible=False, elem_id="hua_int_input") # precision=0 for integer
+                        # hua_int_input_2 = gr.Number(label="整数输入 2 (Int)", precision=0, visible=False, elem_id="hua_int_input_2")
+                        # hua_int_input_3 = gr.Number(label="整数输入 3 (Int)", precision=0, visible=False, elem_id="hua_int_input_3")
+                        # hua_int_input_4 = gr.Number(label="整数输入 4 (Int)", precision=0, visible=False, elem_id="hua_int_input_4")
+                        # --- 动态 Int 输入 ---
+                        int_inputs = []
+                        for i in range(MAX_DYNAMIC_COMPONENTS):
+                            int_inputs.append(
+                                gr.Number(label=f"整数 {i+1}", precision=0, visible=False, elem_id=f"dynamic_int_input_{i+1}")
+                            )
+                        # --- 动态 Int 输入结束 ---
     
     
     
@@ -1611,15 +1257,21 @@ with gr.Blocks(css=combined_css) as demo:
     
     
            with gr.Column(): # 右侧列
-    
-               with gr.Accordion("预览所有输出图片 (点击加载)", open=False):
-                   output_preview_gallery = gr.Gallery(label="输出图片预览", columns=4, height="auto", preview=True, object_fit="contain")
-                   load_output_button = gr.Button("加载输出图片")
-    
-               with gr.Row():
-                   # 图片和视频输出区域，初始都隐藏，根据工作流显示
-                   output_gallery = gr.Gallery(label="生成图片结果", columns=3, height=600, preview=True, object_fit="contain", visible=False)
-                   output_video = gr.Video(label="生成视频结果", height=600, autoplay=True, loop=True, visible=False) # 添加视频组件
+               with gr.Tabs(elem_id="main_output_tabs") as main_output_tabs_component: # WRAPPER TABS
+                   with gr.Tab("生成结果", id="tab_generate_result"):
+                       output_gallery = gr.Gallery(label="生成图片结果", columns=3, height=600, preview=True, object_fit="contain", visible=False) # 保持原样
+                       output_video = gr.Video(label="生成视频结果", height=600, autoplay=True, loop=True, visible=False) # 保持原样
+                   with gr.Tab("k采样预览", id="tab_k_sampler_preview"):
+                       with gr.Tab("实时预览"): # This is a nested Tab, not an issue for the parent switching
+                           live_preview_image = gr.Image(label="实时预览", type="pil", interactive=False, height=512, show_label=False)
+                       with gr.Tab("状态"): # This is a nested Tab
+                           live_preview_status = gr.Textbox(label="预览状态", interactive=False, lines=2)
+                   with gr.Tab("预览所有输出图片", id="tab_all_outputs_preview"):
+                       output_preview_gallery = gr.Gallery(label="输出图片预览", columns=4, height="auto", preview=True, object_fit="contain")
+                       load_output_button = gr.Button("加载输出图片")
+
+
+
     
                # --- 添加队列控制按钮 ---
                with gr.Row():
@@ -1677,6 +1329,7 @@ with gr.Blocks(css=combined_css) as demo:
 
     with gr.Tab("设置"):
         with gr.Column(): # 使用 Column 布局
+
             gr.Markdown("## 🎛️ ComfyUI 节点徽章控制")
             gr.Markdown("控制 ComfyUI 界面中节点 ID 徽章的显示方式。设置完成请刷新comfyui界面即可。")
             node_badge_mode_radio = gr.Radio(
@@ -1708,6 +1361,62 @@ with gr.Blocks(css=combined_css) as demo:
             # 将事件处理移到 UI 定义之后
             reboot_button.click(fn=reboot_manager, inputs=[], outputs=[reboot_output])
             # interrupt_button.click (原位置) 已被移除
+
+
+
+            gr.Markdown("## ⚙️ 插件核心设置") 
+            gr.Markdown("---")
+
+            gr.Markdown("### 🎨 动态组件数量")
+            gr.Markdown(
+                "设置在UI中为正向提示、Lora、浮点数和整数输入动态生成的组件的最大数量。\n"
+                "**注意：此更改将在下次启动插件 (或重启 ComfyUI) 后生效，以改变实际显示的组件数量。**"
+            )
+            
+            # UI组件的初始值也从配置文件读取，确保显示的是当前生效的或即将生效的配置
+            initial_max_comp_for_ui = load_plugin_settings().get("max_dynamic_components", DEFAULT_MAX_DYNAMIC_COMPONENTS)
+            
+            max_dynamic_components_input = gr.Number(
+                label="最大动态组件数量 (1-20)", 
+                value=initial_max_comp_for_ui, 
+                minimum=1, 
+                maximum=20, # 设定一个合理的上限
+                step=1, 
+                precision=0,
+                elem_id="max_dynamic_components_setting_input"
+            )
+            save_max_components_button = gr.Button("保存动态组件数量设置")
+            max_components_save_status = gr.Markdown("", elem_id="max_components_save_status_md") # 用于显示保存状态和提示
+
+            def handle_save_max_components(new_max_value_from_input):
+                try:
+                    # Gradio Number input might pass a float if not careful, ensure int
+                    new_max_value = int(float(new_max_value_from_input)) 
+                    if not (1 <= new_max_value <= 20): # 后端再次验证范围
+                        return gr.update(value="<p style='color:red;'>错误：值必须介于 1 和 20 之间。</p>")
+                except ValueError:
+                    return gr.update(value="<p style='color:red;'>错误：请输入一个有效的整数。</p>")
+
+                # 重新加载当前设置，以防其他设置项被意外覆盖（如果未来有其他设置项）
+                current_settings = load_plugin_settings() 
+                current_settings["max_dynamic_components"] = new_max_value
+                status_message = save_plugin_settings(current_settings)
+                
+                # 更新全局MAX_DYNAMIC_COMPONENTS，主要用于确保get_workflow_defaults_and_visibility在同一次会话中如果被调用能拿到新值
+                # 但这不会改变已经实例化的Gradio组件数量
+                # global MAX_DYNAMIC_COMPONENTS
+                # MAX_DYNAMIC_COMPONENTS = new_max_value 
+                # print(f"UI中更新了max_dynamic_components的配置，新值为: {new_max_value}。重启后生效于UI组件数量。")
+
+                return gr.update(value=f"<p style='color:green;'>{status_message} 请重启插件或 ComfyUI 以使更改生效。</p>")
+
+            save_max_components_button.click(
+                fn=handle_save_max_components,
+                inputs=[max_dynamic_components_input],
+                outputs=[max_components_save_status]
+            )
+            
+            gr.Markdown("---") # 分隔线
 
     with gr.Tab("信息"):
         with gr.Column():
@@ -1743,8 +1452,42 @@ with gr.Blocks(css=combined_css) as demo:
             gr.Markdown("---")
             gr.Markdown("点击上方按钮获取相关信息或跳转链接。")
 
+    with gr.Tab("API JSON 管理"):
+        define_api_json_management_ui()
+
 
     # --- 事件处理 ---
+
+    def refresh_workflow_and_ui(current_selected_json_file):
+        log_message(f"[REFRESH_WORKFLOW_UI] Triggered. Current selection: {current_selected_json_file}")
+        
+        new_json_choices = get_json_files()
+        log_message(f"[REFRESH_WORKFLOW_UI] New JSON choices: {new_json_choices}")
+
+        json_to_load_for_ui_update = None
+        
+        if current_selected_json_file and current_selected_json_file in new_json_choices:
+            json_to_load_for_ui_update = current_selected_json_file
+            log_message(f"[REFRESH_WORKFLOW_UI] Current selection '{current_selected_json_file}' is still valid.")
+        elif new_json_choices:
+            json_to_load_for_ui_update = new_json_choices[0]
+            log_message(f"[REFRESH_WORKFLOW_UI] Current selection '{current_selected_json_file}' is invalid or not present. Defaulting to first new choice: '{json_to_load_for_ui_update}'.")
+        else:
+            # No JSON files available at all
+            log_message(f"[REFRESH_WORKFLOW_UI] No JSON files available after refresh.")
+            # update_ui_on_json_change(None) will handle hiding/resetting components.
+
+        # Get the UI updates based on the json_to_load_for_ui_update
+        # update_ui_on_json_change returns a tuple of gr.update objects
+        ui_updates_tuple = update_ui_on_json_change(json_to_load_for_ui_update)
+        
+        # The first part of the return will be the update for the json_dropdown itself
+        dropdown_update = gr.update(choices=new_json_choices, value=json_to_load_for_ui_update)
+        
+        # Combine the dropdown update with the rest of the UI updates
+        final_updates = (dropdown_update,) + ui_updates_tuple
+        log_message(f"[REFRESH_WORKFLOW_UI] Returning {len(final_updates)} updates. Dropdown will be set to '{json_to_load_for_ui_update}'.")
+        return final_updates
 
     # --- 节点徽章设置事件 (已在 Tab 内定义) ---
     # node_badge_mode_radio.change(fn=update_node_badge_mode, inputs=node_badge_mode_radio, outputs=node_badge_output_text)
@@ -1757,84 +1500,131 @@ with gr.Blocks(css=combined_css) as demo:
 
     # JSON 下拉菜单改变时，更新所有相关组件的可见性、默认值 + 输出区域可见性
     def update_ui_on_json_change(json_file):
-        defaults = get_workflow_defaults_and_visibility(json_file)
-        # 计算分辨率预设和比例显示
-        closest_preset = find_closest_preset(defaults["default_width"], defaults["default_height"])
+        defaults = get_workflow_defaults_and_visibility(json_file, OUTPUT_DIR, resolution_prefixes, resolution_presets, MAX_DYNAMIC_COMPONENTS)
+        
+        updates = []
+
+        # 单例组件
+        updates.append(gr.update(visible=defaults["visible_image_input"]))
+        updates.append(gr.update(visible=defaults["visible_video_input"]))
+        updates.append(gr.update(visible=defaults["visible_neg_prompt"], value=defaults["default_neg_prompt"]))
+        
+        updates.append(gr.update(visible=defaults["visible_resolution"])) # resolution_row
+        closest_preset = find_closest_preset(defaults["default_width"], defaults["default_height"], resolution_presets, resolution_prefixes)
         ratio_str = calculate_aspect_ratio(defaults["default_width"], defaults["default_height"])
         ratio_display_text = f"当前比例: {ratio_str}"
+        updates.append(gr.update(value=closest_preset)) # resolution_dropdown
+        updates.append(gr.update(value=defaults["default_width"])) # hua_width
+        updates.append(gr.update(value=defaults["default_height"])) # hua_height
+        updates.append(gr.update(value=ratio_display_text)) # ratio_display
 
-        return (
-            gr.update(visible=defaults["visible_image_input"]),
-            gr.update(visible=defaults["visible_video_input"]),
-            # 更新提示词可见性和值
-            gr.update(visible=defaults["visible_pos_prompt_1"], value=defaults["default_pos_prompt_1"]),
-            gr.update(visible=defaults["visible_pos_prompt_2"], value=defaults["default_pos_prompt_2"]),
-            gr.update(visible=defaults["visible_pos_prompt_3"], value=defaults["default_pos_prompt_3"]),
-            gr.update(visible=defaults["visible_pos_prompt_4"], value=defaults["default_pos_prompt_4"]),
-            gr.update(visible=defaults["visible_neg_prompt"], value=defaults["default_neg_prompt"]),
-            # 更新分辨率区域可见性
-            gr.update(visible=defaults["visible_resolution"]),
-            # 更新分辨率组件的值
-            gr.update(value=closest_preset), # resolution_dropdown
-            gr.update(value=defaults["default_width"]), # hua_width
-            gr.update(value=defaults["default_height"]), # hua_height
-            gr.update(value=ratio_display_text), # ratio_display
-            # 更新模型可见性和值
-            gr.update(visible=defaults["visible_lora"], value=defaults["default_lora"]),
-            gr.update(visible=defaults["visible_lora_2"], value=defaults["default_lora_2"]), # 新增 Lora 2
-            gr.update(visible=defaults["visible_lora_3"], value=defaults["default_lora_3"]), # 新增 Lora 3
-            gr.update(visible=defaults["visible_lora_4"], value=defaults["default_lora_4"]), # 新增 Lora 4
-            gr.update(visible=defaults["visible_checkpoint"], value=defaults["default_checkpoint"]),
-            gr.update(visible=defaults["visible_unet"], value=defaults["default_unet"]),
-            # 更新种子区域可见性
-            gr.update(visible=defaults["visible_seed_indicator"]),
-            # 更新输出区域可见性
-            gr.update(visible=defaults["visible_image_output"]),
-            gr.update(visible=defaults["visible_video_output"]),
-            # 更新 Float/Int 可见性、标签和值 (包括 2/3/4)
-            gr.update(visible=defaults["visible_float_input"], label=defaults["default_float_label"], value=defaults["default_float_value"]),
-            gr.update(visible=defaults["visible_int_input"], label=defaults["default_int_label"], value=defaults["default_int_value"]),
-            gr.update(visible=defaults["visible_float_input_2"], label=defaults["default_float_label_2"], value=defaults["default_float_value_2"]),
-            gr.update(visible=defaults["visible_int_input_2"], label=defaults["default_int_label_2"], value=defaults["default_int_value_2"]),
-            gr.update(visible=defaults["visible_float_input_3"], label=defaults["default_float_label_3"], value=defaults["default_float_value_3"]),
-            gr.update(visible=defaults["visible_int_input_3"], label=defaults["default_int_label_3"], value=defaults["default_int_value_3"]),
-            gr.update(visible=defaults["visible_float_input_4"], label=defaults["default_float_label_4"], value=defaults["default_float_value_4"]),
-            gr.update(visible=defaults["visible_int_input_4"], label=defaults["default_int_label_4"], value=defaults["default_int_value_4"])
-        )
+        updates.append(gr.update(visible=defaults["visible_checkpoint"], value=defaults["default_checkpoint"]))
+        updates.append(gr.update(visible=defaults["visible_unet"], value=defaults["default_unet"]))
+        updates.append(gr.update(visible=defaults["visible_seed_indicator"])) # seed_options_col
+        updates.append(gr.update(visible=defaults["visible_image_output"])) # output_gallery
+        updates.append(gr.update(visible=defaults["visible_video_output"])) # output_video
+
+        # 动态组件: GradioTextOk (positive_prompt_texts)
+        dynamic_prompts_data = defaults["dynamic_components"]["GradioTextOk"]
+        for i in range(MAX_DYNAMIC_COMPONENTS):
+            if i < len(dynamic_prompts_data):
+                node_data = dynamic_prompts_data[i]
+                label = node_data.get("title", f"正向提示 {i+1}")
+                if label == node_data.get("id"): # if title was just node id
+                    label = f"正向提示 {i+1} (ID: {node_data.get('id')})"
+                updates.append(gr.update(visible=True, label=label, value=node_data.get("value", "")))
+            else:
+                updates.append(gr.update(visible=False, label=f"正向提示 {i+1}", value=""))
+        
+        # 动态组件: Hua_LoraLoaderModelOnly (lora_dropdowns)
+        dynamic_loras_data = defaults["dynamic_components"]["Hua_LoraLoaderModelOnly"]
+        for i in range(MAX_DYNAMIC_COMPONENTS):
+            if i < len(dynamic_loras_data):
+                node_data = dynamic_loras_data[i]
+                label = node_data.get("title", f"Lora {i+1}")
+                if label == node_data.get("id"):
+                    label = f"Lora {i+1} (ID: {node_data.get('id')})"
+                updates.append(gr.update(visible=True, label=label, value=node_data.get("value", "None")))
+            else:
+                updates.append(gr.update(visible=False, label=f"Lora {i+1}", value="None"))
+
+        # 动态组件: HuaIntNode (int_inputs)
+        dynamic_ints_data = defaults["dynamic_components"]["HuaIntNode"]
+        for i in range(MAX_DYNAMIC_COMPONENTS):
+            if i < len(dynamic_ints_data):
+                node_data = dynamic_ints_data[i]
+                node_id = node_data.get("id")
+                node_title = node_data.get("title")
+                # 获取来自 inputs["name"] 的值，假设它被 get_workflow_defaults_and_visibility 传递为 name_from_node
+                input_name_prefix = node_data.get("name_from_node")
+
+                label_parts = []
+                if input_name_prefix: # 如果 JSON 中定义了 name
+                    label_parts.append(input_name_prefix)
+
+                # 添加节点本身的标题或通用名称
+                # 如果有 input_name_prefix，node_title 更多是作为补充说明
+                if node_title and node_title != node_id:
+                    label_parts.append(node_title)
+                elif not input_name_prefix: # 只有在没有 name 前缀时，才考虑添加通用描述符 "整数"
+                    label_parts.append(f"整数")
+
+                # 确保标签不为空，并添加 ID
+                if not label_parts: # 极端情况下的回退
+                    label_parts.append(f"整数 {i+1}")
+                
+                label = " - ".join(label_parts) + f" (ID: {node_id})"
+                
+                updates.append(gr.update(visible=True, label=label, value=node_data.get("value", 0)))
+            else:
+                updates.append(gr.update(visible=False, label=f"整数 {i+1}", value=0))
+
+        # 动态组件: HuaFloatNode (float_inputs)
+        dynamic_floats_data = defaults["dynamic_components"]["HuaFloatNode"]
+        for i in range(MAX_DYNAMIC_COMPONENTS):
+            if i < len(dynamic_floats_data):
+                node_data = dynamic_floats_data[i]
+                node_id = node_data.get("id")
+                node_title = node_data.get("title")
+                # 获取来自 inputs["name"] 的值，假设它被 get_workflow_defaults_and_visibility 传递为 name_from_node
+                input_name_prefix = node_data.get("name_from_node")
+
+                label_parts = []
+                if input_name_prefix: # 如果 JSON 中定义了 name
+                    label_parts.append(input_name_prefix)
+
+                # 添加节点本身的标题或通用名称
+                # 如果有 input_name_prefix，node_title 更多是作为补充说明
+                if node_title and node_title != node_id:
+                    label_parts.append(node_title)
+                elif not input_name_prefix: # 只有在没有 name 前缀时，才考虑添加通用描述符 "浮点数"
+                    label_parts.append(f"浮点数")
+
+                # 确保标签不为空，并添加 ID
+                if not label_parts: # 极端情况下的回退
+                    label_parts.append(f"浮点数 {i+1}")
+                
+                label = " - ".join(label_parts) + f" (ID: {node_id})"
+                
+                updates.append(gr.update(visible=True, label=label, value=node_data.get("value", 0.0)))
+            else:
+                updates.append(gr.update(visible=False, label=f"浮点数 {i+1}", value=0.0))
+        
+        return tuple(updates)
 
     json_dropdown.change(
         fn=update_ui_on_json_change,
         inputs=json_dropdown,
-        outputs=[ # 扩展 outputs 列表以包含所有需要更新的组件 (共 29 个)
-            image_accordion,         # 1. 图片输入 Accordion
-            video_accordion,         # 2. 视频输入 Accordion
-            prompt_positive,         # 3. 正向提示 1 Textbox
-            prompt_positive_2,       # 4. 正向提示 2 Textbox
-            prompt_positive_3,       # 5. 正向提示 3 Textbox
-            prompt_positive_4,       # 6. 正向提示 4 Textbox
-            prompt_negative,         # 7. 负向提示 Textbox (注意：之前是 negative_prompt_col，现在直接指向 Textbox)
-            resolution_row,          # 8. 分辨率 Row (控制整体可见性)
-            resolution_dropdown,     # 9. 分辨率预设 Dropdown (更新值)
-            hua_width,               # 10. 宽度 Number (更新值)
-            hua_height,              # 11. 高度 Number (更新值)
-            ratio_display,           # 12. 比例显示 Markdown (更新值)
-            hua_lora_dropdown,       # 13. Lora Dropdown 1
-            hua_lora_dropdown_2,     # 新增 Lora Dropdown 2
-            hua_lora_dropdown_3,     # 新增 Lora Dropdown 3
-            hua_lora_dropdown_4,     # 新增 Lora Dropdown 4
-            hua_checkpoint_dropdown, # 17. Checkpoint Dropdown
-            hua_unet_dropdown,       # 18. UNet Dropdown
-            seed_options_col,        # 19. 种子选项 Column
-            output_gallery,          # 20. 图片输出 Gallery
-            output_video,            # 21. 视频输出 Video
-            hua_float_input,         # 22. Float 输入 Number
-            hua_int_input,           # 23. Int 输入 Number
-            hua_float_input_2,       # 24. Float 输入 2 Number
-            hua_int_input_2,         # 25. Int 输入 2 Number
-            hua_float_input_3,       # 26. Float 输入 3 Number
-            hua_int_input_3,         # 27. Int 输入 3 Number
-            hua_float_input_4,       # 28. Float 输入 4 Number
-            hua_int_input_4          # 29. Int 输入 4 Number
+        outputs=[ 
+            image_accordion, video_accordion, prompt_negative,
+            resolution_row, resolution_dropdown, hua_width, hua_height, ratio_display,
+            hua_checkpoint_dropdown, hua_unet_dropdown, seed_options_col,
+            output_gallery, output_video,
+            # Spread out the dynamic component lists into the outputs
+            *positive_prompt_texts,
+            *lora_dropdowns,
+            *int_inputs,
+            *float_inputs
         ]
     )
 
@@ -1849,100 +1639,113 @@ with gr.Blocks(css=combined_css) as demo:
     )
     # --- 新增结束 ---
 
-    refresh_button.click(refresh_json_files, inputs=[], outputs=json_dropdown)
+    refresh_button.click(
+        fn=refresh_workflow_and_ui,
+        inputs=[json_dropdown], # Pass the current value of json_dropdown
+        outputs=[
+            json_dropdown, # First output is for the dropdown itself
+            # Then all the outputs that update_ui_on_json_change targets
+            image_accordion, video_accordion, prompt_negative,
+            resolution_row, resolution_dropdown, hua_width, hua_height, ratio_display,
+            hua_checkpoint_dropdown, hua_unet_dropdown, seed_options_col,
+            output_gallery, output_video,
+            *positive_prompt_texts,
+            *lora_dropdowns,
+            *int_inputs,
+            *float_inputs
+        ]
+    )
 
-    load_output_button.click(fn=get_output_images, inputs=[], outputs=output_preview_gallery)
+    # get_output_images is imported, needs OUTPUT_DIR
+    load_output_button.click(fn=lambda: get_output_images(OUTPUT_DIR), inputs=[], outputs=output_preview_gallery)
 
     # --- 修改运行按钮的点击事件 ---
     run_button.click(
         fn=run_queued_tasks,
         inputs=[
-            input_image, input_video, prompt_positive, prompt_positive_2, prompt_positive_3, prompt_positive_4,
-            prompt_negative, json_dropdown, hua_width, hua_height, hua_lora_dropdown,
-            hua_lora_dropdown_2, hua_lora_dropdown_3, hua_lora_dropdown_4, # 添加新的 Lora 输入
-            hua_checkpoint_dropdown, hua_unet_dropdown, hua_float_input, hua_int_input,
-            hua_float_input_2, hua_int_input_2, hua_float_input_3, hua_int_input_3, # 添加新的 Float/Int 输入
-            hua_float_input_4, hua_int_input_4, # 添加新的 Float/Int 输入
-            seed_mode_dropdown, fixed_seed_input, # 添加新的种子输入
+            input_image, input_video, 
+            # Pass the lists of dynamic components directly
+            *positive_prompt_texts, 
+            prompt_negative, # Single negative prompt
+            json_dropdown, hua_width, hua_height, 
+            *lora_dropdowns,
+            hua_checkpoint_dropdown, hua_unet_dropdown, 
+            *float_inputs, 
+            *int_inputs,
+            seed_mode_dropdown, fixed_seed_input,
             queue_count
         ],
-        outputs=[queue_status_display, output_gallery, output_video] # 增加 output_video
+        outputs=[queue_status_display, output_gallery, output_video, main_output_tabs_component]
     )
     
     # interrupt_button_main_tab.click 事件处理器已被移除
 
     # --- 添加新按钮的点击事件 ---
     clear_queue_button.click(fn=clear_queue, inputs=[], outputs=[queue_status_display])
-    clear_history_button.click(fn=clear_history, inputs=[], outputs=[output_gallery, output_video, queue_status_display]) # 增加 output_video
-    sponsor_button.click(fn=show_sponsor_code, inputs=[], outputs=[sponsor_display]) # 绑定赞助按钮事件
+    clear_history_button.click(fn=clear_history, inputs=[], outputs=[output_gallery, output_video, queue_status_display])
+    sponsor_button.click(fn=show_sponsor_code, inputs=[], outputs=[sponsor_display])
 
     refresh_model_button.click(
-        lambda: (
-            gr.update(choices=get_model_list("loras")), # Lora 1
-            gr.update(choices=get_model_list("loras")), # Lora 2
-            gr.update(choices=get_model_list("loras")), # Lora 3
-            gr.update(choices=get_model_list("loras")), # Lora 4
-            gr.update(choices=get_model_list("checkpoints")),
-            gr.update(choices=get_model_list("unet"))
+        lambda: tuple(
+            [gr.update(choices=get_model_list("loras")) for _ in range(MAX_DYNAMIC_COMPONENTS)] +
+            [gr.update(choices=get_model_list("checkpoints")), gr.update(choices=get_model_list("unet"))]
         ),
         inputs=[],
-        outputs=[hua_lora_dropdown, hua_lora_dropdown_2, hua_lora_dropdown_3, hua_lora_dropdown_4, hua_checkpoint_dropdown, hua_unet_dropdown] # 更新 outputs
+        outputs=[*lora_dropdowns, hua_checkpoint_dropdown, hua_unet_dropdown]
     )
 
     # --- 初始加载 ---
     def on_load_setup():
         json_files = get_json_files()
+        # The number of outputs from update_ui_on_json_change is now:
+        # 13 (single instance UI elements) + 4 * MAX_DYNAMIC_COMPONENTS (dynamic elements)
+        # = 13 + 4 * 5 = 13 + 20 = 33
+        
         if not json_files:
             print("未找到 JSON 文件，隐藏所有动态组件并设置默认值")
-            # 返回 20 个更新，模型设置为 None，输出区域隐藏，提示词为空，分辨率为默认
-            return (
-                gr.update(visible=False), # 1. image_accordion
-                gr.update(visible=False), # 2. video_accordion
-                gr.update(visible=False, value=""), # 3. prompt_positive
-                gr.update(visible=False, value=""), # 4. prompt_positive_2
-                gr.update(visible=False, value=""), # 5. prompt_positive_3
-                gr.update(visible=False, value=""), # 6. prompt_positive_4
-                gr.update(visible=False, value=""), # 7. prompt_negative
-                gr.update(visible=False), # 8. resolution_row
-                gr.update(value="custom"), # 9. resolution_dropdown
-                gr.update(value=512), # 10. hua_width
-                gr.update(value=512), # 11. hua_height
-                gr.update(value="当前比例: 1:1"), # 12. ratio_display
-                gr.update(visible=False, value="None"), # 13. hua_lora_dropdown
-                gr.update(visible=False, value="None"), # 新增 Lora 2
-                gr.update(visible=False, value="None"), # 新增 Lora 3
-                gr.update(visible=False, value="None"), # 新增 Lora 4
-                gr.update(visible=False, value="None"), # 17. hua_checkpoint_dropdown
-                gr.update(visible=False, value="None"), # 18. hua_unet_dropdown
-                gr.update(visible=False), # 19. seed_options_col
-                gr.update(visible=False), # 20. output_gallery
-                gr.update(visible=False), # 21. output_video
-                gr.update(visible=False, label="浮点数输入 (Float)", value=0.0), # 22. hua_float_input
-                gr.update(visible=False, label="整数输入 (Int)", value=0),  # 23. hua_int_input
-                gr.update(visible=False, label="浮点数输入 2 (Float)", value=0.0), # 24. hua_float_input_2
-                gr.update(visible=False, label="整数输入 2 (Int)", value=0),  # 25. hua_int_input_2
-                gr.update(visible=False, label="浮点数输入 3 (Float)", value=0.0), # 26. hua_float_input_3
-                gr.update(visible=False, label="整数输入 3 (Int)", value=0),  # 27. hua_int_input_3
-                gr.update(visible=False, label="浮点数输入 4 (Float)", value=0.0), # 28. hua_float_input_4
-                gr.update(visible=False, label="整数输入 4 (Int)", value=0)   # 29. hua_int_input_4
-            )
+            
+            initial_updates = [
+                gr.update(visible=False), # image_accordion
+                gr.update(visible=False), # video_accordion
+                gr.update(visible=False, value=""), # prompt_negative
+                gr.update(visible=False), # resolution_row
+                gr.update(value="custom"), # resolution_dropdown
+                gr.update(value=512),      # hua_width
+                gr.update(value=512),      # hua_height
+                gr.update(value="当前比例: 1:1"), # ratio_display
+                gr.update(visible=False, value="None"), # hua_checkpoint_dropdown
+                gr.update(visible=False, value="None"), # hua_unet_dropdown
+                gr.update(visible=False), # seed_options_col
+                gr.update(visible=False), # output_gallery
+                gr.update(visible=False)  # output_video
+            ]
+            # Add updates for dynamic components (all hidden)
+            for _ in range(MAX_DYNAMIC_COMPONENTS): # positive_prompt_texts
+                initial_updates.append(gr.update(visible=False, label="正向提示", value=""))
+            for _ in range(MAX_DYNAMIC_COMPONENTS): # lora_dropdowns
+                initial_updates.append(gr.update(visible=False, label="Lora", value="None"))
+            for _ in range(MAX_DYNAMIC_COMPONENTS): # int_inputs
+                initial_updates.append(gr.update(visible=False, label="整数", value=0))
+            for _ in range(MAX_DYNAMIC_COMPONENTS): # float_inputs
+                initial_updates.append(gr.update(visible=False, label="浮点数", value=0.0))
+            return tuple(initial_updates)
         else:
             default_json = json_files[0]
             print(f"初始加载，检查默认 JSON: {default_json}")
-            # 使用更新后的 update_ui_on_json_change 函数
-            return update_ui_on_json_change(default_json)
+            return update_ui_on_json_change(default_json) # This now returns a tuple of gr.update calls
 
     demo.load(
         fn=on_load_setup,
         inputs=[],
-        outputs=[ # 必须严格对应 update_ui_on_json_change 返回的 29 个组件
-            image_accordion, video_accordion, prompt_positive, prompt_positive_2, prompt_positive_3, prompt_positive_4,
-            prompt_negative, resolution_row, resolution_dropdown, hua_width, hua_height, ratio_display,
-            hua_lora_dropdown, hua_lora_dropdown_2, hua_lora_dropdown_3, hua_lora_dropdown_4, # 添加新的 Lora Dropdowns
+        outputs=[ # This list must exactly match the components updated by on_load_setup / update_ui_on_json_change
+            image_accordion, video_accordion, prompt_negative,
+            resolution_row, resolution_dropdown, hua_width, hua_height, ratio_display,
             hua_checkpoint_dropdown, hua_unet_dropdown, seed_options_col,
-            output_gallery, output_video, hua_float_input, hua_int_input,
-            hua_float_input_2, hua_int_input_2, hua_float_input_3, hua_int_input_3,
-            hua_float_input_4, hua_int_input_4
+            output_gallery, output_video,
+            *positive_prompt_texts,
+            *lora_dropdowns,
+            *int_inputs,
+            *float_inputs
         ]
     )
 
@@ -1957,9 +1760,26 @@ with gr.Blocks(css=combined_css) as demo:
     # (它是在 with gr.Blocks(...) 上下文中定义的，所以 demo 对象知道它)
     demo.load(fn=update_floating_monitors_stream, inputs=None, outputs=[floating_monitor_html_output], show_progress="hidden")
 
+    # --- ComfyUI 实时预览加载 ---
+    demo.load(
+        fn=comfyui_previewer.get_update_generator(),
+        inputs=[],
+        outputs=[live_preview_image, live_preview_status],
+        show_progress="hidden" # 通常预览不需要进度条
+    )
+    # 启动预览器的工作线程
+    # demo.load(fn=comfyui_previewer.start_worker, inputs=[], outputs=[], show_progress="hidden")
+    # 直接在 Gradio 线程启动后调用 start_worker 更可靠
+    # 或者在 on_load_setup 中调用
+
 
     # --- Gradio 启动代码 ---
 def luanch_gradio(demo_instance): # 接收 demo 实例
+    # 在 Gradio 启动前启动预览器工作线程
+    print("准备启动 ComfyUIPreviewer 工作线程...")
+    comfyui_previewer.start_worker()
+    print("ComfyUIPreviewer 工作线程已请求启动。")
+
     try:
         # 尝试查找可用端口，从 7861 开始
         port = 7861
@@ -1993,6 +1813,16 @@ def luanch_gradio(demo_instance): # 接收 demo 实例
 gradio_thread = threading.Thread(target=luanch_gradio, args=(demo,), daemon=True)
 gradio_thread.start()
 
+# 注册 atexit 清理函数，以在程序退出时停止 previewer worker
+def cleanup_previewer_on_exit():
+    print("Gradio 应用正在关闭，尝试停止 ComfyUIPreviewer 工作线程...")
+    if comfyui_previewer:
+        comfyui_previewer.stop_worker()
+    print("ComfyUIPreviewer 工作线程已请求停止。")
+
+atexit.register(cleanup_previewer_on_exit)
+
+
 # 主线程可以继续执行其他任务或等待，这里简单地保持运行
 # 注意：如果这是插件的一部分，主线程可能是 ComfyUI 本身，不需要无限循环
 # print("主线程继续运行... 按 Ctrl+C 退出。")
@@ -2002,3 +1832,4 @@ gradio_thread.start()
 # except KeyboardInterrupt:
 #     print("收到退出信号，正在关闭...")
 #     # demo.close() # 关闭 Gradio 服务 (如果需要手动关闭)
+#     # cleanup_previewer_on_exit() # 手动调用清理 (atexit 应该会处理)
