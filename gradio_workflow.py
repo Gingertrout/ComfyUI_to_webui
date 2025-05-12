@@ -1205,50 +1205,7 @@ with gr.Blocks(css=combined_css) as demo:
     
     
     
-               with gr.Row():
-                   with gr.Column(scale=1):
-                       # hua_lora_dropdown = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 1", value="None", elem_id="hua_lora_dropdown", visible=False) # 初始隐藏
-                       # hua_lora_dropdown_2 = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 2", value="None", elem_id="hua_lora_dropdown_2", visible=False) # 新增，初始隐藏
-                       # hua_lora_dropdown_3 = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 3", value="None", elem_id="hua_lora_dropdown_3", visible=False) # 新增，初始隐藏
-                       # hua_lora_dropdown_4 = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 4", value="None", elem_id="hua_lora_dropdown_4", visible=False) # 新增，初始隐藏
-                       # --- 动态 Lora 下拉框 ---
-                       lora_dropdowns = []
-                       for i in range(MAX_DYNAMIC_COMPONENTS):
-                           lora_dropdowns.append(
-                               gr.Dropdown(choices=lora_list, label=f"Lora {i+1}", value="None", visible=False, elem_id=f"dynamic_lora_dropdown_{i+1}")
-                           )
-                       # --- 动态 Lora 下拉框结束 ---
-                   with gr.Column(scale=1): # Checkpoint 和 Unet 保持单例
-                       hua_checkpoint_dropdown = gr.Dropdown(choices=checkpoint_list, label="选择 Checkpoint 模型", value="None", elem_id="hua_checkpoint_dropdown", visible=False) # 初始隐藏
-                   with gr.Column(scale=1):
-                       hua_unet_dropdown = gr.Dropdown(choices=unet_list, label="选择 UNet 模型", value="None", elem_id="hua_unet_dropdown", visible=False) # 初始隐藏
 
-               # --- 添加 Float 和 Int 输入组件 (初始隐藏) ---
-               with gr.Row() as float_int_row: # 保持此行用于整体可见性控制（如果需要）
-                    with gr.Column(scale=1):
-                        # hua_float_input = gr.Number(label="浮点数输入 (Float)", visible=False, elem_id="hua_float_input")
-                        # hua_float_input_2 = gr.Number(label="浮点数输入 2 (Float)", visible=False, elem_id="hua_float_input_2")
-                        # hua_float_input_3 = gr.Number(label="浮点数输入 3 (Float)", visible=False, elem_id="hua_float_input_3")
-                        # hua_float_input_4 = gr.Number(label="浮点数输入 4 (Float)", visible=False, elem_id="hua_float_input_4")
-                        # --- 动态 Float 输入 ---
-                        float_inputs = []
-                        for i in range(MAX_DYNAMIC_COMPONENTS):
-                            float_inputs.append(
-                                gr.Number(label=f"浮点数 {i+1}", visible=False, elem_id=f"dynamic_float_input_{i+1}")
-                            )
-                        # --- 动态 Float 输入结束 ---
-                    with gr.Column(scale=1):
-                        # hua_int_input = gr.Number(label="整数输入 (Int)", precision=0, visible=False, elem_id="hua_int_input") # precision=0 for integer
-                        # hua_int_input_2 = gr.Number(label="整数输入 2 (Int)", precision=0, visible=False, elem_id="hua_int_input_2")
-                        # hua_int_input_3 = gr.Number(label="整数输入 3 (Int)", precision=0, visible=False, elem_id="hua_int_input_3")
-                        # hua_int_input_4 = gr.Number(label="整数输入 4 (Int)", precision=0, visible=False, elem_id="hua_int_input_4")
-                        # --- 动态 Int 输入 ---
-                        int_inputs = []
-                        for i in range(MAX_DYNAMIC_COMPONENTS):
-                            int_inputs.append(
-                                gr.Number(label=f"整数 {i+1}", precision=0, visible=False, elem_id=f"dynamic_int_input_{i+1}")
-                            )
-                        # --- 动态 Int 输入结束 ---
     
     
     
@@ -1316,14 +1273,62 @@ with gr.Blocks(css=combined_css) as demo:
                            elem_id="fixed_seed_input"
                        )
                        
+                   with gr.Column(scale=1):
+                       hua_unet_dropdown = gr.Dropdown(choices=unet_list, label="选择 UNet 模型", value="None", elem_id="hua_unet_dropdown", visible=False) # 初始隐藏
 
-                   with gr.Row():
-                       # interrupt_button_main_tab 已被移除
-                       gr.Markdown('我要打十个') # 保留这句骚话                       
-                       
-                   # with gr.Row(): # queue_status_display 已移到上方
-                   #     with gr.Column(scale=1):
-                   #         queue_status_display = gr.Markdown("队列中: 0 | 处理中: 否")
+
+               with gr.Row():
+                   with gr.Column(scale=1):
+                       # hua_lora_dropdown = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 1", value="None", elem_id="hua_lora_dropdown", visible=False) # 初始隐藏
+                       # hua_lora_dropdown_2 = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 2", value="None", elem_id="hua_lora_dropdown_2", visible=False) # 新增，初始隐藏
+                       # hua_lora_dropdown_3 = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 3", value="None", elem_id="hua_lora_dropdown_3", visible=False) # 新增，初始隐藏
+                       # hua_lora_dropdown_4 = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 4", value="None", elem_id="hua_lora_dropdown_4", visible=False) # 新增，初始隐藏
+                       # --- 动态 Lora 下拉框 ---
+                       lora_dropdowns = []
+                       for i in range(MAX_DYNAMIC_COMPONENTS):
+                           lora_dropdowns.append(
+                               gr.Dropdown(choices=lora_list, label=f"Lora {i+1}", value="None", visible=False, elem_id=f"dynamic_lora_dropdown_{i+1}")
+                           )
+                       # --- 动态 Lora 下拉框结束 ---
+                   with gr.Column(scale=1): # Checkpoint 和 Unet 保持单例
+                       hua_checkpoint_dropdown = gr.Dropdown(choices=checkpoint_list, label="选择 Checkpoint 模型", value="None", elem_id="hua_checkpoint_dropdown", visible=False) # 初始隐藏
+
+
+               # --- 添加 Float 和 Int 输入组件 (初始隐藏) ---
+               with gr.Row() as float_int_row: # 保持此行用于整体可见性控制（如果需要）
+                    with gr.Column(scale=1):
+                        # hua_float_input = gr.Number(label="浮点数输入 (Float)", visible=False, elem_id="hua_float_input")
+                        # hua_float_input_2 = gr.Number(label="浮点数输入 2 (Float)", visible=False, elem_id="hua_float_input_2")
+                        # hua_float_input_3 = gr.Number(label="浮点数输入 3 (Float)", visible=False, elem_id="hua_float_input_3")
+                        # hua_float_input_4 = gr.Number(label="浮点数输入 4 (Float)", visible=False, elem_id="hua_float_input_4")
+                        # --- 动态 Float 输入 ---
+                        float_inputs = []
+                        for i in range(MAX_DYNAMIC_COMPONENTS):
+                            float_inputs.append(
+                                gr.Number(label=f"浮点数 {i+1}", visible=False, elem_id=f"dynamic_float_input_{i+1}")
+                            )
+                    # --- 动态 Float 输入结束 ---
+                    with gr.Column(scale=1):
+                        # hua_int_input = gr.Number(label="整数输入 (Int)", precision=0, visible=False, elem_id="hua_int_input") # precision=0 for integer
+                        # hua_int_input_2 = gr.Number(label="整数输入 2 (Int)", precision=0, visible=False, elem_id="hua_int_input_2")
+                        # hua_int_input_3 = gr.Number(label="整数输入 3 (Int)", precision=0, visible=False, elem_id="hua_int_input_3")
+                        # hua_int_input_4 = gr.Number(label="整数输入 4 (Int)", precision=0, visible=False, elem_id="hua_int_input_4")
+                        # --- 动态 Int 输入 ---
+                        int_inputs = []
+                        for i in range(MAX_DYNAMIC_COMPONENTS):
+                            int_inputs.append(
+                                gr.Number(label=f"整数 {i+1}", precision=0, visible=False, elem_id=f"dynamic_int_input_{i+1}")
+                            )
+                        # --- 动态 Int 输入结束 ---
+
+
+               with gr.Row():
+                   # interrupt_button_main_tab 已被移除
+                   gr.Markdown('我要打十个') # 保留这句骚话                       
+                   
+               # with gr.Row(): # queue_status_display 已移到上方
+               #     with gr.Column(scale=1):
+               #         queue_status_display = gr.Markdown("队列中: 0 | 处理中: 否")
                
                
 
@@ -1538,15 +1543,37 @@ with gr.Blocks(css=combined_css) as demo:
         
         # 动态组件: Hua_LoraLoaderModelOnly (lora_dropdowns)
         dynamic_loras_data = defaults["dynamic_components"]["Hua_LoraLoaderModelOnly"]
+        # 获取当前的 Lora 列表用于检查
+        current_lora_list = get_model_list("loras") # <--- 获取最新列表
+        print(f"[UI_UPDATE_DEBUG] Current Lora list for validation: {current_lora_list[:5]}... (Total: {len(current_lora_list)})") # 打印部分列表用于调试
+
         for i in range(MAX_DYNAMIC_COMPONENTS):
             if i < len(dynamic_loras_data):
                 node_data = dynamic_loras_data[i]
+                lora_value_from_json = node_data.get("value", "None")
                 label = node_data.get("title", f"Lora {i+1}")
                 if label == node_data.get("id"):
                     label = f"Lora {i+1} (ID: {node_data.get('id')})"
-                updates.append(gr.update(visible=True, label=label, value=node_data.get("value", "None")))
+
+                # --- 新增检查和日志 ---
+                final_lora_value_to_set = "None" # 默认值
+                if lora_value_from_json != "None":
+                    if lora_value_from_json in current_lora_list:
+                        final_lora_value_to_set = lora_value_from_json
+                        print(f"[UI_UPDATE_DEBUG] Lora {i+1} (ID: {node_data['id']}): Value '{lora_value_from_json}' found in list. Setting dropdown.")
+                    else:
+                        print(f"[UI_UPDATE_DEBUG] Lora {i+1} (ID: {node_data['id']}): Value '{lora_value_from_json}' NOT FOUND in current Lora list. Setting dropdown to 'None'.")
+                else:
+                     print(f"[UI_UPDATE_DEBUG] Lora {i+1} (ID: {node_data['id']}): Value from JSON is 'None'. Setting dropdown to 'None'.")
+                # --- 检查和日志结束 ---
+
+                updates.append(gr.update(visible=True, label=label, value=final_lora_value_to_set)) # <--- 使用检查后的值
             else:
                 updates.append(gr.update(visible=False, label=f"Lora {i+1}", value="None"))
+
+        # --- 为分辨率添加日志 ---
+        print(f"[UI_UPDATE_DEBUG] Resolution: Setting Width={defaults['default_width']}, Height={defaults['default_height']}")
+        # --- 日志结束 ---
 
         # 动态组件: HuaIntNode (int_inputs)
         dynamic_ints_data = defaults["dynamic_components"]["HuaIntNode"]
