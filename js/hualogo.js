@@ -215,11 +215,8 @@ class KayWorkflowImage {
         }, 0);
     }
 
-    async saveToJSON(workflowString) { // workflowString is already JSON.stringify'd
+    async saveToJSON(workflowString, filename = "workflow.json") { // workflowString is already JSON.stringify'd, added filename param
         try {
-            // The reference suggests wrapping it again, but workflowString is already the graph.serialize() output.
-            // const dataToSave = { workflow: JSON.parse(workflowString) }; // If workflowString needs parsing then re-stringifying
-            // For direct saving of the serialized string:
             const dataToSave = JSON.parse(workflowString); // To pretty print, parse then stringify
             const jsonPrettyString = JSON.stringify(dataToSave, null, 2);
             const blob = new Blob([jsonPrettyString], { type: "application/json" });
@@ -227,22 +224,30 @@ class KayWorkflowImage {
             const url = URL.createObjectURL(blob);
             const a = document.createElement("a");
             a.href = url;
-            a.download = "workflow.json"; // Filename for the JSON
+            a.download = filename; // Use provided filename
             document.body.appendChild(a); // Required for Firefox
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
         } catch (error) {
             console.error("Failed to save JSON file:", error);
+            showNotification({ message: `保存JSON文件 '${filename}' 失败: ${error.message}`, bgColor: "#f8d7da" });
         }
     }
 
-    async export(includeWorkflow) {
+    async export(includeWorkflow) { // Restored includeWorkflow parameter
+        const userBaseFilename = prompt("请输入用于本地PNG和JSON文件的基础名称 (不含后缀，例如 my_workflow):", "workflow_export");
+        if (!userBaseFilename || userBaseFilename.trim() === "") {
+            showNotification({ message: "保存操作已取消或基础文件名为空。", bgColor: "#ffc107", timeout: 3000 });
+            return;
+        }
+        const baseName = userBaseFilename.trim();
+
         this.saveState();
         const bounds = this.getBounds();
         this.updateView(bounds);
 
-        app.canvas.draw(true, true); // Ensure the current view is fully rendered after view update
+        app.canvas.draw(true, true); // Ensure the current view is fully rendered
 
         const workflowJsonString = includeWorkflow ? JSON.stringify(app.graph.serialize()) : undefined;
         const pngBlob = await this.getBlob(workflowJsonString);
@@ -250,14 +255,24 @@ class KayWorkflowImage {
         this.restoreState(); // Restore canvas state regardless of blob success
 
         if (pngBlob) {
-            const filename = includeWorkflow ? `workflow_with_data.${this.extension}` : `workflow_no_data.${this.extension}`;
-            this.download(pngBlob, filename);
-            if (workflowJsonString) {
-                await this.saveToJSON(workflowJsonString); // Save JSON separately
+            const pngFilename = includeWorkflow ? `${baseName}_with_data.${this.extension}` : `${baseName}_no_data.${this.extension}`;
+            this.download(pngBlob, pngFilename);
+            showNotification({ message: `已保存: ${pngFilename}`, bgColor: "#d4edda", timeout: 3000 });
+
+            if (includeWorkflow && workflowJsonString) { // If embedding, also save the JSON separately
+                const localJsonFilename = `${baseName}_workflow.json`;
+                await this.saveToJSON(workflowJsonString, localJsonFilename);
+                showNotification({ message: `已保存: ${localJsonFilename}`, bgColor: "#d4edda", timeout: 3000 });
             }
+             if (includeWorkflow) {
+                showNotification({ message: `带工作流的PNG和JSON文件已开始下载 (基于 "${baseName}")`, bgColor: "#d4edda", timeout: 5000 });
+            } else {
+                showNotification({ message: `不带工作流的PNG文件已开始下载 (基于 "${baseName}")`, bgColor: "#d4edda", timeout: 5000 });
+            }
+
         } else {
             console.error("Failed to export workflow: PNG Blob generation failed.");
-            showNotification({ message: "Error: PNG Blob generation failed.", bgColor: "#f8d7da" });
+            showNotification({ message: "错误: PNG Blob 生成失败。", bgColor: "#f8d7da" });
         }
     }
 }
@@ -434,7 +449,10 @@ const FloatingIconManager = {
         const menuItems = [
             { label: "🚀 封装工作流页面 7861 端口", action: () => this.goToLocalPort() },
             { label: "📦 跳转到我的代码仓库", action: () => this.goToMyRepo() },
-            { label: "💾 保存PNG & JSON (带/不带工作流)", action: () => this.saveJSON() } // Updated label
+            { label: "💾 保存PNG & JSON (带/不带工作流)", action: () => this.savePngAndJson() },
+            { label: "📝 保存 API 格式 JSON 到服务器 (自定义名称)", action: () => this.saveApiJsonToServer() }, 
+            // Removed "📄 保存 API 格式 JSON 到服务器 (自动命名)" as it's now redundant
+            { label: "📄 下载纯工作流 JSON (自定义名称)", action: () => this.savePureWorkflowJsonToLocalCustom() } 
         ];
         this.contextMenu = document.createElement("div"); this.contextMenu.className = "floating-icon-context-menu";
         document.body.appendChild(this.contextMenu);
@@ -488,14 +506,107 @@ const FloatingIconManager = {
     },
     goToLocalPort() { window.open("http://localhost:7861", "_blank"); },
     goToMyRepo() { window.open("https://github.com/kungful/ComfyUI_to_webui.git", "_blank"); },
-    saveJSON() { // This is the main action for the menu item
+    savePngAndJson() { 
         showNotification({
-            message: "GuLuLu: 你需要把工作流信息嵌入到PNG中吗？啊？\nDo you need to embed Workflow information into PNG? GuLuLu~Gulu",
+            message: "GuLuLu: 你需要把工作流信息嵌入到PNG中吗？啊？\n(选择“是”将下载带数据的PNG和workflow.json)\n(选择“否”将仅下载不带数据的PNG)\nDo you need to embed Workflow information into PNG? GuLuLu~Gulu",
             size: "medium",
-            onYes: () => { if (this.kayWorkflowImageInstance) this.kayWorkflowImageInstance.export(true); else console.error("KayWorkflowImage instance not found (yes)!"); },
-            onNo: () => { if (this.kayWorkflowImageInstance) this.kayWorkflowImageInstance.export(false); else console.error("KayWorkflowImage instance not found (no)!"); }
+            onYes: () => { 
+                if (this.kayWorkflowImageInstance) {
+                    this.kayWorkflowImageInstance.export(true); 
+                } else {
+                    console.error("KayWorkflowImage instance not found (yes)!");
+                    showNotification({ message: "错误: KayWorkflowImage 实例未找到。", bgColor: "#f8d7da" });
+                }
+            },
+            onNo: () => { 
+                if (this.kayWorkflowImageInstance) {
+                    this.kayWorkflowImageInstance.export(false); // 只下载不带数据的PNG
+                } else {
+                    console.error("KayWorkflowImage instance not found (no)!");
+                    showNotification({ message: "错误: KayWorkflowImage 实例未找到。", bgColor: "#f8d7da" });
+                }
+            }
         });
     },
+
+    async saveApiJsonToServer() { // Renamed original method slightly in label for clarity
+        const serverFileName = prompt("请输入要保存到服务器 Output 目录的 API JSON 文件名 (不含 .json 后缀):", "api_workflow_custom_name");
+        if (!serverFileName || serverFileName.trim() === "") {
+            showNotification({ message: "保存 API JSON (自定义名称) 到服务器操作已取消或文件名为空。", bgColor: "#ffc107", timeout: 3000 });
+            return;
+        }
+
+        try {
+            const promptData = await app.graphToPrompt(); // 获取包含 output 和 workflow 的对象
+            if (!promptData || typeof promptData.output === 'undefined') { // 检查 promptData 和 promptData.output 是否有效
+                showNotification({ message: "无法获取 API JSON 数据 (output为空或未定义)。", bgColor: "#f8d7da", timeout: 5000 });
+                console.error("无法获取 API JSON 数据 (app.graphToPrompt() 返回的数据中 output 字段为空或未定义)");
+                return;
+            }
+            const apiOutput = promptData.output; // 提取 output 部分
+            const apiJsonString = JSON.stringify(apiOutput, null, 2); // 转换为格式化的 JSON 字符串
+
+            const response = await fetch("/comfyui_to_webui/save_api_json", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    filename: serverFileName.trim(),
+                    api_data: apiJsonString,
+                }),
+            });
+
+            if (response.ok) {
+                const result = await response.json();
+                showNotification({ message: result.message || `API JSON '${serverFileName.trim()}.json' (自定义名称) 保存到服务器成功！`, bgColor: "#d4edda", timeout: 5000 });
+                console.log("API JSON (自定义名称) 保存到服务器成功:", result);
+            } else {
+                const errorResult = await response.json().catch(() => ({ detail: "保存 API JSON (自定义名称) 到服务器失败，无法解析错误响应。" }));
+                showNotification({ message: `保存 API JSON (自定义名称) 到服务器失败: ${errorResult.detail || response.statusText}`, bgColor: "#f8d7da", timeout: 7000 });
+                console.error("保存 API JSON (自定义名称) 到服务器失败:", errorResult);
+            }
+        } catch (error) {
+            showNotification({ message: `保存 API JSON (自定义名称) 到服务器出错: ${error.message}`, bgColor: "#f8d7da", timeout: 7000 });
+            console.error("保存 API JSON (自定义名称) 到服务器出错:", error);
+        }
+    },
+
+    // Removed saveApiJsonToServerAuto method as it's now redundant.
+    // The functionality of "📝 保存 API 格式 JSON 到服务器 (自定义名称)" covers the need for custom naming of API JSON.
+
+    async savePureWorkflowJsonToLocalCustom() { 
+        const localJsonFilenamePrompt = prompt("请输入要保存到本地的纯工作流 JSON 文件名 (不含 .json 后缀):", "pure_workflow_local_custom");
+        if (!localJsonFilenamePrompt || localJsonFilenamePrompt.trim() === "") {
+            showNotification({ message: "下载纯工作流 JSON 操作已取消或文件名为空。", bgColor: "#ffc107", timeout: 3000 });
+            return;
+        }
+        const localJsonFilenameBase = localJsonFilenamePrompt.trim();
+        const localJsonFilename = `${localJsonFilenameBase}.json`;
+
+        showNotification({ message: `正在准备下载纯工作流 JSON '${localJsonFilename}'...`, bgColor: "#e2e3e5", timeout: 2000 });
+
+        try {
+            const pureJson = app.graph.serialize(); // 获取纯工作流 JSON 对象
+            if (!pureJson) { 
+                showNotification({ message: "无法获取纯工作流 JSON 数据进行下载。", bgColor: "#f8d7da", timeout: 5000 });
+                console.error("无法获取纯工作流 JSON 数据 (app.graph.serialize() 可能返回 null 或 undefined).");
+                return;
+            }
+            
+            const pureJsonString = JSON.stringify(pureJson, null, 2); 
+
+            if (this.kayWorkflowImageInstance) {
+                await this.kayWorkflowImageInstance.saveToJSON(pureJsonString, localJsonFilename);
+                showNotification({ message: `纯工作流 JSON '${localJsonFilename}' 已开始下载。`, bgColor: "#d4edda", timeout: 5000 });
+            } else {
+                console.error("KayWorkflowImage instance not found for savePureWorkflowJsonToLocalCustom!");
+                showNotification({ message: "错误: KayWorkflowImage 实例未找到，无法下载JSON。", bgColor: "#f8d7da" });
+            }
+        } catch (error) {
+            showNotification({ message: `下载纯工作流 JSON '${localJsonFilename}' 出错: ${error.message}`, bgColor: "#f8d7da", timeout: 7000 });
+            console.error("下载纯工作流 JSON (自定义名称) 出错:", error);
+        }
+    },
+
     loadState() {
         const savedState = localStorage.getItem("kay-floating-icon-state");
         if (savedState) {
