@@ -1,3 +1,9 @@
+有空就增加更多动态组件，目前4
+`gradio_workflow.py` 目前支持 __4__ 种动态组件类：
+1. __`GradioTextOk`__: 用于动态生成正向提示词输入框 (`gr.Textbox`)。
+2. __`Hua_LoraLoaderModelOnly`__: 用于动态生成 Lora 模型选择下拉框 (`gr.Dropdown`)。
+3. __`HuaIntNode`__: 用于动态生成整数输入框 (`gr.Number`)。
+4. __`HuaFloatNode`__: 用于动态生成浮点数输入框 (`gr.Number`)
 ![newui2](https://github.com/kungful/ComfyUI_to_webui/blob/bf6a409f1c664e65e7fe6b1012809617c547260a/Sample_preview/8888.png)
 你可以在我的镜像中直接使用该插件
 [免费镜像](https://www.xiangongyun.com/image/detail/7b36c1a3-da41-4676-b5b3-03ec25d6e197)
