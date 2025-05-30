@@ -7,3 +7,4 @@ requests
 imageio[ffmpeg]
 psutil
 pynvml
+httpx[socks]
