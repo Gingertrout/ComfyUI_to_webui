@@ -148,6 +148,7 @@ from .node.hua_nodes import Hua_LoraLoader, Hua_LoraLoaderModelOnly, Hua_Checkpo
 from .node.hua_nodes import BarcodeGeneratorNode, Barcode_seed
 from .node.output_image_to_gradio import Hua_Output
 from .node.output_video_to_gradio import Hua_Video_Output # 添加视频节点导入
+from .node.deepseek_api import DeepseekNode
 
 NODE_CLASS_MAPPINGS = {
     "Huaword": Huaword,#不加入组件
@@ -169,6 +170,7 @@ NODE_CLASS_MAPPINGS = {
     "Hua_Video_Output": Hua_Video_Output,
     "HuaFloatNode": HuaFloatNode, 
     "HuaIntNode": HuaIntNode, 
+    "DeepseekNode": DeepseekNode,
 
 }
 
@@ -194,6 +196,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Hua_Video_Output": "🎬Video Output (Gradio)",
     "HuaFloatNode": "🔢Float Input (Hua)",
     "HuaIntNode": "🔢Integer Input (Hua)",
+    "DeepseekNode": "✨ Deepseek chat (Hua)",
 
 }
 
@@ -313,6 +316,10 @@ async def save_api_json_route(request):
 print("--- ComfyUI_to_webui: Registered API endpoint /comfyui_to_webui/save_api_json ---")
 # --- 结束 API 端点 ---
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", ]
-
 WEB_DIRECTORY = "./js"
+
+__all__ = [
+    "NODE_CLASS_MAPPINGS",
+    "NODE_DISPLAY_NAME_MAPPINGS",
+    "WEB_DIRECTORY",
+]
