@@ -60,7 +60,6 @@ class DeepseekNode:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=temperature,
-                seed=seed,
                 stream=False
             )
             
