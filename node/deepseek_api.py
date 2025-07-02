@@ -17,6 +17,7 @@ class DeepseekNode:
                     "multiline": True,
                     "default": "You are a helpful assistant"
                 }),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
             },
             "optional": {
                 "temperature": ("FLOAT", {
@@ -42,7 +43,7 @@ class DeepseekNode:
                 return f.read()
         return None
 
-    def execute(self, api_key, prompt, system_prompt="You are a helpful assistant", temperature=0.7):
+    def execute(self, api_key, prompt, seed, system_prompt="You are a helpful assistant", temperature=0.7):
         if not api_key:
             return ("Error: Please provide your API key",)
             
@@ -59,6 +60,7 @@ class DeepseekNode:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=temperature,
+                seed=seed,
                 stream=False
             )
             
