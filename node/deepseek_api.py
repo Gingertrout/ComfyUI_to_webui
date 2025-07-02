@@ -64,6 +64,8 @@ class DeepseekNode:
                 stream=False
             )
             
-            return (response.choices[0].message.content,)
+            result = response.choices[0].message.content
+            print(f"Deepseek API response: {result}")
+            return (result,)
         except Exception as e:
             return (f"Error: {str(e)}",)
