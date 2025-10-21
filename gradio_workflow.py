@@ -3899,64 +3899,74 @@ with gr.Blocks(css=combined_css) as demo:
 
     send_to_photopea_button.click(
         fn=lambda data: (
-            gr.update(value="Sending to Photopea..."),
-            gr.update(value=data)
+            gr.update(value="Image sent to Photopea!" if data else "No image data available"),
+            gr.update(value=data if data else "")
         ),
         inputs=[photopea_image_data_state],
-        outputs=[photopea_status, photopea_data_bus],
+        outputs=[photopea_status, photopea_data_bus]
+    ).then(
+        fn=None,
+        inputs=None,
+        outputs=None,
         js="""
         () => {
-            console.log("[PHOTOPEA-CLICK] Send to Photopea button clicked");
+            console.log("[PHOTOPEA-GALLERY] Send to Photopea triggered");
             setTimeout(() => {
                 const dataInput = (window.gradioApp ? window.gradioApp() : document).querySelector('#hua-photopea-data-store textarea');
-                console.log("[PHOTOPEA-CLICK] Data input:", dataInput);
                 if (!dataInput || !dataInput.value) {
-                    alert("No image data found. Please upload or generate an image first.");
+                    console.error("[PHOTOPEA-GALLERY] No data in store");
+                    alert("No image data found. Please generate or upload an image first.");
                     return;
                 }
                 const dataUrl = dataInput.value;
-                console.log("[PHOTOPEA-CLICK] Data length:", dataUrl.length);
+                console.log("[PHOTOPEA-GALLERY] Data URL length:", dataUrl.length);
 
                 if (window.huaPhotopeaBridge && window.huaPhotopeaBridge.open) {
-                    console.log("[PHOTOPEA-CLICK] Calling huaPhotopeaBridge.open");
+                    console.log("[PHOTOPEA-GALLERY] Opening in Photopea");
                     window.huaPhotopeaBridge.open(dataUrl, false);
+                    alert("Image opened in Photopea! Switch to the Photopea tab to edit.");
                 } else {
-                    console.error("[PHOTOPEA-CLICK] Photopea bridge not available");
-                    alert("Photopea not loaded. Please switch to the Photopea tab first.");
+                    console.error("[PHOTOPEA-GALLERY] Bridge not available");
+                    alert("Photopea not ready. Please go to the Photopea tab first to initialize it.");
                 }
-            }, 100);
+            }, 200);
         }
         """
     )
 
     upload_to_photopea_button.click(
         fn=lambda data: (
-            gr.update(value="Sending to Photopea..."),
-            gr.update(value=data)
+            gr.update(value="Image sent to Photopea!" if data else "No image data available"),
+            gr.update(value=data if data else "")
         ),
         inputs=[photopea_image_data_state],
-        outputs=[photopea_status, photopea_data_bus],
+        outputs=[photopea_status, photopea_data_bus]
+    ).then(
+        fn=None,
+        inputs=None,
+        outputs=None,
         js="""
         () => {
-            console.log("[PHOTOPEA-UPLOAD-CLICK] Upload Send to Photopea button clicked");
+            console.log("[PHOTOPEA-UPLOAD] Send to Photopea triggered");
             setTimeout(() => {
                 const dataInput = (window.gradioApp ? window.gradioApp() : document).querySelector('#hua-photopea-data-store textarea');
-                console.log("[PHOTOPEA-UPLOAD-CLICK] Data input:", dataInput);
                 if (!dataInput || !dataInput.value) {
+                    console.error("[PHOTOPEA-UPLOAD] No data in store");
                     alert("No image data found. Please upload an image first.");
                     return;
                 }
                 const dataUrl = dataInput.value;
-                console.log("[PHOTOPEA-UPLOAD-CLICK] Data length:", dataUrl.length);
+                console.log("[PHOTOPEA-UPLOAD] Data URL length:", dataUrl.length);
 
                 if (window.huaPhotopeaBridge && window.huaPhotopeaBridge.open) {
-                    console.log("[PHOTOPEA-UPLOAD-CLICK] Calling huaPhotopeaBridge.open");
+                    console.log("[PHOTOPEA-UPLOAD] Opening in Photopea");
                     window.huaPhotopeaBridge.open(dataUrl, false);
+                    alert("Image opened in Photopea! Switch to the Photopea tab to edit.");
                 } else {
-                    console.error("[PHOTOPEA-UPLOAD-CLICK] Photopea bridge not available");
-                    alert("Photopea not loaded. Please switch to the Photopea tab first.");
+                    console.error("[PHOTOPEA-UPLOAD] Bridge not available");
+                    alert("Photopea not ready. Please go to the Photopea tab first to initialize it.");
                 }
-            }, 100);
+            }, 200);
         }
         """
     )
@@ -3972,14 +3982,17 @@ with gr.Blocks(css=combined_css) as demo:
                 outputs=[photopea_image_data_state, photopea_data_bus]
             )
 
+    # Photopea tab buttons use automatic MutationObserver handlers from PHOTOPEA_EMBED_HTML
+    # These handlers are attached to elem_id="hua-photopea-send" and elem_id="hua-photopea-fetch"
+    # We only add status updates here
     load_photopea_button.click(
-        fn=notify_photopea_load,
+        fn=lambda data: gr.update(value="Image sent to Photopea editor!" if data else "No image data available. Generate or upload an image first."),
         inputs=[photopea_data_bus],
         outputs=[photopea_status]
     )
 
     photopea_fetch_button.click(
-        fn=notify_photopea_request,
+        fn=lambda: gr.update(value="Exporting from Photopea..."),
         inputs=[],
         outputs=[photopea_status]
     )
