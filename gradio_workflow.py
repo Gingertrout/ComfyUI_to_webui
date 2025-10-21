@@ -3308,19 +3308,29 @@ with gr.Blocks(css=combined_css) as demo:
                 None,
             )
 
-    def send_selected_to_upload(selected_path):
-        """Send selected gallery image to upload input."""
-        if not selected_path or not os.path.isfile(selected_path):
-            log_message("[FORWARD] No valid image selected to send to upload.")
+    def send_latest_to_upload():
+        """Send latest gallery image to upload input."""
+        # Get latest image from accumulated results
+        with results_lock:
+            latest_images = accumulated_image_results[:]
+
+        if not latest_images:
+            log_message("[FORWARD] No images in gallery to send to upload.")
+            return gr.update()
+
+        # Get the last (most recent) image
+        latest_path = latest_images[-1]
+        if not os.path.isfile(latest_path):
+            log_message(f"[FORWARD] Latest image path not found: {latest_path}")
             return gr.update()
 
         try:
-            with Image.open(selected_path) as pil_img:
+            with Image.open(latest_path) as pil_img:
                 rgba = pil_img.convert("RGBA")
-            log_message(f"[FORWARD] Sent selected image to upload: {os.path.basename(selected_path)}")
+            log_message(f"[FORWARD] Sent latest image to upload: {os.path.basename(latest_path)}")
             return gr.update(value=rgba)
         except Exception as exc:
-            log_message(f"[FORWARD] Error loading selected image: {exc}")
+            log_message(f"[FORWARD] Error loading latest image: {exc}")
             return gr.update()
 
     def send_selected_to_photopea(photopea_data):
@@ -3746,8 +3756,8 @@ with gr.Blocks(css=combined_css) as demo:
 
     # Image forwarding buttons
     send_to_upload_button.click(
-        fn=send_selected_to_upload,
-        inputs=[selected_gallery_image_state],
+        fn=send_latest_to_upload,
+        inputs=[],
         outputs=[input_image]
     )
 
