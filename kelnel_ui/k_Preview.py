@@ -46,12 +46,14 @@ class ComfyUIPreviewer:
         # Ensure client_id is unique if multiple instances are used
         timestamp = int(time.time() * 1000) # Add timestamp for more uniqueness
         self.client_id = f"{DEFAULT_CLIENT_ID_PREFIX}{client_id_suffix}_{timestamp}"
-        
+
         self.latest_preview_image = None
         self.image_update_event = threading.Event()
         self.active_prompt_info = {
             "current_executing_node": None,
-            "is_worker_globally_active": False # Will be set to True by start_worker
+            "is_worker_globally_active": False, # Will be set to True by start_worker
+            "progress_value": None,  # Current step number
+            "progress_max": None,    # Total steps
         }
         self.active_prompt_lock = threading.Lock()
         self.preview_worker_thread = None
@@ -125,10 +127,20 @@ class ComfyUIPreviewer:
                                     self.active_prompt_info["current_executing_node"] = data.get('node')
                                     if data.get('node') is None and data.get('prompt_id'): # Execution finished for this prompt
                                         self.active_prompt_info["current_executing_node"] = "Idle"
+                                        # Reset progress when execution completes
+                                        self.active_prompt_info["progress_value"] = None
+                                        self.active_prompt_info["progress_max"] = None
 
 
                                 elif msg_type == 'progress':
                                     data = message_data.get('data', {})
+                                    # Capture progress information (current step / total steps)
+                                    progress_value = data.get('value')
+                                    progress_max = data.get('max')
+                                    if progress_value is not None and progress_max is not None:
+                                        self.active_prompt_info["progress_value"] = progress_value
+                                        self.active_prompt_info["progress_max"] = progress_max
+
                                     preview_b64 = data.get('preview_image')
                                     if preview_b64:
                                         try:
@@ -217,6 +229,17 @@ class ComfyUIPreviewer:
         else:
             print(f"[{self.client_id}] Preview worker was not running or already stopped.")
         self.ws_connection_status = "Preview worker stopped"
+
+    def get_progress_info(self):
+        """
+        Returns the current progress information.
+        Returns: dict with keys 'value' (current step), 'max' (total steps), or None values if no progress data.
+        """
+        with self.active_prompt_lock:
+            return {
+                "value": self.active_prompt_info.get("progress_value"),
+                "max": self.active_prompt_info.get("progress_max")
+            }
 
 
     def get_update_generator(self):

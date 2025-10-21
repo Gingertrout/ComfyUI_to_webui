@@ -2021,6 +2021,41 @@ def _split_run_inputs(raw_args):
         "mask_flat": mask_flat,
     }
 
+def format_queue_status(queue_size, is_processing, include_progress=False):
+    """Helper function to format queue status with optional progress bar."""
+    processing_text = "Yes" if is_processing else "No"
+    progress_html = ""
+    progress_value = None
+    progress_max = None
+
+    # Try to get progress info from the previewer
+    if include_progress and is_processing and 'comfyui_previewer' in globals():
+        try:
+            progress_info = comfyui_previewer.get_progress_info()
+            progress_value = progress_info.get("value")
+            progress_max = progress_info.get("max")
+
+            if progress_value is not None and progress_max is not None and progress_max > 0:
+                percentage = int((progress_value / progress_max) * 100)
+                processing_text = f"Yes ({progress_value}/{progress_max} - {percentage}%)"
+
+                # Create HTML progress bar
+                progress_html = f"""
+<div style="width: 100%; background-color: #333; border-radius: 4px; margin-top: 8px; overflow: hidden;">
+    <div style="width: {percentage}%; background: linear-gradient(90deg, #ff7c00 0%, #ffaa00 100%); height: 20px; border-radius: 4px; transition: width 0.3s ease;"></div>
+</div>"""
+        except Exception as e:
+            # Silently fall back to simple "Yes" if progress info unavailable
+            pass
+
+    status_text = f"In Queue: {queue_size} | Processing: {processing_text}"
+
+    # Combine status text with progress bar HTML if available
+    if progress_html:
+        return f"{status_text}{progress_html}"
+    else:
+        return status_text
+
 def run_queued_tasks(inputimage1, input_video, *dynamic_args, queue_count=1, progress=gr.Progress(track_tqdm=True)):
     global accumulated_image_results, last_video_result, executor
 
@@ -2122,7 +2157,7 @@ def run_queued_tasks(inputimage1, input_video, *dynamic_args, queue_count=1, pro
         initial_video = last_video_result
 
     yield (
-        gr.update(value=f"In Queue: {current_queue_size} | Processing: {'Yes' if processing_event.is_set() else 'No'}"),  # queue_status_display
+        gr.update(value=format_queue_status(current_queue_size, processing_event.is_set(), include_progress=False)),  # queue_status_display
         gr.update(value=initial_gallery),  # output_gallery
         gr.update(value=initial_video),  # output_video
         gr.Tabs(selected="tab_generate_result"),  # main_output_tabs_component
@@ -2170,7 +2205,7 @@ def run_queued_tasks(inputimage1, input_video, *dynamic_args, queue_count=1, pro
             log_message(f"[QUEUE] About to yield status update")
             try:
                 yield dict_to_tuple({
-                    "status": gr.update(value=f"In Queue: {current_queue_size} | Processing: Yes"),
+                    "status": gr.update(value=format_queue_status(current_queue_size, True, include_progress=False)),
                     "gallery": gr.update(value=current_images_copy),
                     "video": gr.update(value=current_video),
                 })
@@ -2219,7 +2254,7 @@ def run_queued_tasks(inputimage1, input_video, *dynamic_args, queue_count=1, pro
                     current_images_copy = accumulated_image_results[:]
                     current_video = last_video_result
                 yield dict_to_tuple({
-                    "status": gr.update(value=f"In Queue: {current_queue_size} | Processing: Yes (running)"),
+                    "status": gr.update(value=format_queue_status(current_queue_size, True, include_progress=True)),
                     "gallery": gr.update(value=current_images_copy),
                     "video": gr.update(value=current_video),
                 })
@@ -2313,7 +2348,7 @@ def run_queued_tasks(inputimage1, input_video, *dynamic_args, queue_count=1, pro
         log_message(f"[QUEUE] Finally block - yielding final status")
         try:
             yield dict_to_tuple({
-                "status": gr.update(value=f"In Queue: {current_queue_size} | Processing: {'Yes' if processing_event.is_set() else 'No'}"),
+                "status": gr.update(value=format_queue_status(current_queue_size, processing_event.is_set(), include_progress=False)),
                 "gallery": gr.update(value=final_images),
                 "video": gr.update(value=final_video),
                 "tabs": gr.Tabs(selected="tab_generate_result"),
@@ -2378,8 +2413,8 @@ def clear_queue():
     current_processing_status_for_display = processing_event.is_set()
     
     log_message(f"[CLEAR_QUEUE] Exit. Gradio queue size for display: {current_gradio_queue_size_for_display}, ComfyUI processing status for display: {current_processing_status_for_display}")
-    
-    return gr.update(value=f"In Queue: {current_gradio_queue_size_for_display} | Processing: {'Yes' if current_processing_status_for_display else 'No'}")
+
+    return gr.update(value=format_queue_status(current_gradio_queue_size_for_display, current_processing_status_for_display, include_progress=False))
 
 def clear_history():
     global accumulated_image_results, last_video_result
@@ -2391,7 +2426,7 @@ def clear_history():
     return {
         output_gallery: gr.update(value=[]),  # clear but keep visible
         output_video: gr.update(value=None),  # clear but keep visible
-        queue_status_display: gr.update(value=f"In Queue: {current_queue_size} | Processing: {'Yes' if processing_event.is_set() else 'No'}")
+        queue_status_display: gr.update(value=format_queue_status(current_queue_size, processing_event.is_set(), include_progress=False))
     }
 
 
