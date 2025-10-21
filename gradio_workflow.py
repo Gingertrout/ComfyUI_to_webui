@@ -637,6 +637,14 @@ def find_key_by_class_type(prompt, class_type):
             return key
     return None
 
+def find_all_keys_by_class_type(prompt, class_type):
+    """Find ALL nodes matching class_type, not just the first one."""
+    matches = []
+    for key, value in prompt.items():
+        if isinstance(value, dict) and value.get("class_type") == class_type:
+            matches.append(key)
+    return matches
+
 def check_seed_node(json_file):
     workflow_dir, workflow_name, workflow_path = resolve_workflow_components(json_file)
     if not workflow_path:
@@ -1586,9 +1594,12 @@ def generate_image(
     except Exception as exc:
         print(f"[{execution_id}] Warning: unable to snapshot output directory before run: {exc}")
 
-    image_input_key = find_key_by_class_type(prompt, 'GradioInputImage')
-    load_and_resize_key = find_key_by_class_type(prompt, 'LoadAndResizeImage')
-    load_image_key = find_key_by_class_type(prompt, 'LoadImage')  # Also support standard LoadImage
+    # Find ALL image input nodes (workflows may have multiple)
+    gradio_input_keys = find_all_keys_by_class_type(prompt, 'GradioInputImage')
+    load_and_resize_keys = find_all_keys_by_class_type(prompt, 'LoadAndResizeImage')
+    load_image_keys = find_all_keys_by_class_type(prompt, 'LoadImage')
+    all_image_input_keys = gradio_input_keys + load_and_resize_keys + load_image_keys
+
     video_input_key = find_key_by_class_type(prompt, 'VHS_LoadVideo')
     seed_key = find_key_by_class_type(prompt, 'Hua_gradio_Seed')
     text_bad_key = find_key_by_class_type(prompt, 'GradioTextBad')
@@ -1601,10 +1612,8 @@ def generate_image(
     saved_mask_filename = None
     saved_mask_path = None
 
-    # Determine which image input node type is present
-    effective_image_key = image_input_key or load_and_resize_key or load_image_key
-
-    if effective_image_key:
+    # Update ALL image input nodes with the uploaded image
+    if all_image_input_keys and inputimage1 is not None:
         base_img, mask_img = _coerce_uploaded_image_to_pil(inputimage1, execution_id, return_mask=True)
         if base_img is not None:
             try:
@@ -1613,11 +1622,13 @@ def generate_image(
                 save_path = os.path.join(INPUT_DIR, inputfilename)
                 base_img.convert('RGBA').save(save_path)
 
-                # Set the image parameter on whatever node type we found
-                prompt[effective_image_key].setdefault('inputs', {})['image'] = inputfilename
+                # Set the image parameter on ALL image input nodes
+                for node_key in all_image_input_keys:
+                    prompt[node_key].setdefault('inputs', {})['image'] = inputfilename
+                    node_type = prompt[node_key].get('class_type', 'unknown')
+                    print(f"[{execution_id}] Updated node {node_key} ({node_type}) with input image")
 
-                node_type = prompt[effective_image_key].get('class_type', 'unknown')
-                print(f"[{execution_id}] Saved input image to {save_path} (node type: {node_type})")
+                print(f"[{execution_id}] Saved input image to {save_path} (updated {len(all_image_input_keys)} nodes)")
             except Exception as exc:
                 print(f"[{execution_id}] Failed to save input image: {exc}")
         if mask_img is not None:
