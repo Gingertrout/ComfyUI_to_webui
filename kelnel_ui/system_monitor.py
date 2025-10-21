@@ -3,13 +3,13 @@ import time
 import os
 import uuid
 
-# --- 依赖库导入和初始化 ---
+# --- Dependencies and initialization ---
 try:
     import psutil
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
-    print("警告：psutil 未安装。系统监控功能将受限。")
+    print("Warning: psutil not installed. System monitoring will be limited.")
 
 NVML_AVAILABLE = False
 NVML_INITIALIZED = False
@@ -24,16 +24,16 @@ try:
     device_count = pynvml.nvmlDeviceGetCount()
     if not device_count:
         NVML_AVAILABLE = False
-        print("pynvml 初始化成功，但未检测到 NVIDIA GPU 设备。")
+        print("pynvml initialized, but no NVIDIA GPU detected.")
     else:
         for i in range(device_count):
             gpu_handles.append(pynvml.nvmlDeviceGetHandleByIndex(i))
 except Exception as e: 
     NVML_AVAILABLE = False
     NVML_INITIALIZED = False
-    print(f"pynvml 初始化或导入失败: {e}。NVIDIA GPU 监控将不可用。")
+    print(f"pynvml initialization/import failed: {e}. NVIDIA GPU monitoring unavailable.")
 
-# --- 数据获取函数 ---
+# --- Data collection helpers ---
 def get_real_cpu_info():
     if not PSUTIL_AVAILABLE: return {"usage": 0, "error": "psutil not available"}
     try: return {"usage": psutil.cpu_percent(interval=0.1)}
@@ -134,20 +134,20 @@ def get_real_hdd_info():
     except Exception as e:
         return {"disks": [], "error": str(e)}
 
-# --- HTML 生成函数 ---
+# --- HTML construction helpers ---
 def create_compact_progress_display_html(unique_id_prefix, label_text, current_value, unit, max_value=100, bar_color="dodgerblue", label_color="black", error_msg=None):
     bar_id = f"{unique_id_prefix}-bar-{uuid.uuid4().hex[:8]}"
     text_id = f"{unique_id_prefix}-text-{uuid.uuid4().hex[:8]}"
 
     base_style = "margin-bottom: 4px; padding: 2px; border-radius: 3px; display: flex; align-items: center;"
-    # 调整 label_style: 增加固定宽度 width: 80px (可根据实际最长标签调整) 使标签右对齐
+    # Enforce a consistent label width (80px) so text stays right-aligned.
     label_style = f"font-size: 0.75em; color: #FFFFFF; background-color: transparent; padding: 2px 4px; border-radius: 2px; margin-right: 8px; white-space: nowrap; text-align: right; box-sizing: border-box; width: 80px;"
     bar_outer_style = "background-color: #202020; border-radius: 2px; overflow: hidden; height: 20px; flex-grow: 1;"
     bar_inner_style_template = "width: {0}%; background-color: {1}; height: 100%; text-align: center; color: white; line-height: 20px; font-size: 0.7em; transition: width 0.5s ease-in-out;"
 
     if error_msg:
-        # 错误信息显示也需要调整标签位置
-        # 注意: 如果 label_style 增加了 width, 错误信息的标签也会有固定宽度
+        # Keep the error label aligned with the rest when a width is defined.
+        # Note: setting label_style width also affects this error block.
         return f"""<div style="{base_style} background-color: #404040;">
             <span style="{label_style}">{label_text}:</span> 
             <p style="flex-grow: 1; color: #ffdddd; text-align: center;"><strong>Error</strong> <span style="font-size:0.8em; color: #ff8888;">({error_msg})</span></p>
@@ -196,7 +196,7 @@ def create_compact_progress_display_html(unique_id_prefix, label_text, current_v
     # The JS update logic will need to target bar_id's innerText.
     return html_structure, bar_id, text_id, percentage_value, text_inside_bar # Returning text_inside_bar for JS updates
 
-# --- Gradio 更新生成器函数 ---
+# --- Gradio update stream ---
 def update_floating_monitors_stream():
     # global NVML_INITIALIZED, NVML_AVAILABLE, gpu_handles, nvml # No longer needed for re-init
     # The NVML initialization is now expected to be done at the module level (on import)
@@ -314,25 +314,25 @@ custom_css = """
 
 #log_area_relative_wrapper {
     position: relative;
-    padding: 5px; /* 给内部悬浮元素留出边距 */
+    padding: 5px; /* keep space for the floating monitor overlay */
 }
 
 .floating-monitor-outer-wrapper {
     position: absolute;
-    top: 5px;      /* 距离父元素顶部 5px */
-    right: 20px;     /* 距离父元素右侧 20px */
-    width: 80%;    /* 占据父元素宽度的 70% */
-    height: 70%;   /* 占据父元素高度的 70% */
+    top: 5px;      /* offset 5px from the parent's top */
+    right: 20px;     /* offset 20px from the parent's right edge */
+    width: 80%;    /* occupy roughly 80% of the parent width */
+    height: 70%;   /* occupy roughly 70% of the parent height */
     padding: 5px;
-    # background-color: rgba(50, 50, 50, 0.8); /* 半透明深灰色背景 */
-    /* border: 1px solid #ccc; */ /* 移除边框 */
+    # background-color: rgba(50, 50, 50, 0.8); /* optional semi-transparent dark background */
+    /* border: 1px solid #ccc; */ /* border removed for a cleaner look */
     border-radius: 4px;
-    z-index: 1000;  /* 确保在日志内容之上 */
-    /* box-shadow: 0px 2px 8px rgba(0,0,0,0.15); */ /* 移除阴影 */
-    overflow-y: auto; /* 如果内容超出则显示垂直滚动条 */
-    overflow-x: hidden; /* 通常不需要水平滚动条，避免内容撑开 */
+    z-index: 1000;  /* ensure it sits above the log text */
+    /* box-shadow: 0px 2px 8px rgba(0,0,0,0.15); */ /* shadow intentionally removed */
+    overflow-y: auto; /* show a vertical scrollbar when content overflows */
+    overflow-x: hidden; /* avoid horizontal scrolling to keep layout tight */
 }
-.floating-monitor-style-inner p { /* Style paragraphs inside the compact display */
+.floating-monitor-style-inner p { /* style paragraphs inside the compact display */
     margin-top: 0;
 }
 """
@@ -348,11 +348,11 @@ def cleanup_nvml():
     NVML_INITIALIZED = False
 
 if __name__ == "__main__":
-    print("系统监控模块直接运行测试...")
-    with gr.Blocks(title="系统资源监控测试", theme=gr.themes.Soft(), css=custom_css) as test_demo:
-        gr.Markdown("# 💻 系统资源实时监控 (模块测试)")
+    print("System monitor module standalone test...")
+    with gr.Blocks(title="System Resource Monitor Test", theme=gr.themes.Soft(), css=custom_css) as test_demo:
+        gr.Markdown("# 💻 System Resource Monitor (Module Test)")
         with gr.Group(elem_id="log_area_relative_wrapper"):
-            gr.Textbox(label="模拟日志输出", lines=20, value="模拟日志...\n" * 10, elem_classes="log-display-container")
+            gr.Textbox(label="Simulated Log Output", lines=20, value=("Simulated log...\n" * 10), elem_classes="log-display-container")
             floating_monitor_html_output = gr.HTML(elem_classes="floating-monitor-outer-wrapper")
         test_demo.load(fn=update_floating_monitors_stream,inputs=None,outputs=[floating_monitor_html_output])
     try: test_demo.launch()

@@ -9,15 +9,15 @@ class Huaword:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "text1": ("STRING", {"multiline": True, "dynamicPrompts": True, "tooltip": "我是靓仔1全量字符串"}),
-                "text2": ("STRING", {"multiline": True, "dynamicPrompts": True, "tooltip": "我是靓仔2指定字符串"}),
+                "text1": ("STRING", {"multiline": True, "dynamicPrompts": True, "tooltip": "Full string"}),
+                "text2": ("STRING", {"multiline": True, "dynamicPrompts": True, "tooltip": "Specified string"}),
                 "image1": ("IMAGE",),
                 "image2": ("IMAGE",),
             },
         }
 
     RETURN_TYPES = ("IMAGE",)
-    OUTPUT_TOOLTIPS = ("在字符串中出现了你提到的词则会选在image1，如果没有就image2输出",)
+    OUTPUT_TOOLTIPS = ("If the specified word appears, output image1; otherwise image2.",)
     FUNCTION = "test"
     OUTPUT_NODE = True
     CATEGORY = icons.get("hua_boy_one")
@@ -33,12 +33,11 @@ class Huaword:
         else:
             output_images = image2
         
-        print(f"目标单词 '{text2}' 总共出现了 {total_count} 次")
-        # 添加打印语句
+        print(f"Target word '{text2}' appears {total_count} times in input text")
         return (output_images,)
 
 
-# 浮点数输入节点
+# Float input helper node
 class HuaFloatNode:
     @classmethod
     def INPUT_TYPES(cls):
@@ -46,13 +45,13 @@ class HuaFloatNode:
             "required": {
                 "float_value": ("FLOAT", {
                     "default": 0.0,
-                    "min": -9999999999.0, # 增大最小值
-                    "max": 9999999999.0,  # 增大最大值
+                    "min": -9999999999.0,
+                    "max": 9999999999.0,
                     "step": 0.01,
                     "display": "number", # or "slider"
-                    "tooltip": "输入一个浮点数"
+                    "tooltip": "Enter a float"
                 }),
-                "name": ("STRING", {"multiline": False, "default": "FloatInput", "tooltip": "节点名称"}),
+                "name": ("STRING", {"multiline": False, "default": "FloatInput", "tooltip": "Node name"}),
             }
         }
 
@@ -60,10 +59,10 @@ class HuaFloatNode:
     FUNCTION = "get_float"
     CATEGORY = icons.get("hua_boy_one")
 
-    def get_float(self, float_value, name): # 添加 name 参数
+    def get_float(self, float_value, name):  # name argument retained for compatibility
         return (float_value,)
 
-# 整数输入节点
+# Integer input helper node
 class HuaIntNode:
     @classmethod
     def INPUT_TYPES(cls):
@@ -71,13 +70,13 @@ class HuaIntNode:
             "required": {
                 "int_value": ("INT", {
                     "default": 0,
-                    "min": -9999999999, # 增大最小值
-                    "max": 9999999999,  # 增大最大值
+                    "min": -9999999999,
+                    "max": 9999999999,
                     "step": 1,
                     "display": "number", # or "slider"
-                    "tooltip": "输入一个整数"
+                    "tooltip": "Enter an integer"
                 }),
-                "name": ("STRING", {"multiline": False, "default": "IntInput", "tooltip": "节点名称"}),
+                "name": ("STRING", {"multiline": False, "default": "IntInput", "tooltip": "Node name"}),
             }
         }
 
@@ -85,5 +84,5 @@ class HuaIntNode:
     FUNCTION = "get_int"
     CATEGORY = icons.get("hua_boy_one")
 
-    def get_int(self, int_value, name): # 添加 name 参数
+    def get_int(self, int_value, name):  # name argument retained for compatibility
         return (int_value,)

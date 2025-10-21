@@ -1,146 +1,157 @@
 import gradio as gr
 import os
 import json
+import glob
 import folder_paths
 from datetime import datetime
 
-# 获取 API JSON 文件所在的目录
+# Directory where API JSON files are stored
 API_JSON_DIR = folder_paths.get_output_directory()
+MAX_API_JSON_CHOICES = 500
 
 def get_api_json_files():
-    """获取 API JSON 文件列表及其最后修改时间"""
-    files_with_details = []
+    """Get API JSON file list with last modified time."""
+    detailed_entries = []
     try:
         if not os.path.exists(API_JSON_DIR):
-            print(f"警告: API JSON 目录 {API_JSON_DIR} 未找到。")
-            return files_with_details
+            print(f"Warning: API JSON directory {API_JSON_DIR} not found.")
+            return detailed_entries
 
-        json_files = [f for f in os.listdir(API_JSON_DIR) if f.endswith('.json') and os.path.isfile(os.path.join(API_JSON_DIR, f))]
-        for file_name in json_files:
-            file_path = os.path.join(API_JSON_DIR, file_name)
+        json_pattern = os.path.join(API_JSON_DIR, "**", "*.json")
+        for abs_path in glob.glob(json_pattern, recursive=True):
+            if not os.path.isfile(abs_path):
+                continue
+            rel_path = os.path.relpath(abs_path, API_JSON_DIR)
             try:
-                # 获取文件最后修改时间
-                mtime = os.path.getmtime(file_path)
+                mtime = os.path.getmtime(abs_path)
                 last_modified_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
-                # 获取文件大小
-                size = os.path.getsize(file_path)
-                files_with_details.append((file_name, last_modified_str, f"{size / 1024:.2f} KB"))
-            except Exception as e:
-                print(f"获取文件 {file_name} 详细信息时出错: {e}")
-                files_with_details.append((file_name, "N/A", "N/A"))
-        # 按文件名排序
-        files_with_details.sort(key=lambda x: x[0])
-        return files_with_details
+            except (OSError, ValueError):
+                mtime = 0.0
+                last_modified_str = "N/A"
+            try:
+                size_kb = os.path.getsize(abs_path) / 1024
+            except OSError:
+                size_kb = 0.0
+            detailed_entries.append((rel_path, last_modified_str, f"{size_kb:.2f} KB", mtime))
+
+        if not detailed_entries:
+            return []
+
+        detailed_entries.sort(key=lambda item: (-item[3], item[0]))
+        if len(detailed_entries) > MAX_API_JSON_CHOICES:
+            print(f"Info: Limiting API JSON manager list to the {MAX_API_JSON_CHOICES} most recent files out of {len(detailed_entries)} discovered.")
+        trimmed = detailed_entries[:MAX_API_JSON_CHOICES]
+        return [(path, modified, size) for path, modified, size, _ in trimmed]
     except Exception as e:
-        print(f"获取 API JSON 文件列表时出错: {e}")
+        print(f"Error listing API JSON files: {e}")
         return []
 
 def view_json_content(file_name):
-    """读取并返回指定 JSON 文件的内容"""
+    """Read and return the content of the specified JSON file."""
     if not file_name:
-        return "请先选择一个文件。"
+        return "Please select a file first."
     file_path = os.path.join(API_JSON_DIR, file_name)
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             content = json.load(f)
         return json.dumps(content, indent=2, ensure_ascii=False)
     except FileNotFoundError:
-        return f"错误: 文件 {file_name} 未找到。"
+        return f"Error: file {file_name} not found."
     except json.JSONDecodeError:
-        return f"错误: 文件 {file_name} 不是有效的 JSON 格式。"
+        return f"Error: file {file_name} is not valid JSON."
     except Exception as e:
-        return f"读取文件 {file_name} 时发生错误: {e}"
+        return f"Error reading file {file_name}: {e}"
 
 def delete_json_file(file_name_to_delete, selected_file_in_list):
-    """删除指定的 JSON 文件"""
+    """Delete the specified JSON file."""
     if not file_name_to_delete:
-        gr.Warning("没有选择要删除的文件。")
-        return get_api_json_files(), "请先选择一个文件进行删除。", selected_file_in_list
+        gr.Warning("No file selected to delete.")
+        return get_api_json_files(), "Please select a file to delete.", selected_file_in_list
 
     file_path = os.path.join(API_JSON_DIR, file_name_to_delete)
     try:
         os.remove(file_path)
-        gr.Info(f"文件 {file_name_to_delete} 已成功删除。")
-        # 如果删除的是当前查看的文件，清空内容显示
+        gr.Info(f"File {file_name_to_delete} deleted successfully.")
+        # When the currently viewed file is deleted, clear the preview pane.
         new_content_display = "" if file_name_to_delete == selected_file_in_list else view_json_content(selected_file_in_list)
-        # 更新文件列表，并尝试保持或清除选择
+        # Refresh the file list and keep the previous selection whenever possible.
         new_file_list = get_api_json_files()
         new_selected_file = None
         if selected_file_in_list and selected_file_in_list != file_name_to_delete:
-             # 检查原选中的文件是否还在新列表中
+             # Ensure the previously selected file still exists in the updated list.
             if any(f[0] == selected_file_in_list for f in new_file_list):
                 new_selected_file = selected_file_in_list
 
         return new_file_list, new_content_display, new_selected_file
 
     except FileNotFoundError:
-        gr.Error(f"删除失败: 文件 {file_name_to_delete} 未找到。")
+        gr.Error(f"Delete failed: file {file_name_to_delete} not found.")
     except Exception as e:
-        gr.Error(f"删除文件 {file_name_to_delete} 时发生错误: {e}")
-    # 如果删除失败，返回当前状态
+        gr.Error(f"Error deleting file {file_name_to_delete}: {e}")
+    # Return the existing state when deletion fails.
     return get_api_json_files(), view_json_content(selected_file_in_list), selected_file_in_list
 
 
 def define_api_json_management_ui():
-    """定义 API JSON 管理界面的 Gradio 组件。
-    这个函数应该在一个 gr.Blocks() 上下文或者一个 gr.Tab() 上下文内部被调用。
+    """Define the Gradio UI for managing API JSON workflows.
+    This function should be called within a gr.Blocks() or gr.Tab() context.
     """
-    gr.Markdown("## API JSON 工作流管理")
-    gr.Markdown(f"工作流 JSON 文件存储在目录: `{API_JSON_DIR}`")
+    gr.Markdown("## API JSON Workflow Manager")
+    gr.Markdown(f"Workflow JSON files are stored in: `{API_JSON_DIR}`")
 
     with gr.Row():
         with gr.Column(scale=1):
-            gr.Markdown("### 文件列表")
+            gr.Markdown("### File List")
             selected_json_file_radio = gr.Radio(
-                label="选择工作流文件",
+                label="Select workflow file",
                 choices=[f[0] for f in get_api_json_files()],
                 value=None
             )
-            refresh_files_button = gr.Button("🔄 刷新文件列表")
+            refresh_files_button = gr.Button("🔄 Refresh file list")
             gr.Markdown("---")
-            gr.Markdown("### 文件操作")
-            delete_button = gr.Button("🗑️ 删除选定文件", variant="stop")
+            gr.Markdown("### File Operations")
+            delete_button = gr.Button("🗑️ Delete selected file", variant="stop")
 
-            file_details_display = gr.Markdown("选择一个文件以查看其详细信息和内容。")
-            save_changes_button = gr.Button("💾 保存更改到选定文件")
+            file_details_display = gr.Markdown("Select a file to view its details and contents.")
+            save_changes_button = gr.Button("💾 Save changes to selected file")
 
         with gr.Column(scale=2):
-            gr.Markdown("### 文件内容预览/编辑")
-            json_content_display = gr.Code(label="JSON 内容", language="json", lines=20, interactive=True) # 允许编辑
+            gr.Markdown("### File Content Preview/Edit")
+            json_content_display = gr.Code(label="JSON Content", language="json", lines=20, interactive=True) # Editable
 
 
     def save_json_content(file_name, json_string):
         if not file_name:
-            gr.Warning("没有选择文件，无法保存。")
-            return "没有选择文件，无法保存。"
+            gr.Warning("No file selected; cannot save.")
+            return "No file selected; cannot save."
         
         file_path = os.path.join(API_JSON_DIR, file_name)
         try:
-            # 尝试解析JSON以确保其有效性
+            # Parse to ensure the JSON is valid before writing to disk.
             parsed_json = json.loads(json_string)
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(parsed_json, f, indent=2, ensure_ascii=False)
-            gr.Info(f"文件 {file_name} 已成功保存！")
-            return json.dumps(parsed_json, indent=2, ensure_ascii=False) # 返回格式化后的内容以更新显示
+            gr.Info(f"File {file_name} saved successfully!")
+            return json.dumps(parsed_json, indent=2, ensure_ascii=False)  # return the formatted string so the editor stays in sync
         except json.JSONDecodeError:
-            gr.Error(f"保存失败: 内容不是有效的 JSON 格式。请检查语法。")
-            return json_string # 返回原始字符串，以便用户修正
-        except FileNotFoundError: # 理论上不应发生，因为文件名来自选择
-            gr.Error(f"保存失败: 文件 {file_name} 未找到。")
+            gr.Error(f"Save failed: content is not valid JSON. Please check the syntax.")
+            return json_string  # keep the raw string so the user can fix it
+        except FileNotFoundError:  # should not happen because the name comes from the selection list
+            gr.Error(f"Save failed: file {file_name} not found.")
             return json_string
         except Exception as e:
-            gr.Error(f"保存文件 {file_name} 时发生未知错误: {e}")
+            gr.Error(f"Unknown error saving file {file_name}: {e}")
             return json_string
 
     def on_file_select_or_refresh(selected_file_name):
         if not selected_file_name:
-            return "请选择一个文件。", "选择一个文件以查看其详细信息和内容。"
+            return "Please select a file.", "Select a file to view its details and contents."
         content = view_json_content(selected_file_name)
         all_files = get_api_json_files()
-        details_str = "未找到文件详细信息。"
+        details_str = "File details not found."
         for f_name, f_modified, f_size in all_files:
             if f_name == selected_file_name:
-                details_str = f"**文件名:** {f_name}\n\n**最后修改:** {f_modified}\n\n**大小:** {f_size}"
+                details_str = f"**Filename:** {f_name}\n\n**Last Modified:** {f_modified}\n\n**Size:** {f_size}"
                 break
         return content, details_str
 
@@ -159,7 +170,7 @@ def define_api_json_management_ui():
         elif new_choices_names:
             new_selection_value = new_choices_names[0]
         
-        new_content, new_details = "", "选择一个文件以查看其详细信息和内容。"
+        new_content, new_details = "", "Select a file to view its details and contents."
         if new_selection_value:
             new_content, new_details = on_file_select_or_refresh(new_selection_value)
         return gr.update(choices=new_choices_names, value=new_selection_value), new_content, new_details
@@ -171,49 +182,22 @@ def define_api_json_management_ui():
     )
 
     def handle_delete_and_refresh(file_to_delete, current_selected_in_list):
-        # 调用原始的删除函数
-        # delete_json_file 返回 (new_file_list_tuples, new_content_display_for_main_view, new_selected_file_name_for_main_view)
-        # 但我们需要的是 Radio 的 choices (文件名列表) 和 value (选中的文件名)
-        
-        # 执行删除
-        # 注意：delete_json_file 内部会调用 get_api_json_files() 返回的是元组列表
-        # 我们需要将其转换为文件名列表给 Radio
-        
-        # 这里的逻辑需要调整，因为 delete_json_file 的返回值是 (files_with_details, new_content_display, new_selected_file)
-        # files_with_details 是 [(name, modified, size), ...]
-        # new_selected_file 是一个文件名字符串或 None
-        
-        # 我们直接调用 delete_json_file，然后用它的结果来更新UI
-        # delete_json_file(file_name_to_delete, selected_file_in_list)
-        # outputs=[selected_json_file_radio, json_content_display, selected_json_file_radio]
-        # 第一个 selected_json_file_radio 应该是 gr.update(choices=new_names, value=new_selection)
-        # 第二个 json_content_display 是内容
-        # 第三个 selected_json_file_radio 应该是 gr.update(value=new_selection) -- 但这会覆盖choices，所以不能这么做
-        # 我们需要让 delete_json_file 返回适合直接更新 Radio 的 choices 和 value
-
-        # 重新设计 delete_json_file 的返回，或者在这里处理
-        # 让我们修改 delete_json_file 的返回
-        
-        # 假设 delete_json_file 现在返回:
-        # 1. gr.update(choices=new_radio_choices, value=new_radio_value) for selected_json_file_radio
-        # 2. new_json_content_display
-        # 3. new_file_details_display
-        
-        # 暂时保持原样，在 click 事件中处理转换
-        # delete_json_file 返回 (files_with_details_after_delete, content_str, new_selection_name)
+        # Bridge the delete helper to radio button updates.
+        # delete_json_file returns (files_with_details, content_string, selected_file_name).
+        # Convert that structure into the updates our Gradio controls expect.
         files_after_delete_tuples, new_content_str, new_selected_name = delete_json_file(file_to_delete, current_selected_in_list)
         
         new_radio_choices = [f[0] for f in files_after_delete_tuples]
         
-        # 更新详情
-        new_details_str = "选择一个文件以查看其详细信息和内容。"
+        # Refresh the metadata pane.
+        new_details_str = "Select a file to view its details and contents."
         if new_selected_name:
             for f_name, f_modified, f_size in files_after_delete_tuples:
                 if f_name == new_selected_name:
-                    new_details_str = f"**文件名:** {f_name}\n\n**最后修改:** {f_modified}\n\n**大小:** {f_size}"
+                    new_details_str = f"**Filename:** {f_name}\n\n**Last Modified:** {f_modified}\n\n**Size:** {f_size}"
                     break
-        elif not new_selected_name and new_content_str == "请先选择一个文件。": # 如果没有选中项且内容是提示
-             pass # 保持 details_str 为默认提示
+        elif not new_selected_name and new_content_str == "Please select a file first.":  # fall back to the default prompt
+             pass
 
         return gr.update(choices=new_radio_choices, value=new_selected_name), new_content_str, new_details_str
 
@@ -222,16 +206,16 @@ def define_api_json_management_ui():
         inputs=[selected_json_file_radio, selected_json_file_radio],
         outputs=[selected_json_file_radio, json_content_display, file_details_display]
     )
-    # 不需要 .then() 了，因为 handle_delete_and_refresh 会处理所有更新
+    # No chained .then() is required; handle_delete_and_refresh already returns the updates we need.
 
     save_changes_button.click(
         fn=save_json_content,
-        inputs=[selected_json_file_radio, json_content_display], # 文件名和编辑后的内容
-        outputs=[json_content_display] # 更新显示区域的内容 (例如格式化后的)
+        inputs=[selected_json_file_radio, json_content_display],  # filename and edited content
+        outputs=[json_content_display]  # replace the editor contents (e.g., with formatted JSON)
     )
 
 
-# 如果直接运行此文件，可以启动一个独立的 Gradio 应用进行测试
+# When executed directly, spin up an isolated Gradio app for manual testing.
 if __name__ == "__main__":
     # Mock folder_paths for standalone testing if not in ComfyUI env
     class MockFolderPaths:
@@ -248,8 +232,8 @@ if __name__ == "__main__":
 
     if not hasattr(folder_paths, 'get_output_directory'):
         folder_paths = MockFolderPaths()
-        API_JSON_DIR = folder_paths.get_output_directory() # Re-assign for test
+        API_JSON_DIR = folder_paths.get_output_directory()  # Reassign for local testing
 
-    with gr.Blocks() as demo_test: # 创建一个顶层 Blocks 用于测试
-        define_api_json_management_ui() # 调用修改后的函数
+    with gr.Blocks() as demo_test:  # Build a top-level Blocks app for manual testing
+        define_api_json_management_ui()  # Invoke the UI builder
     demo_test.launch()

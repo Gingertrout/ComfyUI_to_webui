@@ -1,4 +1,3 @@
 icons = {
-    "hua_boy_one": "❤️ 靓仔 ✨",
-
+    "hua_boy_one": "❤️ Handsome Guy ✨",
 }

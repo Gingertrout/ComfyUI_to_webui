@@ -4,75 +4,93 @@ import numpy as np
 from PIL import Image
 import folder_paths
 from .hua_icons import icons
-import json # 导入 json 库
+import json # import json
 
 OUTPUT_DIR = folder_paths.get_output_directory()
-TEMP_DIR = folder_paths.get_temp_directory() # 获取临时目录
+TEMP_DIR = folder_paths.get_temp_directory() # temp directory
 
-#传递到gradio前端的导出节点
+# Output node that passes results to Gradio frontend
 class Hua_Output:
     def __init__(self):
-        self.output_dir = folder_paths.get_output_directory() # 获取输出目录
-        self.type = "output"  # 设置输出类型为 "output"
-        self.prefix_append = "" # 前缀附加字符串，默认为空
-        self.compress_level = 4 # 设置 PNG 压缩级别，默认为 4
+        self.output_dir = folder_paths.get_output_directory() # output dir
+        self.type = "output"
+        self.prefix_append = ""
+        self.compress_level = 4 # PNG compression level
 
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "images": ("IMAGE", {"tooltip": "The images to save."}),  # 需要输入的图像
-                "unique_id": ("STRING", {"default": "default_id", "multiline": False, "tooltip": "Unique ID for this execution provided by Gradio."}), # 添加 unique_id 输入
-                "name": ("STRING", {"multiline": False, "default": "Hua_Output", "tooltip": "节点名称"}),
+                "images": ("IMAGE", {"tooltip": "The images to save."}),
+                "unique_id": ("STRING", {"default": "default_id", "multiline": False, "tooltip": "Unique ID for this execution provided by Gradio."}),
+                "name": ("STRING", {"multiline": False, "default": "Hua_Output", "tooltip": "Node name"}),
             }
         }
 
-    # RETURN_TYPES = () # 不再需要通过 ComfyUI 返回路径，返回空元组
+    # RETURN_TYPES = ()  # no direct path payload returned to ComfyUI
     RETURN_TYPES = ()
-    FUNCTION = "output_gradio" # 定义函数名
+    FUNCTION = "output_gradio"
     OUTPUT_NODE = True
     CATEGORY = icons.get("hua_boy_one")
 
-    def output_gradio(self, images, unique_id, name): # 添加 unique_id 参数
-        image_paths = [] # 初始化一个空列表来存储图片路径
-        filename_prefix = "ComfyUI" + self.prefix_append # 使用固定前缀 "ComfyUI"
+    def output_gradio(self, images, unique_id, name):
+        image_paths = []
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")  # 获取当前时间戳，用于生成唯一的文件名
-        full_output_folder, _, _, subfolder, _ = folder_paths.get_save_image_path(  # 获取完整的输出文件夹路径、文件名、计数器、子文件夹和文件名前缀
-            filename_prefix, self.output_dir, images[0].shape[1], images[0].shape[0]
+        prefix_input = name if isinstance(name, str) else str(name)
+        prefix_input = prefix_input.strip() if prefix_input else ""
+        if not prefix_input or prefix_input.lower() == "none":
+            prefix_input = "ComfyUI"
+        filename_prefix = prefix_input + self.prefix_append
+
+        if images is None or len(images) == 0:
+            print(f"Hua_Output: received no images to save for execution {unique_id}.")
+            os.makedirs(TEMP_DIR, exist_ok=True)
+            temp_file_path = os.path.join(TEMP_DIR, f"{unique_id}.json")
+            try:
+                with open(temp_file_path, 'w', encoding='utf-8') as f:
+                    json.dump({"error": "No images received", "generated_files": []}, f)
+                print(f"Hua_Output: wrote empty result placeholder to {temp_file_path}")
+            except Exception as e:
+                print(f"Hua_Output: failed to write placeholder temp file ({temp_file_path}): {e}")
+            return ()
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        first_image = images[0]
+        full_output_folder, _, _, subfolder, _ = folder_paths.get_save_image_path(
+            filename_prefix, self.output_dir, first_image.shape[1], first_image.shape[0]
         )
 
-        for (batch_number, image) in enumerate(images):# 遍历所有图像
-            i = 255. * image.cpu().numpy() # 将图像数据从 PyTorch 张量转换为 NumPy 数组，并缩放到 0-255 范围
-            img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8)) # 将 NumPy 数组转换为 PIL 图像对象
-            file = f"output_{timestamp}_{batch_number:05}.png" # 固定文件名，使用时间戳生成唯一的文件名
-            image_path_gradio = os.path.join(full_output_folder, file)  # 生成图像路径
-            img.save(os.path.join(full_output_folder, file), compress_level=self.compress_level) # 保存图像到指定路径，并设置压缩级别
-            print(f"打印 output_gradio节点路径及文件名: {image_path_gradio}")  # 打印路径和文件名到终端
-            image_paths.append(image_path_gradio) # 将当前图片路径添加到列表中
+        for (batch_number, image) in enumerate(images):
+            i = 255. * image.cpu().numpy()
+            img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+            file = f"output_{timestamp}_{batch_number:05}.png"
+            image_path_gradio = os.path.join(full_output_folder, file)
+            img.save(os.path.join(full_output_folder, file), compress_level=self.compress_level)
+            print(f"output_gradio wrote image: {image_path_gradio}")
+            image_paths.append(image_path_gradio)
 
-        # 确保临时目录存在
+        # Ensure temp dir exists
         os.makedirs(TEMP_DIR, exist_ok=True)
         
-        # 将图片路径列表写入临时文件
+        # Write image path list to temp file
         temp_file_path = os.path.join(TEMP_DIR, f"{unique_id}.json")
         try:
             with open(temp_file_path, 'w', encoding='utf-8') as f:
                 json.dump(image_paths, f)
-            print(f"图片路径列表已写入临时文件: {temp_file_path}")
-            print(f"临时目录: {TEMP_DIR}")
-            print(f"图片路径列表: {image_paths}")
+            print(f"Image path list written to temp file: {temp_file_path}")
+            print(f"Temp dir: {TEMP_DIR}")
+            print(f"Image paths: {image_paths}")
             
-            # 验证图片文件是否存在
+            # Validate files exist
             for path in image_paths:
                 if not os.path.exists(path):
-                    print(f"错误: 图片文件不存在: {path}")
+                    print(f"Error: image file missing: {path}")
                 else:
-                    print(f"验证: 图片文件存在: {path}")
+                    print(f"OK: image file exists: {path}")
                     
         except Exception as e:
-            print(f"写入临时文件失败 ({temp_file_path}): {e}")
-            print(f"临时目录权限: {os.access(TEMP_DIR, os.W_OK)}")
+            print(f"Failed to write temp file ({temp_file_path}): {e}")
+            print(f"Temp dir writable: {os.access(TEMP_DIR, os.W_OK)}")
 
-        # 不再需要通过 ComfyUI 返回路径
+        # No direct path payload returned; Gradio front-end reads the temp JSON.
         return ()

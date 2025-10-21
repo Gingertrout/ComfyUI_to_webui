@@ -25,7 +25,7 @@ class DeepseekNode:
                     "min": 0.0,
                     "max": 2.0,
                     "step": 0.1,
-                    "tooltip": "创造性，随机性"
+                    "tooltip": "Creativity / randomness"
                 }),
             }
         }

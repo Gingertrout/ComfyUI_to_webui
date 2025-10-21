@@ -9,15 +9,15 @@ class Modelhua:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "text1": ("STRING", {"multiline": True, "dynamicPrompts": True, "tooltip": "我是靓仔1全量字符串"}),
-                "text2": ("STRING", {"multiline": True, "dynamicPrompts": True, "tooltip": "我是靓仔2指定字符串"}),
+                "text1": ("STRING", {"multiline": True, "dynamicPrompts": True, "tooltip": "Full string"}),
+                "text2": ("STRING", {"multiline": True, "dynamicPrompts": True, "tooltip": "Specified string"}),
                 "model1": ("MODEL",),
                 "model2": ("MODEL",),
             },
         }
 
     RETURN_TYPES = ("MODEL",)
-    OUTPUT_TOOLTIPS = ("在字符串中出现了你提到的词则会选在model1，如果没有就model2输出",)
+    OUTPUT_TOOLTIPS = ("If the specified word appears in the string, model1 is selected; otherwise model2.",)
     FUNCTION = "load_model_hua"
     OUTPUT_NODE = True
     CATEGORY = icons.get("hua_boy_one")
@@ -33,14 +33,13 @@ class Modelhua:
         else:
             model_options = model2
         
-        print(f"目标单词 '{text2}' 总共出现了 {total_count} 次")
-        # 添加打印语句
+        print(f"Target word '{text2}' appears {total_count} times in input text")
         return (model_options,)
 
 NODE_CLASS_MAPPINGS = {
-    "小字体说明：我是comfyui_hua_boy的model": Modelhua
+    "small_note_model": Modelhua
 } 
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "小字体说明：我是comfyui_hua_boy的model": "布尔模型Boolean_model"
+    "small_note_model": "Boolean Model"
 }

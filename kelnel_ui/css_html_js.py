@@ -15,29 +15,36 @@ HACKER_CSS = """
     /* border-color: #00ff00 !important; */
 }
 
-/* 调整 Gradio Tab 间距 */
-.tabs > .tab-nav { /* Tab 按钮所在的导航栏 */
-    margin-bottom: 0px !important; /* 移除导航栏下方的外边距 */
-    border-bottom: none !important; /* 移除导航栏下方的边框 (如果存在) */
+/* Adjust Gradio Tab spacing */
+.tabs > .tab-nav { /* Tab button navbar */
+    margin-bottom: 0px !important; /* Remove bottom margin */
+    border-bottom: none !important; /* Remove bottom border if present */
 }
 
-.tabitem { /* Tab 内容区域 */
-    padding-top: 0px !important; /* 大幅减少内容区域的上内边距，留一点点空隙 */
-    margin-top: 0px !important; /* 确保内容区域没有上外边距 */
+.tabitem { /* Tab content area */
+    padding-top: 0px !important; /* Reduce top padding */
+    margin-top: 0px !important; /* Ensure no top margin */
+}
+
+/* Hide ComfyUI node badge toggle button to declutter toolbar */
+button[aria-label*="badge" i],
+button[title*="badge" i],
+button[data-tooltip*="badge" i] {
+    display: none !important;
 }
 """
 
 def get_sponsor_html():
-    # 假设 js/icon.js 相对于当前文件 (css_html_js.py) 的路径
-    # 如果 css_html_js.py 和 gradio_workflow.py 在同一目录，
-    # 并且 js 文件夹也在该目录下，则此相对路径有效。
+    # Assume js/icon.js is relative to this file (css_html_js.py)
+    # If css_html_js.py and gradio_workflow.py are in the same directory and js folder is here, this path works.
     current_script_dir = os.path.dirname(os.path.abspath(__file__))
     js_icon_path = os.path.join(current_script_dir, 'js', 'icon.js')
     base64_data = None
     default_sponsor_info = """
 <div style='text-align: center;'>
-    <h3>感谢您的支持！</h3>
-    <p>无法加载赞助码图像。</p>
+    <h3>Thank you for your support!</h3>
+    <p>Failed to load sponsor code image.</p>
+    
 </div>
 """
     try:
@@ -47,27 +54,27 @@ def get_sponsor_html():
             if match:
                 base64_data = match.group(1)
             else:
-                print(f"警告: 在 {js_icon_path} 中未找到符合格式的 Base64 数据。")
+                print(f"Warning: No matching Base64 data found in {js_icon_path}.")
 
     except FileNotFoundError:
-        print(f"错误: 未找到赞助码图像文件: {js_icon_path}")
+        print(f"Error: Sponsor code image file not found: {js_icon_path}")
     except Exception as e:
-        print(f"读取或解析赞助码图像文件时出错 ({js_icon_path}): {e}")
+        print(f"Error reading or parsing sponsor code file ({js_icon_path}): {e}")
 
     if base64_data:
         sponsor_info = f"""
 <div style='text-align: center;'>
-    <h3>感谢您的支持！</h3>
-    <p>请使用以下方式赞助：</p>
-    <img src='{base64_data}' alt='赞助码' width='512' height='512'>
+    <h3>Thank you for your support!</h3>
+    <p>Please use the code below to sponsor:</p>
+    <img src='{base64_data}' alt='Sponsor Code' width='512' height='512'>
 </div>
 """
     else:
         sponsor_info = default_sponsor_info
     return sponsor_info
 
-# 可以在这里添加 JS 代码的变量或函数，如果需要的话
-# 例如:
+# Placeholder: add additional JavaScript variables or helpers here if needed
+# For example:
 # MY_JS_CODE = """
 # console.log("Hello from JS!");
 # """

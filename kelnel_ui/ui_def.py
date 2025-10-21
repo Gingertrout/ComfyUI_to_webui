@@ -442,12 +442,12 @@ def get_workflow_defaults_and_visibility(json_file, output_dir_path, current_res
         "negative_prompt_nodes": []
     }
 
-    if not json_file or not os.path.exists(os.path.join(output_dir_path, json_file)):
+    full_path = os.path.join(output_dir_path, json_file) if json_file else None
+    if not full_path or not os.path.isfile(full_path):
         print(f"Invalid or missing JSON file: {json_file}")
         return defaults
 
-    json_path = os.path.join(output_dir_path, json_file)
-    prompt = load_prompt_from_file(json_path)
+    prompt = load_prompt_from_file(full_path)
     if not isinstance(prompt, dict) or not prompt:
         print(f"Error: Workflow prompt data unavailable for {json_file}.")
         return defaults
@@ -703,7 +703,6 @@ def get_workflow_defaults_and_visibility(json_file, output_dir_path, current_res
             "refine_mask": _to_bool(inputs.get("refine_mask", False), False),
         })
     
-    print(f"Workflow defaults and visibility for {json_file}: {json.dumps(defaults, indent=2, ensure_ascii=False)}")
     return defaults
 
 # --- Plugin Settings Management ---

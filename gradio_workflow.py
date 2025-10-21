@@ -2430,6 +2430,7 @@ with gr.Blocks(css=combined_css) as demo:
                                 fallback_kwargs["sources"] = ["upload", "clipboard"]
                             input_image = gr.Image(**fallback_kwargs)
                         upload_to_photopea_button = gr.Button("🎨 Send to Photopea", variant="secondary", size="sm")
+                        upload_photopea_js_trigger = gr.HTML("", visible=False)
 
                     with gr.Accordion("Upload Video", open=False, visible=False) as video_accordion:
                         video_kwargs = {
@@ -2652,19 +2653,6 @@ with gr.Blocks(css=combined_css) as demo:
                             ])
                     mask_generator_notice = gr.Markdown(MASK_GENERATOR_NOTICE_TEXT, visible=False)
 
-                    with gr.Accordion("Live Logs (ComfyUI)", open=False, elem_classes="log-display-container"):
-                        with gr.Group(elem_id="log_area_relative_wrapper"):
-                            log_display = gr.Textbox(
-                                label="Logs",
-                                lines=20,
-                                max_lines=20,
-                                autoscroll=True,
-                                interactive=False,
-                                show_copy_button=True,
-                                elem_classes="log-display-container"
-                            )
-                            floating_monitor_html_output = gr.HTML(elem_classes="floating-monitor-outer-wrapper")
-
                 with gr.Column(scale=5, min_width=640, elem_classes=["hua-pane", "hua-pane-right"]):
                     with gr.Tabs(elem_id="main_output_tabs") as main_output_tabs_component:
                         with gr.Tab("Results & Preview", id="tab_generate_result"):
@@ -2681,6 +2669,7 @@ with gr.Blocks(css=combined_css) as demo:
                                     with gr.Row():
                                         send_to_upload_button = gr.Button("📤 Send to Upload", size="sm", variant="secondary")
                                         send_to_photopea_button = gr.Button("🎨 Send to Photopea", size="sm", variant="secondary")
+                                    photopea_js_trigger = gr.HTML("", visible=False)
                                     video_output_kwargs = {
                                         "label": "Video Results",
                                         "height": 720,
@@ -2724,6 +2713,19 @@ with gr.Blocks(css=combined_css) as demo:
                 photopea_import_box = gr.Textbox(visible=False, elem_id="photopea-import-data")
         with gr.TabItem("Settings", id="tab_settings"):
             with gr.Column():
+                with gr.Accordion("Live Logs (ComfyUI)", open=False, elem_classes="log-display-container"):
+                    with gr.Group(elem_id="log_area_relative_wrapper"):
+                        log_display = gr.Textbox(
+                            label="Logs",
+                            lines=20,
+                            max_lines=20,
+                            autoscroll=True,
+                            interactive=False,
+                            show_copy_button=True,
+                            elem_classes="log-display-container"
+                        )
+                        floating_monitor_html_output = gr.HTML(elem_classes="floating-monitor-outer-wrapper")
+
                 gr.Markdown("## ComfyUI Control")
                 gr.Markdown("Restart ComfyUI or interrupt the queue worker.")
                 with gr.Row():
@@ -3324,16 +3326,44 @@ with gr.Blocks(css=combined_css) as demo:
     def send_selected_to_photopea(photopea_data):
         """Send selected gallery image to Photopea."""
         if not photopea_data:
-            return gr.update(value="Please select an image from the gallery first.")
+            return gr.update(value="Please select an image from the gallery first."), gr.update()
         log_message("[FORWARD] Sending selected image to Photopea.")
-        return gr.update(value="Image sent to Photopea. Switch to the Photopea tab to edit.")
+        # Escape the data for JavaScript (replace quotes and backslashes)
+        escaped_data = photopea_data.replace('\\', '\\\\').replace('"', '\\"')
+        # Trigger JavaScript to open in Photopea
+        js_trigger = f"""<script>
+        (function() {{
+            const dataUrl = "{escaped_data}";
+            if (window.huaPhotopeaBridge && window.huaPhotopeaBridge.open) {{
+                window.huaPhotopeaBridge.open(dataUrl, "selected_image.png");
+                console.log("[FORWARD] Triggered Photopea bridge - data length:", dataUrl.length);
+            }} else {{
+                console.warn("[FORWARD] Photopea bridge not available");
+            }}
+        }})();
+        </script>"""
+        return gr.update(value="Image sent to Photopea. Switch to the Photopea tab to edit."), gr.update(value=js_trigger)
 
     def send_upload_to_photopea(photopea_data):
         """Send current upload image to Photopea."""
         if not photopea_data:
-            return gr.update(value="Please upload an image first.")
+            return gr.update(value="Please upload an image first."), gr.update()
         log_message("[FORWARD] Sending upload image to Photopea.")
-        return gr.update(value="Image sent to Photopea. Switch to the Photopea tab to edit.")
+        # Escape the data for JavaScript
+        escaped_data = photopea_data.replace('\\', '\\\\').replace('"', '\\"')
+        # Trigger JavaScript to open in Photopea
+        js_trigger = f"""<script>
+        (function() {{
+            const dataUrl = "{escaped_data}";
+            if (window.huaPhotopeaBridge && window.huaPhotopeaBridge.open) {{
+                window.huaPhotopeaBridge.open(dataUrl, "upload_image.png");
+                console.log("[FORWARD] Triggered Photopea bridge - data length:", dataUrl.length);
+            }} else {{
+                console.warn("[FORWARD] Photopea bridge not available");
+            }}
+        }})();
+        </script>"""
+        return gr.update(value="Image sent to Photopea. Switch to the Photopea tab to edit."), gr.update(value=js_trigger)
 
     def _format_bytes_from_kb(kilobytes: float | int | None) -> str:
         try:
@@ -3724,13 +3754,13 @@ with gr.Blocks(css=combined_css) as demo:
     send_to_photopea_button.click(
         fn=send_selected_to_photopea,
         inputs=[photopea_image_data_state],
-        outputs=[photopea_status]
+        outputs=[photopea_status, photopea_js_trigger]
     )
 
     upload_to_photopea_button.click(
         fn=send_upload_to_photopea,
         inputs=[photopea_image_data_state],
-        outputs=[photopea_status]
+        outputs=[photopea_status, upload_photopea_js_trigger]
     )
 
     photopea_sync_events = [getattr(input_image, "change", None), getattr(input_image, "upload", None)]
