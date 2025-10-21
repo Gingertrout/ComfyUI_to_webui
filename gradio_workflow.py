@@ -273,13 +273,38 @@ PHOTOPEA_EMBED_HTML = """
     return app ? app.querySelector(importSelector) : null;
   };
 
-  const postToPhotopea = (payload) => {
+  const postToPhotopea = async (message) => {
     if (!iframe || !iframe.contentWindow) {
       console.warn("Photopea frame not ready");
-      return false;
+      return null;
     }
-    iframe.contentWindow.postMessage(payload, "*");
-    return true;
+
+    // Create a promise to wait for Photopea's response
+    return new Promise((resolve, reject) => {
+      const responses = [];
+      const photopeaMessageHandle = (response) => {
+        responses.push(response.data);
+        // Photopea returns the payload data first, then sends "done"
+        if (response.data === "done") {
+          window.removeEventListener("message", photopeaMessageHandle);
+          resolve(responses);
+        }
+      };
+
+      // Listen for Photopea's response
+      window.addEventListener("message", photopeaMessageHandle);
+
+      // Send the command to Photopea
+      iframe.contentWindow.postMessage(message, "*");
+
+      // Timeout after 10 seconds
+      setTimeout(() => {
+        window.removeEventListener("message", photopeaMessageHandle);
+        if (responses.length === 0) {
+          reject(new Error("Photopea response timeout"));
+        }
+      }, 10000);
+    });
   };
   const getDataSource = () => {
     const app = window.gradioApp ? window.gradioApp() : document;
@@ -304,27 +329,66 @@ PHOTOPEA_EMBED_HTML = """
     }
   };
 
+  // Helper to convert ArrayBuffer to base64
+  const arrayBufferToBase64 = (buffer) => {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    for (let i = 0; i < bytes.byteLength; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  };
+
   window.huaPhotopeaBridge = {
-    open: (dataUrl, name) => {
+    open: async (dataUrl, name) => {
       console.log("[Photopea] Opening image in Photopea:", name);
       if (!dataUrl) {
         console.warn("[Photopea] No image data provided to Photopea.");
         return null;
       }
-      if (!postToPhotopea({ type: "open", data: dataUrl, name: name || "gradio.png" })) {
-        console.warn("[Photopea] Failed to post to Photopea.");
-      } else {
+
+      try {
+        // Use Photopea's actual API command: app.open("data_url", null, asNewDocument)
+        // asNewDocument=false means add as layer if document exists
+        const command = `app.open("${dataUrl}", null, false);`;
+        await postToPhotopea(command);
         console.log("[Photopea] Successfully sent image to Photopea");
+        updateDataStore(dataUrl);
+        return dataUrl;
+      } catch (err) {
+        console.error("[Photopea] Failed to open image:", err);
+        return null;
       }
-      updateDataStore(dataUrl);
-      return dataUrl;
     },
-    requestExport: (name, format) => {
+    requestExport: async (name, format) => {
       console.log("[Photopea] Requesting export from Photopea:", name, format);
-      if (!postToPhotopea({ type: "save", name: name || "photopea_export.png", format: format || "png" })) {
-        console.warn("[Photopea] Failed to request export from Photopea.");
+      try {
+        // Use Photopea's actual API command to export
+        const command = 'app.activeDocument.saveToOE("png");';
+        const responses = await postToPhotopea(command);
+
+        // First element of responses is the ArrayBuffer with image data
+        if (responses && responses[0] instanceof ArrayBuffer) {
+          const base64Data = arrayBufferToBase64(responses[0]);
+          const dataUrl = `data:image/png;base64,${base64Data}`;
+
+          // Deliver the exported image back to Gradio
+          const delivered = window.huaPhotopeaBridge.deliver({
+            name: name || "photopea_export.png",
+            data: dataUrl,
+            timestamp: Date.now()
+          });
+
+          console.log("[Photopea] Export successful, delivered:", delivered);
+          return dataUrl;
+        } else {
+          console.warn("[Photopea] Unexpected response format from export");
+          return null;
+        }
+      } catch (err) {
+        console.error("[Photopea] Failed to export:", err);
+        return null;
       }
-      return null;
     },
     deliver: (payload) => {
       try {
@@ -349,22 +413,7 @@ PHOTOPEA_EMBED_HTML = """
     }
   };
 
-  window.addEventListener("message", (event) => {
-    if (!event?.data) { return; }
-    const data = event.data;
-    console.log("[Photopea] Received message:", data.type, data);
-    if (data.type === "export" && data.data) {
-      console.log("[Photopea] Export received, delivering to Gradio...");
-      const delivered = window.huaPhotopeaBridge.deliver({
-        name: data.name || "photopea.png",
-        data: data.data,
-        width: data.width,
-        height: data.height,
-        timestamp: Date.now()
-      });
-      console.log("[Photopea] Delivery result:", delivered);
-    }
-  });
+  // Note: Message handling for Photopea responses is now done in postToPhotopea's promise
 
   const attachButtonHandlers = () => {
     const app = window.gradioApp ? window.gradioApp() : document;
@@ -372,21 +421,46 @@ PHOTOPEA_EMBED_HTML = """
     const sendButton = app.querySelector(sendButtonSelector);
     if (sendButton && !sendButton.dataset.huaPhotopeaBound) {
       sendButton.dataset.huaPhotopeaBound = "1";
-      sendButton.addEventListener("click", () => {
+      sendButton.addEventListener("click", async () => {
         const dataInput = getDataSource();
         const dataUrl = dataInput ? dataInput.value : null;
         if (!dataUrl) {
           console.warn("[Photopea] No encoded image available to send.");
           return;
         }
-        postToPhotopea({ type: "open", data: dataUrl, name: "gradio.png" });
+        // Use Photopea API to open the image
+        try {
+          const command = `app.open("${dataUrl}", null, false);`;
+          await postToPhotopea(command);
+          console.log("[Photopea] Image sent to Photopea");
+        } catch (err) {
+          console.error("[Photopea] Failed to send image:", err);
+        }
       });
     }
     const fetchButton = app.querySelector(fetchButtonSelector);
     if (fetchButton && !fetchButton.dataset.huaPhotopeaBound) {
       fetchButton.dataset.huaPhotopeaBound = "1";
-      fetchButton.addEventListener("click", () => {
-        postToPhotopea({ type: "save", name: "photopea_export.png", format: "png" });
+      fetchButton.addEventListener("click", async () => {
+        // Use Photopea API to export the image
+        try {
+          const command = 'app.activeDocument.saveToOE("png");';
+          const responses = await postToPhotopea(command);
+
+          if (responses && responses[0] instanceof ArrayBuffer) {
+            const base64Data = arrayBufferToBase64(responses[0]);
+            const dataUrl = `data:image/png;base64,${base64Data}`;
+
+            // Deliver to Gradio
+            window.huaPhotopeaBridge.deliver({
+              name: "photopea_export.png",
+              data: dataUrl,
+              timestamp: Date.now()
+            });
+          }
+        } catch (err) {
+          console.error("[Photopea] Failed to fetch from Photopea:", err);
+        }
       });
     }
   };
