@@ -3433,25 +3433,37 @@ with gr.Blocks(css=combined_css) as demo:
         """Send selected gallery image to Photopea."""
         if not photopea_data:
             return gr.update(value="Please select an image from the gallery first."), gr.update(), gr.update()
-        log_message("[FORWARD] Sending selected image to Photopea.")
+        log_message(f"[FORWARD] Sending selected image to Photopea (data length: {len(photopea_data) if photopea_data else 0}).")
 
         # Trigger JavaScript to open in Photopea
         js_trigger = """<script>
+        console.log("[FORWARD-JS] Script trigger executed");
         (function() {
             setTimeout(function() {
+                console.log("[FORWARD-JS] Timeout fired");
                 const dataInput = (window.gradioApp ? window.gradioApp() : document).querySelector('#hua-photopea-data-store textarea');
-                if (!dataInput || !dataInput.value) {
-                    console.warn("[FORWARD] No data in photopea data store");
+                console.log("[FORWARD-JS] Data input element:", dataInput);
+                if (!dataInput) {
+                    console.error("[FORWARD] Could not find #hua-photopea-data-store textarea");
+                    alert("Error: Photopea data store not found");
                     return;
                 }
                 const dataUrl = dataInput.value;
-                console.log("[FORWARD] Sending to Photopea, length:", dataUrl.length);
+                console.log("[FORWARD-JS] Data URL length:", dataUrl ? dataUrl.length : 0);
+                if (!dataUrl) {
+                    console.warn("[FORWARD] No data in photopea data store");
+                    alert("No image data available. Please upload or generate an image first.");
+                    return;
+                }
 
+                console.log("[FORWARD-JS] Checking for huaPhotopeaBridge:", window.huaPhotopeaBridge);
                 if (window.huaPhotopeaBridge && window.huaPhotopeaBridge.open) {
+                    console.log("[FORWARD] Calling huaPhotopeaBridge.open");
                     window.huaPhotopeaBridge.open(dataUrl, false);
-                    console.log("[FORWARD] Sent to Photopea");
+                    console.log("[FORWARD] Called huaPhotopeaBridge.open");
                 } else {
-                    console.warn("[FORWARD] Photopea bridge not available");
+                    console.error("[FORWARD] Photopea bridge not available. window.huaPhotopeaBridge =", window.huaPhotopeaBridge);
+                    alert("Error: Photopea not loaded. Please switch to the Photopea tab first.");
                 }
             }, 200);
         })();
@@ -3462,25 +3474,37 @@ with gr.Blocks(css=combined_css) as demo:
         """Send current upload image to Photopea."""
         if not photopea_data:
             return gr.update(value="Please upload an image first."), gr.update(), gr.update()
-        log_message("[FORWARD] Sending upload image to Photopea.")
+        log_message(f"[FORWARD] Sending upload image to Photopea (data length: {len(photopea_data) if photopea_data else 0}).")
 
         # Trigger JavaScript to open in Photopea
         js_trigger = """<script>
+        console.log("[FORWARD-JS UPLOAD] Script trigger executed");
         (function() {
             setTimeout(function() {
+                console.log("[FORWARD-JS UPLOAD] Timeout fired");
                 const dataInput = (window.gradioApp ? window.gradioApp() : document).querySelector('#hua-photopea-data-store textarea');
-                if (!dataInput || !dataInput.value) {
-                    console.warn("[FORWARD] No data in photopea data store");
+                console.log("[FORWARD-JS UPLOAD] Data input element:", dataInput);
+                if (!dataInput) {
+                    console.error("[FORWARD UPLOAD] Could not find #hua-photopea-data-store textarea");
+                    alert("Error: Photopea data store not found");
                     return;
                 }
                 const dataUrl = dataInput.value;
-                console.log("[FORWARD] Sending to Photopea, length:", dataUrl.length);
+                console.log("[FORWARD-JS UPLOAD] Data URL length:", dataUrl ? dataUrl.length : 0);
+                if (!dataUrl) {
+                    console.warn("[FORWARD UPLOAD] No data in photopea data store");
+                    alert("No image data available. Please upload an image first.");
+                    return;
+                }
 
+                console.log("[FORWARD-JS UPLOAD] Checking for huaPhotopeaBridge:", window.huaPhotopeaBridge);
                 if (window.huaPhotopeaBridge && window.huaPhotopeaBridge.open) {
+                    console.log("[FORWARD UPLOAD] Calling huaPhotopeaBridge.open");
                     window.huaPhotopeaBridge.open(dataUrl, false);
-                    console.log("[FORWARD] Sent to Photopea");
+                    console.log("[FORWARD UPLOAD] Called huaPhotopeaBridge.open");
                 } else {
-                    console.warn("[FORWARD] Photopea bridge not available");
+                    console.error("[FORWARD UPLOAD] Photopea bridge not available. window.huaPhotopeaBridge =", window.huaPhotopeaBridge);
+                    alert("Error: Photopea not loaded. Please switch to the Photopea tab first.");
                 }
             }, 200);
         })();
