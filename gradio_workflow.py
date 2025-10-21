@@ -3898,15 +3898,67 @@ with gr.Blocks(css=combined_css) as demo:
     )
 
     send_to_photopea_button.click(
-        fn=send_selected_to_photopea,
+        fn=lambda data: (
+            gr.update(value="Sending to Photopea..."),
+            gr.update(value=data)
+        ),
         inputs=[photopea_image_data_state],
-        outputs=[photopea_status, photopea_js_trigger, photopea_data_bus]
+        outputs=[photopea_status, photopea_data_bus],
+        js="""
+        () => {
+            console.log("[PHOTOPEA-CLICK] Send to Photopea button clicked");
+            setTimeout(() => {
+                const dataInput = (window.gradioApp ? window.gradioApp() : document).querySelector('#hua-photopea-data-store textarea');
+                console.log("[PHOTOPEA-CLICK] Data input:", dataInput);
+                if (!dataInput || !dataInput.value) {
+                    alert("No image data found. Please upload or generate an image first.");
+                    return;
+                }
+                const dataUrl = dataInput.value;
+                console.log("[PHOTOPEA-CLICK] Data length:", dataUrl.length);
+
+                if (window.huaPhotopeaBridge && window.huaPhotopeaBridge.open) {
+                    console.log("[PHOTOPEA-CLICK] Calling huaPhotopeaBridge.open");
+                    window.huaPhotopeaBridge.open(dataUrl, false);
+                } else {
+                    console.error("[PHOTOPEA-CLICK] Photopea bridge not available");
+                    alert("Photopea not loaded. Please switch to the Photopea tab first.");
+                }
+            }, 100);
+        }
+        """
     )
 
     upload_to_photopea_button.click(
-        fn=send_upload_to_photopea,
+        fn=lambda data: (
+            gr.update(value="Sending to Photopea..."),
+            gr.update(value=data)
+        ),
         inputs=[photopea_image_data_state],
-        outputs=[photopea_status, upload_photopea_js_trigger, photopea_data_bus]
+        outputs=[photopea_status, photopea_data_bus],
+        js="""
+        () => {
+            console.log("[PHOTOPEA-UPLOAD-CLICK] Upload Send to Photopea button clicked");
+            setTimeout(() => {
+                const dataInput = (window.gradioApp ? window.gradioApp() : document).querySelector('#hua-photopea-data-store textarea');
+                console.log("[PHOTOPEA-UPLOAD-CLICK] Data input:", dataInput);
+                if (!dataInput || !dataInput.value) {
+                    alert("No image data found. Please upload an image first.");
+                    return;
+                }
+                const dataUrl = dataInput.value;
+                console.log("[PHOTOPEA-UPLOAD-CLICK] Data length:", dataUrl.length);
+
+                if (window.huaPhotopeaBridge && window.huaPhotopeaBridge.open) {
+                    console.log("[PHOTOPEA-UPLOAD-CLICK] Calling huaPhotopeaBridge.open");
+                    window.huaPhotopeaBridge.open(dataUrl, false);
+                } else {
+                    console.error("[PHOTOPEA-UPLOAD-CLICK] Photopea bridge not available");
+                    alert("Photopea not loaded. Please switch to the Photopea tab first.");
+                }
+            }, 100);
+        }
+        """
     )
 
     photopea_sync_events = [getattr(input_image, "change", None), getattr(input_image, "upload", None)]
