@@ -255,78 +255,31 @@ body[data-hua-theme="light"] .log-display-container h4 {
 
 PHOTOPEA_EMBED_HTML = """
 <div id="photopea-integration-wrapper" style="height:720px; border:1px solid var(--block-border-color,#444); border-radius:6px; overflow:hidden;">
-  <iframe id="photopea-iframe" src="https://www.photopea.com/" style="width:100%;height:100%;border:0;" allow="clipboard-read; clipboard-write"></iframe>
+  <iframe id="photopea-iframe" src="https://www.photopea.com/" style="width:100%;height:100%;border:0;" allow="clipboard-read; clipboard-write" onload="if(window.onPhotopeaLoaded) window.onPhotopeaLoaded(this);"></iframe>
 </div>
 <script>
 (function(){
-  const wrapper = document.getElementById("photopea-integration-wrapper");
-  if (!wrapper || wrapper.dataset.initialized) { return; }
-  wrapper.dataset.initialized = "1";
-  const iframe = document.getElementById("photopea-iframe");
+  var photopeaWindow = null;
+  var photopeaIframe = null;
+
+  // Called when iframe loads
+  window.onPhotopeaLoaded = function(iframe) {
+    console.log("[Photopea] iFrame loaded");
+    photopeaWindow = iframe.contentWindow;
+    photopeaIframe = iframe;
+  };
+
   const importSelector = '#photopea-import-data textarea';
   const dataSelector = '#hua-photopea-data-store textarea';
-  const sendButtonSelector = '#hua-photopea-send button';
-  const fetchButtonSelector = '#hua-photopea-fetch button';
 
   const getImportBox = () => {
-    const app = window.gradioApp ? window.gradioApp() : null;
+    const app = window.gradioApp ? window.gradioApp() : document;
     return app ? app.querySelector(importSelector) : null;
   };
 
-  const postToPhotopea = async (message) => {
-    if (!iframe || !iframe.contentWindow) {
-      console.warn("Photopea frame not ready");
-      return null;
-    }
-
-    // Create a promise to wait for Photopea's response
-    return new Promise((resolve, reject) => {
-      const responses = [];
-      const photopeaMessageHandle = (response) => {
-        responses.push(response.data);
-        // Photopea returns the payload data first, then sends "done"
-        if (response.data === "done") {
-          window.removeEventListener("message", photopeaMessageHandle);
-          resolve(responses);
-        }
-      };
-
-      // Listen for Photopea's response
-      window.addEventListener("message", photopeaMessageHandle);
-
-      // Send the command to Photopea
-      iframe.contentWindow.postMessage(message, "*");
-
-      // Timeout after 10 seconds
-      setTimeout(() => {
-        window.removeEventListener("message", photopeaMessageHandle);
-        if (responses.length === 0) {
-          reject(new Error("Photopea response timeout"));
-        }
-      }, 10000);
-    });
-  };
   const getDataSource = () => {
     const app = window.gradioApp ? window.gradioApp() : document;
-    if (!app) { return null; }
-    return app.querySelector(dataSelector);
-  };
-  const dispatchValueChange = (element) => {
-    if (!element) { return; }
-    ["input", "change"].forEach((eventName) => {
-      try {
-        element.dispatchEvent(new Event(eventName, { bubbles: true }));
-      } catch (err) {
-        console.warn("Failed to dispatch", eventName, err);
-      }
-    });
-  };
-  const updateDataStore = (value) => {
-    const dataInput = getDataSource();
-    if (dataInput) {
-      dataInput.value = value || "";
-      dispatchValueChange(dataInput);
-    }
+    return app ? app.querySelector(dataSelector) : null;
   };
 
   // Helper to convert ArrayBuffer to base64
@@ -339,136 +292,149 @@ PHOTOPEA_EMBED_HTML = """
     return btoa(binary);
   };
 
-  window.huaPhotopeaBridge = {
-    open: async (dataUrl, name) => {
-      console.log("[Photopea] Opening image in Photopea:", name);
-      if (!dataUrl) {
-        console.warn("[Photopea] No image data provided to Photopea.");
-        return null;
-      }
+  // Posts a message and receives back a promise
+  async function postMessageToPhotopea(message) {
+    if (!photopeaWindow) {
+      console.warn("[Photopea] Window not ready");
+      return null;
+    }
 
-      try {
-        // Use Photopea's actual API command: app.open("data_url", null, asNewDocument)
-        // asNewDocument=false means add as layer if document exists
-        const command = `app.open("${dataUrl}", null, false);`;
-        await postToPhotopea(command);
-        console.log("[Photopea] Successfully sent image to Photopea");
-        updateDataStore(dataUrl);
-        return dataUrl;
-      } catch (err) {
+    return new Promise(function (resolve, reject) {
+      var responses = [];
+      var photopeaMessageHandle = function (response) {
+        responses.push(response.data);
+        // Photopea returns data first, then "done"
+        if (response.data == "done") {
+          window.removeEventListener("message", photopeaMessageHandle);
+          resolve(responses);
+        }
+      };
+      // Add listener for response
+      window.addEventListener("message", photopeaMessageHandle);
+
+      // Set timeout
+      setTimeout(() => {
+        window.removeEventListener("message", photopeaMessageHandle);
+        if (responses.length === 0) {
+          reject(new Error("Photopea timeout"));
+        }
+      }, 10000);
+
+      // Send message
+      photopeaWindow.postMessage(message, "*");
+    });
+  }
+
+  // Helper to open image in Photopea
+  function openImageInPhotopea(dataUrl, asNewDocument) {
+    if (!dataUrl) {
+      console.warn("[Photopea] No image data provided");
+      return;
+    }
+    if (!photopeaWindow) {
+      console.warn("[Photopea] Photopea not loaded yet");
+      return;
+    }
+
+    console.log("[Photopea] Opening image, length:", dataUrl.length);
+    const command = `app.open("${dataUrl}", null, ${asNewDocument === true});`;
+    postMessageToPhotopea(command)
+      .then(() => {
+        console.log("[Photopea] Image opened successfully");
+      })
+      .catch((err) => {
         console.error("[Photopea] Failed to open image:", err);
-        return null;
-      }
-    },
-    requestExport: async (name, format) => {
-      console.log("[Photopea] Requesting export from Photopea:", name, format);
-      try {
-        // Use Photopea's actual API command to export
-        const command = 'app.activeDocument.saveToOE("png");';
-        const responses = await postToPhotopea(command);
+      });
+  }
 
-        // First element of responses is the ArrayBuffer with image data
-        if (responses && responses[0] instanceof ArrayBuffer) {
-          const base64Data = arrayBufferToBase64(responses[0]);
-          const dataUrl = `data:image/png;base64,${base64Data}`;
+  // Helper to export from Photopea
+  function getImageFromPhotopea() {
+    if (!photopeaWindow) {
+      console.warn("[Photopea] Photopea not loaded yet");
+      return;
+    }
 
-          // Deliver the exported image back to Gradio
-          const delivered = window.huaPhotopeaBridge.deliver({
-            name: name || "photopea_export.png",
+    console.log("[Photopea] Requesting export");
+    const saveMessage = 'app.activeDocument.saveToOE("png");';
+
+    postMessageToPhotopea(saveMessage)
+      .then((resultArray) => {
+        if (!resultArray || !resultArray[0]) {
+          console.warn("[Photopea] No data returned");
+          return;
+        }
+
+        // Convert ArrayBuffer to base64
+        const base64Png = arrayBufferToBase64(resultArray[0]);
+        const dataUrl = `data:image/png;base64,${base64Png}`;
+
+        // Deliver to Gradio import box
+        const importBox = getImportBox();
+        if (importBox) {
+          const payload = JSON.stringify({
+            name: "photopea_export.png",
             data: dataUrl,
             timestamp: Date.now()
           });
-
-          console.log("[Photopea] Export successful, delivered:", delivered);
-          return dataUrl;
+          importBox.value = payload;
+          importBox.dispatchEvent(new Event('input', { bubbles: true }));
+          importBox.dispatchEvent(new Event('change', { bubbles: true }));
+          console.log("[Photopea] Export delivered to Gradio");
         } else {
-          console.warn("[Photopea] Unexpected response format from export");
-          return null;
+          console.warn("[Photopea] Import box not found");
         }
-      } catch (err) {
-        console.error("[Photopea] Failed to export:", err);
-        return null;
-      }
-    },
-    deliver: (payload) => {
-      try {
-        console.log("[Photopea] Attempting to deliver payload to Gradio");
-        const importBox = getImportBox();
-        if (!importBox) {
-          console.warn("[Photopea] Unable to locate Photopea import textbox with selector:", importSelector);
-          return false;
-        }
-        console.log("[Photopea] Found import textbox:", importBox);
-        const serialized = typeof payload === "string" ? payload : JSON.stringify(payload || {});
-        console.log("[Photopea] Setting value (length:", serialized.length, ")");
-        importBox.value = serialized;
-        dispatchValueChange(importBox);
-        updateDataStore(serialized);
-        console.log("[Photopea] Successfully delivered payload to Gradio");
-        return true;
-      } catch (err) {
-        console.error("[Photopea] Failed to deliver payload to Gradio import box", err);
-        return false;
-      }
-    }
+      })
+      .catch((err) => {
+        console.error("[Photopea] Export failed:", err);
+      });
+  }
+
+  window.huaPhotopeaBridge = {
+    open: openImageInPhotopea,
+    getImage: getImageFromPhotopea
   };
 
-  // Note: Message handling for Photopea responses is now done in postToPhotopea's promise
-
+  // Attach button handlers when buttons appear in DOM
   const attachButtonHandlers = () => {
     const app = window.gradioApp ? window.gradioApp() : document;
     if (!app) { return; }
-    const sendButton = app.querySelector(sendButtonSelector);
-    if (sendButton && !sendButton.dataset.huaPhotopeaBound) {
-      sendButton.dataset.huaPhotopeaBound = "1";
-      sendButton.addEventListener("click", async () => {
+
+    // "Send to Photopea" button handler
+    const sendButton = app.querySelector('#hua-photopea-send button');
+    if (sendButton && !sendButton.dataset.photopeaBound) {
+      sendButton.dataset.photopeaBound = "1";
+      sendButton.addEventListener("click", () => {
         const dataInput = getDataSource();
         const dataUrl = dataInput ? dataInput.value : null;
-        if (!dataUrl) {
-          console.warn("[Photopea] No encoded image available to send.");
-          return;
-        }
-        // Use Photopea API to open the image
-        try {
-          const command = `app.open("${dataUrl}", null, false);`;
-          await postToPhotopea(command);
-          console.log("[Photopea] Image sent to Photopea");
-        } catch (err) {
-          console.error("[Photopea] Failed to send image:", err);
+        if (dataUrl) {
+          console.log("[Photopea] Send button clicked");
+          openImageInPhotopea(dataUrl, false);
+        } else {
+          console.warn("[Photopea] No data to send");
         }
       });
+      console.log("[Photopea] Attached send button handler");
     }
-    const fetchButton = app.querySelector(fetchButtonSelector);
-    if (fetchButton && !fetchButton.dataset.huaPhotopeaBound) {
-      fetchButton.dataset.huaPhotopeaBound = "1";
-      fetchButton.addEventListener("click", async () => {
-        // Use Photopea API to export the image
-        try {
-          const command = 'app.activeDocument.saveToOE("png");';
-          const responses = await postToPhotopea(command);
 
-          if (responses && responses[0] instanceof ArrayBuffer) {
-            const base64Data = arrayBufferToBase64(responses[0]);
-            const dataUrl = `data:image/png;base64,${base64Data}`;
-
-            // Deliver to Gradio
-            window.huaPhotopeaBridge.deliver({
-              name: "photopea_export.png",
-              data: dataUrl,
-              timestamp: Date.now()
-            });
-          }
-        } catch (err) {
-          console.error("[Photopea] Failed to fetch from Photopea:", err);
-        }
+    // "Import from Photopea" button handler
+    const fetchButton = app.querySelector('#hua-photopea-fetch button');
+    if (fetchButton && !fetchButton.dataset.photopeaBound) {
+      fetchButton.dataset.photopeaBound = "1";
+      fetchButton.addEventListener("click", () => {
+        console.log("[Photopea] Fetch button clicked");
+        getImageFromPhotopea();
       });
+      console.log("[Photopea] Attached fetch button handler");
     }
   };
 
+  // Watch for DOM changes to attach handlers
   const observer = new MutationObserver(() => attachButtonHandlers());
   observer.observe(document.body, { childList: true, subtree: true });
   attachButtonHandlers();
-}})();
+
+  console.log("[Photopea] Integration script loaded");
+})();
 </script>
 """
 
@@ -1787,7 +1753,7 @@ def generate_image(
         if i < len(dynamic_positive_prompts_values):
             node_id_to_update = node_info.get('id')
             if node_id_to_update in prompt:
-                prompt[node_id_to_update]['inputs']['string'] = dynamic_positive_prompts_values[i]
+                prompt[node_id_to_update]['inputs']['text'] = dynamic_positive_prompts_values[i]
                 print(f"[{execution_id}] Updated positive prompt node {node_id_to_update} (UI slot {i+1}).")
 
     if negative_prompt_extra_values:
@@ -1796,11 +1762,11 @@ def generate_image(
             if i < len(extra_node):
                 node_id = extra_node[i].get('id')
                 if node_id and node_id in prompt:
-                    prompt[node_id]['inputs']['string'] = extra_value
+                    prompt[node_id]['inputs']['text'] = extra_value
                     print(f"[{execution_id}] Updated additional negative prompt {node_id} (slot {i+1}).")
 
     if text_bad_key:
-        prompt[text_bad_key]['inputs']['string'] = prompt_text_negative or ''
+        prompt[text_bad_key]['inputs']['text'] = prompt_text_negative or ''
 
     if resolution_key:
         try:
@@ -3466,44 +3432,60 @@ with gr.Blocks(css=combined_css) as demo:
     def send_selected_to_photopea(photopea_data):
         """Send selected gallery image to Photopea."""
         if not photopea_data:
-            return gr.update(value="Please select an image from the gallery first."), gr.update()
+            return gr.update(value="Please select an image from the gallery first."), gr.update(), gr.update()
         log_message("[FORWARD] Sending selected image to Photopea.")
-        # Escape the data for JavaScript (replace quotes and backslashes)
-        escaped_data = photopea_data.replace('\\', '\\\\').replace('"', '\\"')
+
         # Trigger JavaScript to open in Photopea
-        js_trigger = f"""<script>
-        (function() {{
-            const dataUrl = "{escaped_data}";
-            if (window.huaPhotopeaBridge && window.huaPhotopeaBridge.open) {{
-                window.huaPhotopeaBridge.open(dataUrl, "selected_image.png");
-                console.log("[FORWARD] Triggered Photopea bridge - data length:", dataUrl.length);
-            }} else {{
-                console.warn("[FORWARD] Photopea bridge not available");
-            }}
-        }})();
+        js_trigger = """<script>
+        (function() {
+            setTimeout(function() {
+                const dataInput = (window.gradioApp ? window.gradioApp() : document).querySelector('#hua-photopea-data-store textarea');
+                if (!dataInput || !dataInput.value) {
+                    console.warn("[FORWARD] No data in photopea data store");
+                    return;
+                }
+                const dataUrl = dataInput.value;
+                console.log("[FORWARD] Sending to Photopea, length:", dataUrl.length);
+
+                if (window.huaPhotopeaBridge && window.huaPhotopeaBridge.open) {
+                    window.huaPhotopeaBridge.open(dataUrl, false);
+                    console.log("[FORWARD] Sent to Photopea");
+                } else {
+                    console.warn("[FORWARD] Photopea bridge not available");
+                }
+            }, 200);
+        })();
         </script>"""
-        return gr.update(value="Image sent to Photopea. Switch to the Photopea tab to edit."), gr.update(value=js_trigger)
+        return gr.update(value="Image sent to Photopea. Switch to the Photopea tab to edit."), gr.update(value=js_trigger), gr.update(value=photopea_data)
 
     def send_upload_to_photopea(photopea_data):
         """Send current upload image to Photopea."""
         if not photopea_data:
-            return gr.update(value="Please upload an image first."), gr.update()
+            return gr.update(value="Please upload an image first."), gr.update(), gr.update()
         log_message("[FORWARD] Sending upload image to Photopea.")
-        # Escape the data for JavaScript
-        escaped_data = photopea_data.replace('\\', '\\\\').replace('"', '\\"')
+
         # Trigger JavaScript to open in Photopea
-        js_trigger = f"""<script>
-        (function() {{
-            const dataUrl = "{escaped_data}";
-            if (window.huaPhotopeaBridge && window.huaPhotopeaBridge.open) {{
-                window.huaPhotopeaBridge.open(dataUrl, "upload_image.png");
-                console.log("[FORWARD] Triggered Photopea bridge - data length:", dataUrl.length);
-            }} else {{
-                console.warn("[FORWARD] Photopea bridge not available");
-            }}
-        }})();
+        js_trigger = """<script>
+        (function() {
+            setTimeout(function() {
+                const dataInput = (window.gradioApp ? window.gradioApp() : document).querySelector('#hua-photopea-data-store textarea');
+                if (!dataInput || !dataInput.value) {
+                    console.warn("[FORWARD] No data in photopea data store");
+                    return;
+                }
+                const dataUrl = dataInput.value;
+                console.log("[FORWARD] Sending to Photopea, length:", dataUrl.length);
+
+                if (window.huaPhotopeaBridge && window.huaPhotopeaBridge.open) {
+                    window.huaPhotopeaBridge.open(dataUrl, false);
+                    console.log("[FORWARD] Sent to Photopea");
+                } else {
+                    console.warn("[FORWARD] Photopea bridge not available");
+                }
+            }, 200);
+        })();
         </script>"""
-        return gr.update(value="Image sent to Photopea. Switch to the Photopea tab to edit."), gr.update(value=js_trigger)
+        return gr.update(value="Image sent to Photopea. Switch to the Photopea tab to edit."), gr.update(value=js_trigger), gr.update(value=photopea_data)
 
     def _format_bytes_from_kb(kilobytes: float | int | None) -> str:
         try:
@@ -3894,13 +3876,13 @@ with gr.Blocks(css=combined_css) as demo:
     send_to_photopea_button.click(
         fn=send_selected_to_photopea,
         inputs=[photopea_image_data_state],
-        outputs=[photopea_status, photopea_js_trigger]
+        outputs=[photopea_status, photopea_js_trigger, photopea_data_bus]
     )
 
     upload_to_photopea_button.click(
         fn=send_upload_to_photopea,
         inputs=[photopea_image_data_state],
-        outputs=[photopea_status, upload_photopea_js_trigger]
+        outputs=[photopea_status, upload_photopea_js_trigger, photopea_data_bus]
     )
 
     photopea_sync_events = [getattr(input_image, "change", None), getattr(input_image, "upload", None)]
