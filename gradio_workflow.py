@@ -2388,19 +2388,6 @@ with gr.Blocks(css=combined_css) as demo:
         with gr.TabItem("ComfyUI Workflow Wrapper", id="tab_workflow_main"):
             with gr.Row(equal_height=False, elem_classes=["hua-main-row"]):
                 with gr.Column(scale=6, min_width=720, elem_classes=["hua-pane", "hua-pane-left"]):
-                    with gr.Accordion("Live Logs (ComfyUI)", open=True, elem_classes="log-display-container"):
-                        with gr.Group(elem_id="log_area_relative_wrapper"):
-                            log_display = gr.Textbox(
-                                label="Logs",
-                                lines=20,
-                                max_lines=20,
-                                autoscroll=True,
-                                interactive=False,
-                                show_copy_button=True,
-                                elem_classes="log-display-container"
-                            )
-                            floating_monitor_html_output = gr.HTML(elem_classes="floating-monitor-outer-wrapper")
-
                     with gr.Accordion("Upload Image", open=True, visible=True) as image_accordion:
                         base_image_kwargs = {
                             "label": "Upload / Inpaint Image",
@@ -2442,6 +2429,7 @@ with gr.Blocks(css=combined_css) as demo:
                             if GRADIO_IMAGE_SUPPORTS_SOURCES:
                                 fallback_kwargs["sources"] = ["upload", "clipboard"]
                             input_image = gr.Image(**fallback_kwargs)
+                        upload_to_photopea_button = gr.Button("🎨 Send to Photopea", variant="secondary", size="sm")
 
                     with gr.Accordion("Upload Video", open=False, visible=False) as video_accordion:
                         video_kwargs = {
@@ -2664,6 +2652,19 @@ with gr.Blocks(css=combined_css) as demo:
                             ])
                     mask_generator_notice = gr.Markdown(MASK_GENERATOR_NOTICE_TEXT, visible=False)
 
+                    with gr.Accordion("Live Logs (ComfyUI)", open=False, elem_classes="log-display-container"):
+                        with gr.Group(elem_id="log_area_relative_wrapper"):
+                            log_display = gr.Textbox(
+                                label="Logs",
+                                lines=20,
+                                max_lines=20,
+                                autoscroll=True,
+                                interactive=False,
+                                show_copy_button=True,
+                                elem_classes="log-display-container"
+                            )
+                            floating_monitor_html_output = gr.HTML(elem_classes="floating-monitor-outer-wrapper")
+
                 with gr.Column(scale=5, min_width=640, elem_classes=["hua-pane", "hua-pane-right"]):
                     with gr.Tabs(elem_id="main_output_tabs") as main_output_tabs_component:
                         with gr.Tab("Results & Preview", id="tab_generate_result"):
@@ -2677,6 +2678,9 @@ with gr.Blocks(css=combined_css) as demo:
                                         object_fit="contain",
                                         visible=False
                                     )
+                                    with gr.Row():
+                                        send_to_upload_button = gr.Button("📤 Send to Upload", size="sm", variant="secondary")
+                                        send_to_photopea_button = gr.Button("🎨 Send to Photopea", size="sm", variant="secondary")
                                     video_output_kwargs = {
                                         "label": "Video Results",
                                         "height": 720,
@@ -3302,6 +3306,35 @@ with gr.Blocks(css=combined_css) as demo:
                 None,
             )
 
+    def send_selected_to_upload(selected_path):
+        """Send selected gallery image to upload input."""
+        if not selected_path or not os.path.isfile(selected_path):
+            log_message("[FORWARD] No valid image selected to send to upload.")
+            return gr.update()
+
+        try:
+            with Image.open(selected_path) as pil_img:
+                rgba = pil_img.convert("RGBA")
+            log_message(f"[FORWARD] Sent selected image to upload: {os.path.basename(selected_path)}")
+            return gr.update(value=rgba)
+        except Exception as exc:
+            log_message(f"[FORWARD] Error loading selected image: {exc}")
+            return gr.update()
+
+    def send_selected_to_photopea(photopea_data):
+        """Send selected gallery image to Photopea."""
+        if not photopea_data:
+            return gr.update(value="Please select an image from the gallery first.")
+        log_message("[FORWARD] Sending selected image to Photopea.")
+        return gr.update(value="Image sent to Photopea. Switch to the Photopea tab to edit.")
+
+    def send_upload_to_photopea(photopea_data):
+        """Send current upload image to Photopea."""
+        if not photopea_data:
+            return gr.update(value="Please upload an image first.")
+        log_message("[FORWARD] Sending upload image to Photopea.")
+        return gr.update(value="Image sent to Photopea. Switch to the Photopea tab to edit.")
+
     def _format_bytes_from_kb(kilobytes: float | int | None) -> str:
         try:
             if kilobytes is None:
@@ -3679,6 +3712,25 @@ with gr.Blocks(css=combined_css) as demo:
         fn=handle_gallery_select,
         inputs=[],
         outputs=[input_image, selected_gallery_image_state, photopea_image_data_state, photopea_data_bus]
+    )
+
+    # Image forwarding buttons
+    send_to_upload_button.click(
+        fn=send_selected_to_upload,
+        inputs=[selected_gallery_image_state],
+        outputs=[input_image]
+    )
+
+    send_to_photopea_button.click(
+        fn=send_selected_to_photopea,
+        inputs=[photopea_image_data_state],
+        outputs=[photopea_status]
+    )
+
+    upload_to_photopea_button.click(
+        fn=send_upload_to_photopea,
+        inputs=[photopea_image_data_state],
+        outputs=[photopea_status]
     )
 
     photopea_sync_events = [getattr(input_image, "change", None), getattr(input_image, "upload", None)]
