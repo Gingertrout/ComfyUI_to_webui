@@ -3,52 +3,493 @@ import time
 import random
 import requests
 import shutil
-from collections import Counter, deque # 导入 deque
-from PIL import Image, ImageSequence, ImageOps
+from collections import Counter, deque # queue container
+from PIL import Image, ImageSequence, ImageOps, ImageChops
 import re
-import io # 导入 io 用于更精确的文件处理
+import io  # precise file I/O helpers
+import base64
 import gradio as gr
 import numpy as np
 import torch
 import threading
-from threading import Lock, Event # 导入 Lock 和 Event
+from threading import Lock, Event # thread synchronization primitives
 from concurrent.futures import ThreadPoolExecutor
-import websocket # 添加 websocket 导入
+import websocket  # websocket bridge for preview
 import atexit # For NVML cleanup
-from .kelnel_ui.system_monitor import update_floating_monitors_stream, custom_css as monitor_css, cleanup_nvml # 系统监控模块
-from .kelnel_ui.k_Preview import ComfyUIPreviewer # <--- 导入 ComfyUIPreviewer
-from .kelnel_ui.css_html_js import HACKER_CSS, get_sponsor_html # <--- 从 css_html_js.py 导入
-from .kelnel_ui.ui_def import ( # <--- 从 ui_def.py 导入
+import inspect
+from functools import lru_cache
+import uuid
+from .kelnel_ui.system_monitor import update_floating_monitors_stream, custom_css as monitor_css, cleanup_nvml # system monitoring module
+from .kelnel_ui.k_Preview import ComfyUIPreviewer # integrate live preview client
+from .kelnel_ui.css_html_js import HACKER_CSS, get_sponsor_html # custom CSS/HTML assets
+from .kelnel_ui.ui_def import ( # workflow helpers
     calculate_aspect_ratio,
     strip_prefix,
     parse_resolution,
     load_resolution_presets_from_files,
     find_closest_preset,
     get_output_images,
+    find_all_nodes_by_class_type,
     # fuck, # Removed as it's deprecated and its logic is integrated elsewhere
-    get_workflow_defaults_and_visibility
+    get_workflow_defaults_and_visibility,
+    load_prompt_from_file,
 )
-# 导入新的配置管理函数和常量
+# plugin settings helpers
 from .kelnel_ui.ui_def import (
     load_plugin_settings, 
     save_plugin_settings, 
-    DEFAULT_MAX_DYNAMIC_COMPONENTS # 需要这个作为 MAX_DYNAMIC_COMPONENTS 的备用值
+    DEFAULT_MAX_DYNAMIC_COMPONENTS, # fallback value for MAX_DYNAMIC_COMPONENTS
+    DEFAULT_THEME_MODE,
 )
 
-# --- 初始化最大动态组件数量 (从 kelnel_ui.ui_def 导入的函数加载) ---
+# --- Initialize dynamic component limits ---
 plugin_settings_on_load = load_plugin_settings() 
 MAX_DYNAMIC_COMPONENTS = plugin_settings_on_load.get("max_dynamic_components", DEFAULT_MAX_DYNAMIC_COMPONENTS)
-print(f"插件启动：最大动态组件数量从配置加载为: {MAX_DYNAMIC_COMPONENTS} (通过 kelnel_ui.ui_def)")
-# --- 初始化最大动态组件数量结束 ---
+print(f"Plugin start: max dynamic components loaded from settings: {MAX_DYNAMIC_COMPONENTS} (via kelnel_ui.ui_def)")
+# --- End initialization ---
+
+# --- UI configuration limits ---
+MAX_KSAMPLER_CONTROLS = 4
+MAX_MASK_GENERATORS = 2
+MAX_IMAGE_LOADERS = 6
+MASK_FIELD_COUNT = 7  # face, background, hair, body, clothes, confidence, refine
+IMAGE_LOADER_FIELD_COUNT = 5  # resize, width, height, keep_proportion, divisible_by
+MAX_JSON_FILE_CHOICES = 500
+
+# Friendly labels and option lists
+SAMPLER_NAME_CHOICES = [
+    "euler", "euler_a", "heun", "lms", "dpm_2", "dpm_2_a", "dpmpp_2s", "dpmpp_2m",
+    "dpmpp_2m_sde", "dpmpp_sde", "dpmpp_3m", "ddim", "plms", "uni_pc", "residual",
+]
+SCHEDULER_CHOICES = [
+    "simple", "normal", "karras", "exponential", "sgm_uniform", "sgm_uniform_simple", "linear"
+]
+BOOL_CHOICE = ["disable", "enable"]
+MASK_GENERATOR_NOTICE_TEXT = (
+    "No detection-based mask generators were found in the selected workflow. "
+    "Add an `APersonMaskGenerator` node to unlock these controls."
+)
+
+NEGATIVE_PROMPT_COMPONENTS = []
+IMAGE_LOADER_ACCORDION_COMPONENTS = []
+IMAGE_LOADER_COMPONENTS_FLAT = []
+KSAMPLER_COMPONENT_GROUPS = []
+KSAMPLER_ACCORDION_COMPONENTS = []
+KSAMPLER_COMPONENTS_FLAT = []
+MASK_COMPONENT_GROUPS = []
+MASK_ACCORDION_COMPONENTS = []
+MASK_COMPONENTS_FLAT = []
+
+# Determine component capabilities (handles Gradio version drift)
+def _component_supports_arg(component_cls, param_name):
+    try:
+        return param_name in inspect.signature(component_cls.__init__).parameters
+    except (ValueError, TypeError):
+        return None
+
+
+GRADIO_IMAGE_SUPPORTS_TYPE = _component_supports_arg(gr.Image, "type")
+GRADIO_IMAGE_SUPPORTS_TOOL = _component_supports_arg(gr.Image, "tool")
+GRADIO_IMAGE_SUPPORTS_IMAGE_MODE = _component_supports_arg(gr.Image, "image_mode")
+GRADIO_IMAGE_SUPPORTS_BRUSH = _component_supports_arg(gr.Image, "brush_radius")
+GRADIO_IMAGE_SUPPORTS_SOURCES = _component_supports_arg(gr.Image, "sources")
+GRADIO_VIDEO_SUPPORTS_SOURCES = _component_supports_arg(gr.Video, "sources")
+GRADIO_VIDEO_SUPPORTS_LOOP = _component_supports_arg(gr.Video, "loop")
+GRADIO_HAS_IMAGE_EDITOR = hasattr(gr, "ImageEditor")
+
+
+THEME_MODE_LABELS = {
+    "system": "System",
+    "light": "Light",
+    "dark": "Dark",
+}
+THEME_LABEL_TO_VALUE = {label: value for value, label in THEME_MODE_LABELS.items()}
+CURRENT_THEME_MODE = plugin_settings_on_load.get("theme_mode", DEFAULT_THEME_MODE)
+if CURRENT_THEME_MODE not in THEME_MODE_LABELS:
+    CURRENT_THEME_MODE = DEFAULT_THEME_MODE
+CURRENT_THEME_LABEL = THEME_MODE_LABELS.get(CURRENT_THEME_MODE, THEME_MODE_LABELS[DEFAULT_THEME_MODE])
+
+UI_THEME_CSS = """
+:root,
+html,
+body {
+    --hua-max-width: 100%;
+    --hua-gap: 18px;
+    --hua-radius: 12px;
+    --hua-dark-surface: #151821;
+    --hua-dark-surface-alt: #1b1f2c;
+    --hua-dark-border: #23283a;
+    --hua-dark-text: #f3f6ff;
+    --hua-light-surface: #ffffff;
+    --hua-light-surface-alt: #f4f6fb;
+    --hua-light-border: #d8dce8;
+    --hua-light-text: #1f2330;
+    width: 100%;
+    height: 100%;
+    margin: 0 !important;
+}
+
+:root[data-hua-theme="dark"],
+body[data-hua-theme="dark"] {
+    background-color: #0e101a;
+}
+
+:root[data-hua-theme="light"],
+body[data-hua-theme="light"] {
+    background-color: #eef1f7;
+}
+
+:root[data-hua-theme],
+body[data-hua-theme] {
+    margin: 0;
+}
+
+:root[data-hua-theme] .gradio-container,
+body[data-hua-theme] .gradio-container {
+    max-width: none !important;
+    width: 100% !important;
+    padding: 0 !important;
+    margin: 0 auto !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    background: transparent !important;
+}
+
+.gradio-container .gradio-app {
+    max-width: none !important;
+    width: 100% !important;
+}
+
+.gradio-container {
+    max-width: none !important;
+    width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
+}
+
+.gradio-app, .gradio-app > div {
+    width: 100% !important;
+}
+
+.hua-main-row {
+    gap: var(--hua-gap) !important;
+    padding: 0;
+}
+
+.gradio-app, .gradio-block {
+    max-width: none !important;
+}
+
+.gradio-block {
+    padding: 0 !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+.hua-pane {
+    border-radius: 0 !important;
+    border: none !important;
+    padding: calc(var(--hua-gap) * 0.75) !important;
+    box-shadow: none !important;
+}
+
+.hua-pane .gradio-row {
+    gap: calc(var(--hua-gap) * 0.75) !important;
+}
+
+.hua-pane .gradio-column {
+    gap: calc(var(--hua-gap) * 0.6) !important;
+}
+
+#hua-image-input {
+    width: 100%;
+    overflow: visible !important;
+}
+
+#hua-image-input [data-testid="image"],
+#hua-image-input .image-editor,
+#hua-image-input .image {
+    min-height: 600px !important;
+    height: auto !important;
+}
+
+#hua-image-input .image-editor > div,
+#hua-image-input [data-testid="image"] > div {
+    overflow: visible !important;
+}
+
+#hua-image-input .image-editor canvas {
+    max-width: 100% !important;
+}
+
+body[data-hua-theme="light"] .log-display-container {
+    background-color: #f5f6fb !important;
+    color: #1f2330 !important;
+}
+
+body[data-hua-theme="light"] .log-display-container textarea {
+    background-color: #ffffff !important;
+    color: #1f2330 !important;
+}
+
+body[data-hua-theme="light"] .log-display-container h4 {
+    color: #1f2330 !important;
+}
+
+.hua-photopea-html iframe {
+    min-height: 720px;
+}
+
+.hua-pane-right .gradio-gallery {
+    min-height: 640px;
+}
+
+.floating-monitor-outer-wrapper {
+    pointer-events: none;
+}
+"""
+
+PHOTOPEA_EMBED_HTML = """
+<div id="photopea-integration-wrapper" style="height:720px; border:1px solid var(--block-border-color,#444); border-radius:6px; overflow:hidden;">
+  <iframe id="photopea-iframe" src="https://www.photopea.com/" style="width:100%;height:100%;border:0;" allow="clipboard-read; clipboard-write"></iframe>
+</div>
+<script>
+(function(){
+  const wrapper = document.getElementById("photopea-integration-wrapper");
+  if (!wrapper || wrapper.dataset.initialized) { return; }
+  wrapper.dataset.initialized = "1";
+  const iframe = document.getElementById("photopea-iframe");
+  const importSelector = '#photopea-import-data textarea';
+  const dataSelector = '#hua-photopea-data-store textarea';
+  const sendButtonSelector = '#hua-photopea-send button';
+  const fetchButtonSelector = '#hua-photopea-fetch button';
+
+  const getImportBox = () => {
+    const app = window.gradioApp ? window.gradioApp() : null;
+    return app ? app.querySelector(importSelector) : null;
+  };
+
+  const postToPhotopea = (payload) => {
+    if (!iframe || !iframe.contentWindow) {
+      console.warn("Photopea frame not ready");
+      return false;
+    }
+    iframe.contentWindow.postMessage(payload, "*");
+    return true;
+  };
+  const getDataSource = () => {
+    const app = window.gradioApp ? window.gradioApp() : document;
+    if (!app) { return null; }
+    return app.querySelector(dataSelector);
+  };
+  const dispatchValueChange = (element) => {
+    if (!element) { return; }
+    ["input", "change"].forEach((eventName) => {
+      try {
+        element.dispatchEvent(new Event(eventName, { bubbles: true }));
+      } catch (err) {
+        console.warn("Failed to dispatch", eventName, err);
+      }
+    });
+  };
+  const updateDataStore = (value) => {
+    const dataInput = getDataSource();
+    if (dataInput) {
+      dataInput.value = value || "";
+      dispatchValueChange(dataInput);
+    }
+  };
+
+  window.huaPhotopeaBridge = {
+    open: (dataUrl, name) => {
+      console.log("[Photopea] Opening image in Photopea:", name);
+      if (!dataUrl) {
+        console.warn("[Photopea] No image data provided to Photopea.");
+        return null;
+      }
+      if (!postToPhotopea({ type: "open", data: dataUrl, name: name || "gradio.png" })) {
+        console.warn("[Photopea] Failed to post to Photopea.");
+      } else {
+        console.log("[Photopea] Successfully sent image to Photopea");
+      }
+      updateDataStore(dataUrl);
+      return dataUrl;
+    },
+    requestExport: (name, format) => {
+      console.log("[Photopea] Requesting export from Photopea:", name, format);
+      if (!postToPhotopea({ type: "save", name: name || "photopea_export.png", format: format || "png" })) {
+        console.warn("[Photopea] Failed to request export from Photopea.");
+      }
+      return null;
+    },
+    deliver: (payload) => {
+      try {
+        console.log("[Photopea] Attempting to deliver payload to Gradio");
+        const importBox = getImportBox();
+        if (!importBox) {
+          console.warn("[Photopea] Unable to locate Photopea import textbox with selector:", importSelector);
+          return false;
+        }
+        console.log("[Photopea] Found import textbox:", importBox);
+        const serialized = typeof payload === "string" ? payload : JSON.stringify(payload || {});
+        console.log("[Photopea] Setting value (length:", serialized.length, ")");
+        importBox.value = serialized;
+        dispatchValueChange(importBox);
+        updateDataStore(serialized);
+        console.log("[Photopea] Successfully delivered payload to Gradio");
+        return true;
+      } catch (err) {
+        console.error("[Photopea] Failed to deliver payload to Gradio import box", err);
+        return false;
+      }
+    }
+  };
+
+  window.addEventListener("message", (event) => {
+    if (!event?.data) { return; }
+    const data = event.data;
+    console.log("[Photopea] Received message:", data.type, data);
+    if (data.type === "export" && data.data) {
+      console.log("[Photopea] Export received, delivering to Gradio...");
+      const delivered = window.huaPhotopeaBridge.deliver({
+        name: data.name || "photopea.png",
+        data: data.data,
+        width: data.width,
+        height: data.height,
+        timestamp: Date.now()
+      });
+      console.log("[Photopea] Delivery result:", delivered);
+    }
+  });
+
+  const attachButtonHandlers = () => {
+    const app = window.gradioApp ? window.gradioApp() : document;
+    if (!app) { return; }
+    const sendButton = app.querySelector(sendButtonSelector);
+    if (sendButton && !sendButton.dataset.huaPhotopeaBound) {
+      sendButton.dataset.huaPhotopeaBound = "1";
+      sendButton.addEventListener("click", () => {
+        const dataInput = getDataSource();
+        const dataUrl = dataInput ? dataInput.value : null;
+        if (!dataUrl) {
+          console.warn("[Photopea] No encoded image available to send.");
+          return;
+        }
+        postToPhotopea({ type: "open", data: dataUrl, name: "gradio.png" });
+      });
+    }
+    const fetchButton = app.querySelector(fetchButtonSelector);
+    if (fetchButton && !fetchButton.dataset.huaPhotopeaBound) {
+      fetchButton.dataset.huaPhotopeaBound = "1";
+      fetchButton.addEventListener("click", () => {
+        postToPhotopea({ type: "save", name: "photopea_export.png", format: "png" });
+      });
+    }
+  };
+
+  const observer = new MutationObserver(() => attachButtonHandlers());
+  observer.observe(document.body, { childList: true, subtree: true });
+  attachButtonHandlers();
+}})();
+</script>
+"""
+
+THEME_BOOTSTRAP_HTML = f"""
+<script>
+(function() {{
+    const normalize = (value) => {{
+        if (!value) return "system";
+        const lower = ("" + value).toLowerCase();
+        if (lower === "system" || lower === "dark" || lower === "light") return lower;
+        if (value === "System") return "system";
+        if (value === "Dark") return "dark";
+        if (value === "Light") return "light";
+        return "system";
+    }};
+    const resolve = (mode) => {{
+        if (mode === "system" && window.matchMedia) {{
+            return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }}
+        return mode === "light" ? "light" : "dark";
+    }};
+    let pendingBodyMode = null;
+    const applyTheme = (mode) => {{
+        const canonical = normalize(mode);
+        const resolved = resolve(canonical);
+        const root = document.documentElement;
+        root.setAttribute("data-hua-theme-mode", canonical);
+        root.setAttribute("data-hua-theme", resolved);
+        const body = document.body;
+        if (body) {{
+            body.setAttribute("data-hua-theme-mode", canonical);
+            body.setAttribute("data-hua-theme", resolved);
+        }} else {{
+            pendingBodyMode = canonical;
+        }}
+        return canonical;
+    }};
+    window.huaApplyTheme = (mode) => {{
+        const canonical = applyTheme(mode);
+        if (canonical === "system" && typeof window.matchMedia === "function") {{
+            try {{
+                if (!window.huaSystemThemeListener) {{
+                    const handler = function () {{
+                        const current = document.documentElement.getAttribute("data-hua-theme-mode") || "system";
+                        if (current === "system") {{
+                            applyTheme("system");
+                        }}
+                    }};
+                    window.huaSystemThemeListener = handler;
+                    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+                    if (mq) {{
+                        if (typeof mq.addEventListener === "function") {{
+                            mq.addEventListener("change", handler);
+                        }} else if (typeof mq.addListener === "function") {{
+                            mq.addListener(handler);
+                        }}
+                    }}
+                }}
+            }} catch (err) {{
+                console.warn("Unable to bind system theme listener", err);
+            }}
+        }}
+        return canonical;
+    }};
+    document.addEventListener("DOMContentLoaded", () => {{
+        if (pendingBodyMode) {{
+            applyTheme(pendingBodyMode);
+            pendingBodyMode = null;
+        }}
+    }}, {{ once: true }});
+    applyTheme("{CURRENT_THEME_MODE}");
+}})();
+</script>
+"""
+
+CIVITAI_BASE_URL = "https://civitai.com/api/v1"
+CIVITAI_SORT_MAP = {
+    "Highest Rated": "Highest Rated",
+    "Most Downloaded": "Most Downloaded",
+    "Newest": "Newest",
+}
+CIVITAI_NSFW_MAP = {
+    "Hide": "false",
+    "Show": "true",
+    "Only": "only",
+}
 
 # Register NVML cleanup function to be called on exit
 atexit.register(cleanup_nvml)
 
-# --- 日志轮询导入 ---
-import requests # requests 可能已导入，确认一下
-import json # json 可能已导入，确认一下
-import time # time 可能已导入，确认一下
-# --- 日志轮询导入结束 ---
+# --- Log polling imports ---
+import requests  # ensure requests imported
+import json
+import time
+# --- End log polling imports ---
 import folder_paths
 import node_helpers
 from pathlib import Path
@@ -62,27 +503,27 @@ from datetime import datetime
 from math import gcd
 import uuid
 import fnmatch
-from .kelnel_ui.gradio_cancel_test import cancel_comfyui_task_action # <--- 导入中断函数
-from .kelnel_ui.api_json_manage import define_api_json_management_ui # <--- 导入 API JSON 管理 UI 定义函数
+from .kelnel_ui.gradio_cancel_test import cancel_comfyui_task_action  # interrupt helper
+from .kelnel_ui.api_json_manage import define_api_json_management_ui  # API JSON management UI
 
-# --- 全局状态变量 ---
+# --- Global state ---
 task_queue = deque()
 queue_lock = Lock()
-accumulated_image_results = [] # 明确用于图片
-last_video_result = None # 用于存储最新的视频路径
+accumulated_image_results = []  # cached image results
+last_video_result = None  # latest video result path
 results_lock = Lock()
-processing_event = Event() # False: 空闲, True: 正在处理
-executor = ThreadPoolExecutor(max_workers=1) # 单线程执行生成任务
-last_used_seed = -1 # 用于递增/递减模式
-seed_lock = Lock() # 用于保护 last_used_seed
-interrupt_requested_event = Event() # 新增：用于用户请求中断当前任务的信号
+processing_event = Event()  # True while processing a task
+executor = ThreadPoolExecutor(max_workers=1)  # single worker for generation
+last_used_seed = -1  # used by increment/decrement seed modes
+seed_lock = Lock()  # protect last_used_seed
+interrupt_requested_event = Event()  # signalled when user requests an interrupt
 
-# --- ComfyUI 实时预览器实例 ---
-# 使用一个独特的 client_id_suffix 以避免与 k_Preview.py 的独立测试冲突
+# --- ComfyUI live preview instance ---
+# Use a unique suffix to avoid collisions with standalone preview tests
 comfyui_previewer = ComfyUIPreviewer(client_id_suffix="gradio_workflow_integration", min_yield_interval=0.1)
-# --- 全局状态变量结束 ---
+# --- End global state ---
 
-# --- 日志轮询全局变量和函数 ---
+# --- Log polling helpers ---
 COMFYUI_LOG_URL = "http://127.0.0.1:8188/internal/logs/raw"
 all_logs_text = ""
 
@@ -95,122 +536,139 @@ def fetch_and_format_logs():
         data = response.json()
         log_entries = data.get("entries", [])
 
-        # 移除多余空行并合并日志内容
+        # Collapse redundant blank lines and merge log content
         formatted_logs = "\n".join(filter(None, [entry.get('m', '').strip() for entry in log_entries]))
         all_logs_text = formatted_logs
 
         return all_logs_text
 
     except requests.exceptions.RequestException as e:
-        error_message = f"无法连接到 ComfyUI 服务器: {e}"
+        error_message = f"Unable to connect to ComfyUI server: {e}"
         return all_logs_text + "\n" + error_message if all_logs_text else error_message
     except json.JSONDecodeError:
-        error_message = "无法解析服务器响应 (非 JSON)"
+        error_message = "Unable to parse server response (not JSON)"
         return all_logs_text + "\n" + error_message if all_logs_text else error_message
     except Exception as e:
-        error_message = f"发生未知错误: {e}"
+        error_message = f"Unexpected error: {e}"
         return all_logs_text + "\n" + error_message if all_logs_text else error_message
 
-# --- 日志轮询全局变量和函数结束 ---
+# --- End log polling helpers ---
 
-# --- ComfyUI 节点徽章设置 ---
-# 尝试两种可能的 API 路径
+# --- ComfyUI node badge settings ---
+# Try both API paths
 COMFYUI_API_NODE_BADGE = "http://127.0.0.1:8188/settings/Comfy.NodeBadge.NodeIdBadgeMode"
-# COMFYUI_API_NODE_BADGE = "http://127.0.0.1:8188/api/settings/Comfy.NodeBadge.NodeIdBadgeMode" # 备用路径
+# COMFYUI_API_NODE_BADGE = "http://127.0.0.1:8188/api/settings/Comfy.NodeBadge.NodeIdBadgeMode"  # alternative path
 
 def update_node_badge_mode(mode):
-    """发送 POST 请求更新 NodeIdBadgeMode"""
+    """Send POST request to update NodeIdBadgeMode"""
     try:
-        # 直接尝试 JSON 格式
+        # try JSON payload first
         response = requests.post(
             COMFYUI_API_NODE_BADGE,
-            json=mode,  # 使用 json 参数自动设置 Content-Type 为 application/json
+            json=mode,  # json argument sets Content-Type to application/json
         )
 
         if response.status_code == 200:
-            return f"✅ 成功更新节点徽章模式为: {mode}"
+            return f"[Success] Updated node badge mode to: {mode}"
         else:
-            # 尝试解析错误信息
+            # Try to parse error message
             try:
-                error_detail = response.json() # 尝试解析 JSON 错误
+                error_detail = response.json()  # try parsing JSON error response
                 error_text = error_detail.get('error', response.text)
                 error_traceback = error_detail.get('traceback', '')
-                return f"❌ 更新失败 (HTTP {response.status_code}): {error_text}\n{error_traceback}".strip()
-            except json.JSONDecodeError: # 如果不是 JSON 错误
-                return f"❌ 更新失败 (HTTP {response.status_code}): {response.text}"
+                return f"[Error] Update failed (HTTP {response.status_code}): {error_text}\n{error_traceback}".strip()
+            except json.JSONDecodeError:  # non-JSON error response
+                return f"[Error] Update failed (HTTP {response.status_code}): {response.text}"
     except requests.exceptions.ConnectionError:
-         return f"❌ 请求出错: 无法连接到 ComfyUI 服务器 ({COMFYUI_API_NODE_BADGE})。请确保 ComfyUI 正在运行。"
+         return f"[Error] Unable to reach ComfyUI server ({COMFYUI_API_NODE_BADGE}). Ensure ComfyUI is running."
     except Exception as e:
-        return f"❌ 请求出错: {str(e)}"
-# --- ComfyUI 节点徽章设置结束 ---
+        return f"[Error] Request failure: {str(e)}"
+# --- End node badge settings ---
 
-# --- 重启和中断函数 ---
-COMFYUI_DEFAULT_URL_FOR_WORKFLOW = "http://127.0.0.1:8188" # 定义 ComfyUI URL 常量
+# --- Reboot and interrupt functions ---
+COMFYUI_DEFAULT_URL_FOR_WORKFLOW = "http://127.0.0.1:8188"  # ComfyUI base URL
 
 def reboot_manager():
     try:
-        # 发送重启请求，改为 GET 方法
-        reboot_url = f"{COMFYUI_DEFAULT_URL_FOR_WORKFLOW}/api/manager/reboot" # 使用常量
-        response = requests.get(reboot_url)  # 改为 GET 请求
+        # send reboot request via GET
+        reboot_url = f"{COMFYUI_DEFAULT_URL_FOR_WORKFLOW}/api/manager/reboot"
+        response = requests.get(reboot_url)
         if response.status_code == 200:
-            return "重启请求已发送。请稍后检查 ComfyUI 状态。"
+            return "Reboot request sent. Please check ComfyUI in a few moments."
         else:
-            return f"重启请求失败，状态码: {response.status_code}"
+            return f"Reboot request failed with status code {response.status_code}"
     except Exception as e:
-        return f"发生错误: {str(e)}"
+        return f"Error while sending reboot request: {str(e)}"
 
 def trigger_comfyui_interrupt():
-    """包装函数，用于从 Gradio 调用中断功能，使用预定义的 URL"""
+    """Proxy function allowing Gradio to trigger queue interrupt"""
     return cancel_comfyui_task_action(COMFYUI_DEFAULT_URL_FOR_WORKFLOW)
 
-# --- 重启和中断函数结束 ---
-# handle_interrupt_click 函数将被移除，因为中断按钮被移除，其逻辑将整合到新的 clear_queue 中
+# --- End reboot/interrupt functions ---
+# interrupt button removed; interruption handled via clear_queue
 
 
-# --- 日志记录函数 ---
+# --- Logging helper ---
 def log_message(message):
-    timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]  # 精确到毫秒
+    timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]  # millisecond precision
     print(f"{timestamp} - {message}")
 
-# 修改函数以通过 class_type 查找，并重命名参数
+def _register_event_with_optional_js(register_fn, *, fn, inputs, outputs, js_code, description):
+    """
+    Register a Gradio event and optionally attach a JavaScript callback when the runtime supports it.
+    Falls back gracefully if the current Gradio version rejects JS parameters.
+    """
+    kwargs = dict(fn=fn, inputs=inputs, outputs=outputs)
+    if js_code is not None:
+        for param_name in ("_js", "js"):
+            try:
+                return register_fn(**kwargs, **{param_name: js_code})
+            except TypeError as exc:
+                log_message(f"[UI_JS_COMPAT] {description} does not accept '{param_name}' parameter ({exc}).")
+    if js_code is not None:
+        log_message(f"[UI_JS_COMPAT] {description} registered without JS bridge; functionality is limited.")
+    return register_fn(**kwargs)
+
+# Helper to locate node by class_type
 def find_key_by_class_type(prompt, class_type):
     for key, value in prompt.items():
-        # 直接检查 class_type 字段
+        # direct class_type check
         if isinstance(value, dict) and value.get("class_type") == class_type:
             return key
     return None
 
 def check_seed_node(json_file):
-    if not json_file or not os.path.exists(os.path.join(OUTPUT_DIR, json_file)):
-        print(f"JSON 文件无效或不存在: {json_file}")
+    workflow_dir, workflow_name, workflow_path = resolve_workflow_components(json_file)
+    if not workflow_path:
+        print(f"JSON file invalid or missing: {json_file}")
         return gr.update(visible=False)
-    json_path = os.path.join(OUTPUT_DIR, json_file)
+    json_path = workflow_path
     try:
         with open(json_path, "r", encoding="utf-8") as file_json:
             prompt = json.load(file_json)
-        # 使用新的函数和真实类名
+        # use real class names from workflow metadata
         seed_key = find_key_by_class_type(prompt, "Hua_gradio_Seed")
         return gr.update(visible=seed_key is not None)
     except (FileNotFoundError, json.JSONDecodeError) as e:
-        print(f"读取或解析 JSON 文件时出错 ({json_file}): {e}")
+        print(f"Error reading or parsing JSON file ({json_file}): {e}")
         return gr.update(visible=False)
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
-print("当前hua插件文件的目录为：", current_dir)
+print("Plugin directory:", current_dir)
 parent_dir = os.path.dirname(os.path.dirname(current_dir))
 sys.path.append(parent_dir)
 try:
     from comfy.cli_args import args
 except ImportError:
-    print("无法导入 comfy.cli_args，某些功能可能受限。")
-    args = None # 提供一个默认值以避免 NameError
+    print("Unable to import comfy.cli_args; some features may be limited.")
+    args = None  # default fallback to avoid NameError
 
-# 尝试导入图标，如果失败则使用默认值
+# Try importing icon metadata; fall back if missing
 try:
     from .node.hua_icons import icons
 except ImportError:
-    print("无法导入 .hua_icons，将使用默认分类名称。")
-    icons = {"hua_boy_one": "Gradio"} # 提供一个默认值
+    print("Unable to import .hua_icons; using default category names.")
+    icons = {"hua_boy_one": "Gradio"}  # default mapping
 
 class GradioTextOk:
     @classmethod
@@ -218,12 +676,12 @@ class GradioTextOk:
         return {
             "required": {
                 "string": ("STRING", {"multiline": True, "dynamicPrompts": True, "tooltip": "The text to be encoded."}),
-                "name": ("STRING", {"multiline": False, "default": "GradioTextOk", "tooltip": "节点名称"}),
+                "name": ("STRING", {"multiline": False, "default": "GradioTextOk", "tooltip": "Node name"}),
             }
         }
     RETURN_TYPES = ("STRING",)
     FUNCTION = "encode"
-    CATEGORY = icons.get("hua_boy_one", "Gradio") # 使用 get 提供默认值
+    CATEGORY = icons.get("hua_boy_one", "Gradio")  # default fallback category
     DESCRIPTION = "Encodes a text prompt..."
     def encode(self, string, name):
         return (string,)
@@ -231,6 +689,66 @@ class GradioTextOk:
 INPUT_DIR = folder_paths.get_input_directory()
 OUTPUT_DIR = folder_paths.get_output_directory()
 TEMP_DIR = folder_paths.get_temp_directory()
+try:
+    USER_ROOT_DIR = folder_paths.get_user_directory()
+except AttributeError:
+    USER_ROOT_DIR = os.path.join(os.path.dirname(OUTPUT_DIR), "user")
+USER_WORKFLOW_DIR = os.path.join(USER_ROOT_DIR, "default", "workflows")
+WORKFLOW_FILE_MAP = {}
+
+def cleanup_old_temp_files():
+    """Clean up stale temp JSON files from previous sessions or crashes."""
+    import glob
+    try:
+        pattern = os.path.join(TEMP_DIR, "*.json")
+        temp_files = glob.glob(pattern)
+
+        if not temp_files:
+            return
+
+        current_time = time.time()
+        cleaned_count = 0
+
+        for temp_file in temp_files:
+            try:
+                # Only remove files older than 1 hour (3600 seconds)
+                file_age = current_time - os.path.getmtime(temp_file)
+                if file_age > 3600:
+                    os.remove(temp_file)
+                    cleaned_count += 1
+            except OSError as e:
+                # Ignore errors for individual files
+                pass
+
+        if cleaned_count > 0:
+            print(f"[CLEANUP] Removed {cleaned_count} old temp files from {TEMP_DIR}")
+    except Exception as e:
+        print(f"[CLEANUP] Warning: Failed to clean up temp files: {e}")
+
+# Clean up old temp files on startup
+cleanup_old_temp_files()
+
+def _register_workflow_file(display_name, directory, filename):
+    WORKFLOW_FILE_MAP[display_name] = {
+        "folder": directory,
+        "filename": filename,
+        "path": os.path.join(directory, filename),
+    }
+
+def resolve_workflow_components(selection):
+    meta = WORKFLOW_FILE_MAP.get(selection)
+    if meta:
+        return meta["folder"], meta["filename"], meta["path"]
+    if selection:
+        if selection not in WORKFLOW_FILE_MAP:
+            get_json_files()
+            meta = WORKFLOW_FILE_MAP.get(selection)
+            if meta:
+                return meta["folder"], meta["filename"], meta["path"]
+        fallback_path = os.path.join(OUTPUT_DIR, selection)
+        if os.path.exists(fallback_path):
+            return os.path.dirname(fallback_path), os.path.basename(fallback_path), fallback_path
+    return None, None, None
 
 # --- Load Resolution Presets from File ---
 # resolution_files and resolution_prefixes are defined here
@@ -252,9 +770,15 @@ if len(resolution_presets) < 10: # Print some examples if loading failed or file
 # --- End Load Resolution Presets ---
 
 
-def start_queue(prompt_workflow):
-    p = {"prompt": prompt_workflow}
-    data = json.dumps(p).encode('utf-8')
+def start_queue(prompt_workflow, client_id=None):
+    if isinstance(prompt_workflow, dict):
+        missing_nodes = [node_id for node_id, node_data in prompt_workflow.items()
+                         if not isinstance(node_data, dict) or "class_type" not in node_data]
+        if missing_nodes:
+            print(f"Prompt validation failed locally. Missing class_type for nodes: {missing_nodes}")
+            return None
+    client_id = client_id or f"gradio_workflow_{uuid.uuid4().hex}"
+    payload = {"prompt": prompt_workflow, "client_id": client_id}
     URL = "http://127.0.0.1:8188/prompt"
     max_retries = 5
     retry_delay = 10
@@ -262,46 +786,86 @@ def start_queue(prompt_workflow):
 
     for attempt in range(max_retries):
         try:
-            # 简化服务器检查，直接尝试 POST
-            response = requests.post(URL, data=data, timeout=request_timeout)
-            response.raise_for_status() # 如果是 4xx 或 5xx 会抛出 HTTPError
-            print(f"请求成功 (尝试 {attempt + 1}/{max_retries})")
-            return True # 返回成功状态
-        except requests.exceptions.HTTPError as http_err: # 特别处理 HTTP 错误
+            # simplified server check: try POST directly
+            response = requests.post(URL, json=payload, timeout=request_timeout)
+            response.raise_for_status()  # raise on 4xx/5xx
+            prompt_id = ""
+            try:
+                response_payload = response.json()
+                prompt_id = response_payload.get("prompt_id") or response_payload.get("promptId") or ""
+            except (json.JSONDecodeError, ValueError):
+                pass
+            print(f"Prompt submission succeeded (attempt {attempt + 1}/{max_retries})"
+                  f"{' prompt_id=' + prompt_id if prompt_id else ''} using client_id={client_id}")
+            return prompt_id or ""  # success (prompt_id may be blank on older servers)
+        except requests.exceptions.HTTPError as http_err:  # handle HTTP errors
             status_code = http_err.response.status_code
-            print(f"请求失败 (尝试 {attempt + 1}/{max_retries}, HTTP 状态码: {status_code}): {str(http_err)}")
-            if status_code == 400: # Bad Request (例如 invalid prompt)
-                print("发生 400 Bad Request 错误，通常表示 prompt 无效。停止重试。")
-                return False # 立刻返回失败，不重试
-            # 对于其他 HTTP 错误 (例如 5xx)，继续重试逻辑
+            text = ""
+            try:
+                text = http_err.response.text
+            except Exception:
+                pass
+            print(f"Prompt submission failed (attempt {attempt + 1}/{max_retries}, HTTP {status_code}): {str(http_err)} {text}")
+            if status_code == 400:  # invalid prompt
+                print("Received HTTP 400 (likely invalid prompt); aborting retries.")
+                return None  # do not retry
+            # for other HTTP errors continue retry loop
             if attempt < max_retries - 1:
-                print(f"{retry_delay}秒后重试...")
+                print(f"Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
             else:
-                print("达到最大重试次数 (HTTPError)，放弃请求。")
-                return False
-        except requests.exceptions.RequestException as e: # 其他网络错误 (超时, 连接错误等)
+                print("Reached maximum retries (HTTPError). Giving up.")
+                return None
+        except requests.exceptions.RequestException as e:  # network errors (timeout, connection, etc.)
             error_type = type(e).__name__
-            print(f"请求失败 (尝试 {attempt + 1}/{max_retries}, 错误类型: {error_type}): {str(e)}")
+            print(f"Prompt request failed (attempt {attempt + 1}/{max_retries}, {error_type}): {str(e)}")
             if attempt < max_retries - 1:
-                print(f"{retry_delay}秒后重试...")
+                print(f"Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
             else:
-                print("达到最大重试次数 (RequestException)，放弃请求。")
-                print("可能原因: 服务器未运行、网络问题。") # 保留此通用原因
-                return False # 返回失败状态
-    return False # 确保函数在所有路径都有返回值
+                print("Reached maximum retries (RequestException). Giving up.")
+                print("Possible causes: server not running or a network problem.")
+                return None  # request failed
+    return None  # ensure consistent failure indicator
 
 def get_json_files():
-    try:
-        json_files = [f for f in os.listdir(OUTPUT_DIR) if f.endswith('.json') and os.path.isfile(os.path.join(OUTPUT_DIR, f))]
-        return json_files
-    except FileNotFoundError:
-        print(f"警告: 输出目录 {OUTPUT_DIR} 未找到。")
-        return []
-    except Exception as e:
-        print(f"获取 JSON 文件列表时出错: {e}")
-        return []
+    WORKFLOW_FILE_MAP.clear()
+    discovered = []
+    search_dirs = []
+    if OUTPUT_DIR and os.path.isdir(OUTPUT_DIR):
+        search_dirs.append(OUTPUT_DIR)
+    if USER_WORKFLOW_DIR and os.path.isdir(USER_WORKFLOW_DIR):
+        search_dirs.append(USER_WORKFLOW_DIR)
+
+    for directory in search_dirs:
+        try:
+            entries = sorted(
+                name for name in os.listdir(directory)
+                if name.endswith(".json") and os.path.isfile(os.path.join(directory, name))
+            )
+        except FileNotFoundError:
+            continue
+        except Exception as exc:
+            print(f"Error while listing JSON files in {directory}: {exc}")
+            continue
+
+        for filename in entries:
+            if os.path.abspath(directory) == os.path.abspath(OUTPUT_DIR):
+                display = filename
+            else:
+                rel_path = os.path.relpath(os.path.join(directory, filename), USER_ROOT_DIR)
+                display = rel_path.replace(os.sep, "/")
+
+            base_display = display
+            suffix = 2
+            while display in WORKFLOW_FILE_MAP:
+                display = f"{base_display} ({suffix})"
+                suffix += 1
+
+            _register_workflow_file(display, directory, filename)
+            discovered.append(display)
+
+    return discovered
 
 def refresh_json_files():
     new_choices = get_json_files()
@@ -311,750 +875,1435 @@ def refresh_json_files():
 
 def update_from_preset(resolution_str_with_prefix):
     if resolution_str_with_prefix == "custom":
-        # 返回空更新，让用户手动输入
-        return "custom", gr.update(), gr.update(), "当前比例: 自定义"
+        # return empty updates so the user can type manually
+        return "custom", gr.update(), gr.update(), "Current ratio: Custom"
 
     # parse_resolution is imported, needs resolution_prefixes
     width, height, ratio, original_str = parse_resolution(resolution_str_with_prefix, resolution_prefixes)
 
-    if width is None: # 处理无效格式的情况
-        return "custom", gr.update(), gr.update(), "当前比例: 无效格式"
+    if width is None:  # invalid format
+        return "custom", gr.update(), gr.update(), "Current ratio: Invalid format"
 
     # Return the original string with prefix for the dropdown value
-    return original_str, width, height, f"当前比例: {ratio}"
+    return original_str, width, height, f"Current ratio: {ratio}"
 
 def update_from_inputs(width, height):
     # calculate_aspect_ratio and find_closest_preset are imported
     # find_closest_preset needs resolution_presets and resolution_prefixes
     ratio = calculate_aspect_ratio(width, height)
     closest_preset = find_closest_preset(width, height, resolution_presets, resolution_prefixes)
-    return closest_preset, f"当前比例: {ratio}"
+    return closest_preset, f"Current ratio: {ratio}"
 
 def flip_resolution(width, height):
     if width is None or height is None:
         return None, None
     try:
-        # 确保返回的是数字类型
+        # ensure we return numeric values
         return int(height), int(width)
     except (ValueError, TypeError):
-        return width, height # 如果转换失败，返回原值
+        return width, height  # fallback if conversion fails
 
-# --- 模型列表获取 ---
+# --- Model list helpers ---
 def get_model_list(model_type):
     try:
-        # 添加 "None" 选项，允许不选择
+        # include "None" option
         return ["None"] + folder_paths.get_filename_list(model_type)
     except Exception as e:
-        print(f"获取 {model_type} 列表时出错: {e}")
+        print(f"Error retrieving list for {model_type}: {e}")
         return ["None"]
+
+# --- Image helpers ---
+def _load_image_from_path(path, execution_id):
+    if not path:
+        return None
+    try:
+        with Image.open(path) as pil_img:
+            return pil_img.convert("RGBA")
+    except FileNotFoundError:
+        print(f"[{execution_id}] Image path not found: {path}")
+    except Exception as exc:
+        print(f"[{execution_id}] Error loading image from '{path}': {exc}")
+    return None
+
+
+def _decode_base64_image(data, execution_id):
+    if not isinstance(data, str):
+        return None
+    if data.startswith("data:image"):
+        try:
+            header, encoded = data.split(",", 1)
+        except ValueError:
+            print(f"[{execution_id}] Invalid data URL format.")
+            return None
+    else:
+        encoded = data
+    try:
+        binary = base64.b64decode(encoded)
+        with Image.open(io.BytesIO(binary)) as pil_img:
+            return pil_img.convert("RGBA")
+    except Exception as exc:
+        print(f"[{execution_id}] Failed to decode base64 image: {exc}")
+        return None
+
+
+try:
+    from gradio.data_classes import FileData as GradioFileData  # type: ignore
+except Exception:
+    GradioFileData = None
+
+
+def _decode_payload_to_pil(payload, execution_id, skip_keys=None):
+    skip_keys = set(skip_keys or ())
+    if payload is None:
+        return None
+    if isinstance(payload, Image.Image):
+        return payload
+    if isinstance(payload, np.ndarray):
+        try:
+            if payload.ndim == 2:
+                payload = np.stack([payload]*3, axis=-1)
+            if payload.ndim == 3 and payload.shape[2] == 4:
+                mode = "RGBA"
+            else:
+                mode = "RGB"
+            return Image.fromarray(payload.astype(np.uint8), mode=mode)
+        except Exception as exc:
+            print(f"[{execution_id}] Unsupported numpy payload: {exc}")
+            return None
+    if isinstance(payload, (bytes, bytearray)):
+        try:
+            with Image.open(io.BytesIO(payload)) as pil_img:
+                return pil_img.convert("RGBA")
+        except Exception as exc:
+            print(f"[{execution_id}] Failed to decode raw bytes: {exc}")
+            return None
+    if isinstance(payload, str):
+        return _load_image_from_path(payload, execution_id) or _decode_base64_image(payload, execution_id)
+    if GradioFileData is not None and isinstance(payload, GradioFileData):
+        candidate_path = getattr(payload, "path", None)
+        pil_img = _decode_payload_to_pil(candidate_path, execution_id, skip_keys)
+        if pil_img is not None:
+            return pil_img
+        candidate_data = getattr(payload, "data", None)
+        return _decode_payload_to_pil(candidate_data, execution_id, skip_keys)
+    if isinstance(payload, (list, tuple)):
+        for item in payload:
+            pil_img = _decode_payload_to_pil(item, execution_id, skip_keys)
+            if pil_img is not None:
+                return pil_img
+        return None
+    if isinstance(payload, dict):
+        for key in ("image", "background", "value", "data", "orig", "canvas", "input"):
+            if key in payload and key not in skip_keys:
+                pil_img = _decode_payload_to_pil(payload[key], execution_id, skip_keys)
+                if pil_img is not None:
+                    return pil_img
+        for key in ("path", "name", "tempfile"):
+            if key in payload and key not in skip_keys:
+                pil_img = _decode_payload_to_pil(payload[key], execution_id, skip_keys)
+                if pil_img is not None:
+                    return pil_img
+        for key, value in payload.items():
+            if key in skip_keys:
+                continue
+            pil_img = _decode_payload_to_pil(value, execution_id, skip_keys)
+            if pil_img is not None:
+                return pil_img
+        return None
+    print(f"[{execution_id}] Warning: unrecognized payload type {type(payload)}.")
+    return None
+
+
+def _extract_mask_from_editor_payload(payload, execution_id):
+    if not isinstance(payload, dict):
+        return None
+    combined_mask = None
+    layers = payload.get("layers")
+    if isinstance(layers, (list, tuple)):
+        for layer_payload in layers:
+            layer_img = _decode_payload_to_pil(layer_payload, execution_id)
+            if layer_img is None:
+                continue
+            try:
+                alpha = layer_img.split()[-1] if layer_img.mode in ("RGBA", "LA") else layer_img.convert("RGBA").split()[-1]
+                alpha_l = alpha.convert("L")
+                combined_mask = alpha_l if combined_mask is None else ImageChops.lighter(combined_mask, alpha_l)
+            except Exception as exc:
+                print(f"[{execution_id}] Unable to extract alpha from editor layer: {exc}")
+    background_payload = payload.get("background")
+    composite_payload = payload.get("composite")
+    if background_payload is not None and composite_payload is not None:
+        background_img = _decode_payload_to_pil(background_payload, execution_id)
+        composite_img = _decode_payload_to_pil(composite_payload, execution_id)
+        if background_img and composite_img and background_img.size == composite_img.size:
+            try:
+                diff = ImageChops.difference(composite_img.convert("RGB"), background_img.convert("RGB")).convert("L")
+                diff_mask = diff.point(lambda px: 255 if px > 12 else 0)
+                if diff_mask.getbbox():
+                    combined_mask = diff_mask if combined_mask is None else ImageChops.lighter(combined_mask, diff_mask)
+            except Exception as exc:
+                print(f"[{execution_id}] Failed to derive mask diff: {exc}")
+    if combined_mask is not None:
+        try:
+            normalized = combined_mask.point(lambda px: 255 if px >= 10 else 0)
+            if normalized.getbbox():
+                return normalized
+            return combined_mask
+        except Exception:
+            return combined_mask
+    return None
+
+
+def _coerce_uploaded_image_to_pil(upload, execution_id, *, return_mask=False):
+    mask_image = None
+    if isinstance(upload, dict):
+        mask_payload = upload.get("mask") or upload.get("alpha")
+        if mask_payload is not None and mask_payload is not upload:
+            mask_image = _decode_payload_to_pil(mask_payload, execution_id)
+        if mask_image is None:
+            mask_image = _extract_mask_from_editor_payload(upload, execution_id)
+    image = _decode_payload_to_pil(upload, execution_id, skip_keys={"mask", "alpha"})
+    if return_mask:
+        return image, mask_image if isinstance(mask_image, Image.Image) else None
+    return image
+
+
+def _encode_pil_to_data_url(image, *, format_hint="PNG"):
+    if image is None:
+        return None
+    try:
+        buffer = io.BytesIO()
+        fmt = (format_hint or "PNG").upper()
+        writable = image.convert("RGBA") if fmt == "PNG" else image
+        writable.save(buffer, format=fmt)
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return f"data:image/{fmt.lower()};base64,{encoded}"
+    except Exception as exc:
+        print(f"[DATA_URL] Failed to encode image: {exc}")
+        return None
+
+
+def _assign_unique_ids_to_outputs(prompt, base_token):
+    image_ids = []
+    video_ids = []
+    if not isinstance(prompt, dict):
+        return image_ids, video_ids
+
+    image_nodes = find_all_nodes_by_class_type(prompt, "Hua_Output")
+    for idx, node_info in enumerate(image_nodes):
+        node_id = node_info.get("id")
+        if not node_id or node_id not in prompt:
+            continue
+        unique_id = f"{base_token}_img{idx}"
+        node_inputs = prompt[node_id].setdefault("inputs", {})
+        node_inputs["unique_id"] = unique_id
+        image_ids.append(unique_id)
+        print(f"[{base_token}] Assigned image unique_id '{unique_id}' to Hua_Output node {node_id}.")
+
+    video_nodes = find_all_nodes_by_class_type(prompt, "Hua_Video_Output")
+    for idx, node_info in enumerate(video_nodes):
+        node_id = node_info.get("id")
+        if not node_id or node_id not in prompt:
+            continue
+        unique_id = f"{base_token}_vid{idx}"
+        node_inputs = prompt[node_id].setdefault("inputs", {})
+        node_inputs["unique_id"] = unique_id
+        video_ids.append(unique_id)
+        print(f"[{base_token}] Assigned video unique_id '{unique_id}' to Hua_Video_Output node {node_id}.")
+
+    return image_ids, video_ids
+
+
+def _wait_for_prompt_completion(client_id, prompt_id, *, timeout=420, poll_interval=0.75):
+    if not client_id or not prompt_id:
+        return None
+
+    deadline = time.time() + timeout
+    history_url = f"http://127.0.0.1:8188/history/{client_id}"
+    last_status = None
+    failure_streak = 0
+    max_failures = 12  # roughly ~9 seconds with default poll interval
+
+    while time.time() < deadline:
+        try:
+            response = requests.get(history_url, timeout=10)
+            response.raise_for_status()
+            payload = response.json()
+            failure_streak = 0
+        except requests.exceptions.RequestException as exc:
+            failure_streak += 1
+            print(f"[{prompt_id}] History poll failed ({exc}); retrying...")
+            if failure_streak >= max_failures:
+                print(f"[{prompt_id}] History poll giving up after {failure_streak} consecutive failures.")
+                break
+            time.sleep(min(poll_interval * 2, 2.0))
+            continue
+        except json.JSONDecodeError as exc:
+            print(f"[{prompt_id}] Unable to parse history response ({exc}); retrying...")
+            time.sleep(poll_interval)
+            continue
+
+        prompt_entry = None
+        if isinstance(payload, dict):
+            prompt_entry = payload.get(prompt_id)
+            if prompt_entry is None:
+                history_dict = payload.get("history") or payload.get("prompts") or payload.get("data")
+                if isinstance(history_dict, dict):
+                    prompt_entry = history_dict.get(prompt_id)
+
+        if prompt_entry:
+            raw_status = prompt_entry.get("status")
+            status_value = None
+            if isinstance(raw_status, dict):
+                status_value = raw_status.get("status") or raw_status.get("result")
+            elif isinstance(raw_status, str):
+                status_value = raw_status
+
+            # Debug: log what we actually received
+            if status_value:
+                normalized = str(status_value).lower()
+                last_status = normalized
+                if normalized in {"completed", "complete", "finished", "success", "succeeded"}:
+                    print(f"[{prompt_id}] Prompt marked as {normalized} in history.")
+                    return prompt_entry
+                if normalized in {"error", "failed", "failure", "cancelled", "canceled", "stopped"}:
+                    print(f"[{prompt_id}] Prompt marked as {normalized} in history.")
+                    return prompt_entry
+            else:
+                # No status value but entry exists - might mean it's still processing or complete without explicit status
+                # Check if entry has 'outputs' field which indicates completion
+                if "outputs" in prompt_entry or "images" in prompt_entry:
+                    print(f"[{prompt_id}] Prompt entry found with outputs but no explicit status - assuming complete.")
+                    return prompt_entry
+
+        time.sleep(poll_interval)
+
+    if last_status:
+        print(f"[{prompt_id}] History poll timed out after {timeout}s (last status: {last_status}).")
+    else:
+        print(f"[{prompt_id}] History poll timed out after {timeout}s (no status available).")
+    return None
+
+
+def _wait_for_output_json(unique_ids, *, timeout=420, poll_interval=0.5):
+    resolved = {}
+    pending = {uid: os.path.join(TEMP_DIR, f"{uid}.json") for uid in unique_ids if uid}
+    if not pending:
+        return resolved, {}
+
+    deadline = time.time() + timeout
+    start_time = time.time()
+    last_log_time = start_time
+
+    while pending and time.time() < deadline:
+        # Check if processing has been interrupted or aborted
+        if interrupt_requested_event.is_set():
+            print(f"[OUTPUT_JSON] Interrupt detected, aborting wait for {len(pending)} pending outputs")
+            break
+
+        # Check if processing event was cleared (indicates abort)
+        if not processing_event.is_set():
+            elapsed = time.time() - start_time
+            if elapsed > 30:  # Allow 30 seconds grace period for normal completion
+                print(f"[OUTPUT_JSON] Processing aborted, returning {len(resolved)} resolved outputs")
+                break
+
+        for uid, path in list(pending.items()):
+            if not os.path.exists(path):
+                continue
+            try:
+                if os.path.getsize(path) == 0:
+                    continue
+            except OSError:
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    resolved[uid] = json.load(handle)
+                del pending[uid]
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                print(f"[{uid}] Loaded output metadata from {path}.")
+            except (OSError, json.JSONDecodeError):
+                # File may still be in-flight; retry on next loop
+                continue
+
+        # Log progress every 10 seconds if still waiting
+        current_time = time.time()
+        if pending and (current_time - last_log_time) >= 10:
+            elapsed = current_time - start_time
+            print(f"[OUTPUT_JSON] Still waiting for {len(pending)} outputs after {elapsed:.1f}s (timeout in {deadline - current_time:.1f}s)")
+            last_log_time = current_time
+
+        if pending:
+            time.sleep(poll_interval)
+
+    # Clean up any remaining pending temp files on timeout or abort
+    if pending:
+        print(f"[OUTPUT_JSON] Cleaning up {len(pending)} pending temp files")
+        for uid, path in pending.items():
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                    print(f"[{uid}] Removed stale temp file: {path}")
+            except OSError as e:
+                print(f"[{uid}] Failed to remove temp file {path}: {e}")
+
+    return resolved, pending
+
+
+def _extract_paths_from_output_payload(payload_map, *, kind):
+    collected_paths = []
+    errors = []
+    for uid, payload in payload_map.items():
+        try:
+            paths = []
+            error_message = None
+            if isinstance(payload, list):
+                paths = payload
+            elif isinstance(payload, dict):
+                error_message = payload.get("error")
+                paths = payload.get("generated_files") or payload.get("files") or []
+            else:
+                error_message = f"Unexpected {kind} JSON payload type: {type(payload)}"
+
+            for path in paths:
+                normalized_path = path
+                if isinstance(path, str) and not os.path.isabs(path):
+                    normalized_path = os.path.abspath(path)
+                if isinstance(normalized_path, str):
+                    collected_paths.append(normalized_path)
+                else:
+                    error_message = error_message or f"Invalid path entry for {uid}: {path!r}"
+
+            if error_message:
+                errors.append(f"{uid}: {error_message}")
+        except Exception as exc:
+            errors.append(f"{uid}: failed to parse {kind} payload ({exc})")
+    return collected_paths, errors
+
+
+def _resolve_history_item_path(item, *, expected_kind):
+    if not isinstance(item, dict):
+        return None
+    filename = item.get("filename")
+    if not filename:
+        return None
+    subfolder = item.get("subfolder") or ""
+    base_type = item.get("type") or ""
+    base_dir = None
+    if base_type == "output":
+        base_dir = OUTPUT_DIR
+    elif base_type == "temp":
+        base_dir = TEMP_DIR
+    elif base_type == "input":
+        base_dir = INPUT_DIR
+    if base_dir is None:
+        base_dir = OUTPUT_DIR if expected_kind == "image" else TEMP_DIR
+    path = os.path.join(base_dir, subfolder, filename)
+    return os.path.abspath(path)
+
+
+def _extract_paths_from_history_entry(history_entry):
+    image_paths = []
+    video_paths = []
+    errors = []
+    if not isinstance(history_entry, dict):
+        return image_paths, video_paths, errors
+
+    outputs = history_entry.get("outputs") or history_entry.get("output")
+    if not isinstance(outputs, dict):
+        return image_paths, video_paths, errors
+
+    seen = set()
+
+    for node_id, node_outputs in outputs.items():
+        if not isinstance(node_outputs, dict):
+            continue
+        for image_info in node_outputs.get("images", []):
+            path = _resolve_history_item_path(image_info, expected_kind="image")
+            if path:
+                if os.path.isfile(path):
+                    if path not in seen:
+                        image_paths.append(path)
+                        seen.add(path)
+                else:
+                    errors.append(f"{node_id}: image file missing at '{path}'")
+        for video_info in node_outputs.get("videos", []):
+            path = _resolve_history_item_path(video_info, expected_kind="video")
+            if path:
+                if os.path.isfile(path):
+                    if path not in seen:
+                        video_paths.append(path)
+                        seen.add(path)
+                else:
+                    errors.append(f"{node_id}: video file missing at '{path}'")
+
+    return image_paths, video_paths, errors
+
+
+def _format_gallery_items(paths):
+    formatted = []
+    for entry in paths or []:
+        if isinstance(entry, dict):
+            candidate = entry.get("path") or entry.get("filename")
+            if candidate:
+                formatted.append(candidate)
+            else:
+                formatted.append(entry)
+        elif isinstance(entry, (list, tuple)) and entry:
+            formatted.append(entry[0])
+        else:
+            formatted.append(entry)
+    return formatted
+
+
+def _ensure_absolute_path(path):
+    if not path:
+        return None
+    if os.path.isabs(path):
+        return path
+    return os.path.abspath(os.path.join(OUTPUT_DIR, path))
+
+
+def _inject_mask_into_prompt(prompt, mask_filename, execution_id):
+    if not mask_filename:
+        return
+    mask_keys = {"mask", "mask_image", "mask_input", "mask_path", "mask_file"}
+    for node_id, node_data in (prompt or {}).items():
+        inputs = node_data.get("inputs") if isinstance(node_data, dict) else None
+        if not isinstance(inputs, dict):
+            continue
+        updated = False
+        for key in mask_keys:
+            if key not in inputs:
+                continue
+            value = inputs[key]
+            if isinstance(value, list):  # respect existing connections
+                continue
+            inputs[key] = mask_filename
+            updated = True
+        if updated:
+            print(f"[{execution_id}] Injected mask '{mask_filename}' into node {node_id}.")
+
+
+def _parse_ksampler_settings(workflow_info, flat_values):
+    settings = []
+    dynamic_data = (workflow_info or {}).get("dynamic_components", {}).get("KSampler", [])
+
+    def _coerce_int(value, default=0):
+        try:
+            if value is None or value == "":
+                return default
+            return int(value)
+        except (ValueError, TypeError):
+            return default
+
+    def _coerce_float(value, default=0.0):
+        try:
+            if value is None or value == "":
+                return default
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+
+    for idx in range(MAX_KSAMPLER_CONTROLS):
+        base = idx * 9
+        fields = list(flat_values[base:base + 9])
+        while len(fields) < 9:
+            fields.append(None)
+
+        steps_val, cfg_val, sampler_val, scheduler_val, start_step_val, end_step_val, add_noise_val, return_leftover_val, noise_seed_val = fields[:9]
+        source_node_data = dynamic_data[idx] if idx < len(dynamic_data) else {}
+
+        settings.append({
+            "steps": _coerce_int(steps_val, 20),
+            "cfg": _coerce_float(cfg_val, 7.0),
+            "sampler_name": sampler_val if isinstance(sampler_val, str) else (sampler_val or ""),
+            "scheduler": scheduler_val if isinstance(scheduler_val, str) else (scheduler_val or ""),
+            "start_at_step": _coerce_int(start_step_val, 0),
+            "end_at_step": _coerce_int(end_step_val, 0),
+            "add_noise": add_noise_val or "enable",
+            "return_with_leftover_noise": return_leftover_val or "disable",
+            "seed_value": noise_seed_val,
+            "seed_field": source_node_data.get("seed_field", "noise_seed"),
+        })
+    return settings
+
+
+def _parse_mask_settings(mask_flat):
+    settings = []
+
+    def _as_bool(value, default=False):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in {"true", "1", "yes", "on", "enable"}
+        if value is None:
+            return default
+        return bool(value)
+
+    def _as_float(value, default=0.0):
+        try:
+            if value is None or value == "":
+                return default
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+
+    for idx in range(MAX_MASK_GENERATORS):
+        base = idx * MASK_FIELD_COUNT
+        fields = list(mask_flat[base:base + MASK_FIELD_COUNT])
+        while len(fields) < MASK_FIELD_COUNT:
+            fields.append(None)
+        settings.append({
+            "face_mask": _as_bool(fields[0], True),
+            "background_mask": _as_bool(fields[1], False),
+            "hair_mask": _as_bool(fields[2], False),
+            "body_mask": _as_bool(fields[3], False),
+            "clothes_mask": _as_bool(fields[4], False),
+            "confidence": _as_float(fields[5], 0.15),
+            "refine_mask": _as_bool(fields[6], False),
+        })
+    return settings
+
+
+def _parse_image_loader_settings(loader_data, flat_values):
+    settings = []
+
+    def _as_bool(value, default=False):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in {"true", "1", "yes", "on", "enable"}
+        if value is None:
+            return default
+        return bool(value)
+
+    def _as_int(value, default=None):
+        try:
+            if value is None or value == "":
+                return default
+            return int(value)
+        except (ValueError, TypeError):
+            return default
+
+    for idx in range(MAX_IMAGE_LOADERS):
+        base = idx * IMAGE_LOADER_FIELD_COUNT
+        fields = list(flat_values[base:base + IMAGE_LOADER_FIELD_COUNT])
+        while len(fields) < IMAGE_LOADER_FIELD_COUNT:
+            fields.append(None)
+        loader_info = loader_data[idx] if idx < len(loader_data) else {}
+        settings.append({
+            "resize": _as_bool(fields[0], loader_info.get("resize", False)),
+            "width": _as_int(fields[1], loader_info.get("width")),
+            "height": _as_int(fields[2], loader_info.get("height")),
+            "keep_proportion": _as_bool(fields[3], loader_info.get("keep_proportion", False)),
+            "divisible_by": _as_int(fields[4], loader_info.get("divisible_by")),
+        })
+    return settings
+
 
 lora_list = get_model_list("loras")
 checkpoint_list = get_model_list("checkpoints")
-unet_list = get_model_list("unet") # 假设 UNet 模型在 'unet' 目录
+unet_list = get_model_list("unet")  # assume UNet models live under the "unet" directory
 
 # get_output_images is now imported from ui_def
 
-# 修改 generate_image 函数以接受动态组件列表
+# generate_image accepts lists of dynamic components
 def generate_image(
-    inputimage1, input_video, 
-    dynamic_positive_prompts_values: list, # 列表，包含所有 positive_prompt_texts 的值
-    prompt_text_negative, 
-    json_file, 
-    hua_width, hua_height, 
-    dynamic_loras_values: list,           # 列表，包含所有 lora_dropdowns 的值
-    hua_checkpoint, hua_unet, 
-    dynamic_float_nodes_values: list,     # 列表，包含所有 float_inputs 的值
-    dynamic_int_nodes_values: list,       # 列表，包含所有 int_inputs 的值
-    seed_mode, fixed_seed
+    inputimage1,
+    input_video,
+    dynamic_positive_prompts_values,
+    prompt_text_negative,
+    json_file,
+    hua_width,
+    hua_height,
+    dynamic_loras_values,
+    hua_checkpoint,
+    hua_unet,
+    dynamic_float_nodes_values,
+    dynamic_int_nodes_values,
+    dynamic_ksampler_values,
+    dynamic_mask_generator_values,
+    dynamic_image_loader_values,
+    seed_mode,
+    fixed_seed,
+    negative_prompt_extra_values=None,
 ):
-    global last_used_seed # 声明使用全局变量
+    global last_used_seed
     execution_id = str(uuid.uuid4())
-    print(f"[{execution_id}] 开始生成任务 (种子模式: {seed_mode})...")
-    output_type = None # 'image' or 'video'
+    print(f"[{execution_id}] Generation task started (seed mode: {seed_mode})")
+    output_type = None
 
     if not json_file:
-        print(f"[{execution_id}] 错误: 未选择工作流 JSON 文件。")
-        return None, None # 返回 (None, None) 表示失败
-
-    json_path = os.path.join(OUTPUT_DIR, json_file)
-    if not os.path.exists(json_path):
-        print(f"[{execution_id}] 错误: 工作流 JSON 文件不存在: {json_path}")
+        print(f"[{execution_id}] Error: no workflow JSON selected.")
         return None, None
 
+    workflow_dir, workflow_name, workflow_path = resolve_workflow_components(json_file)
+    if not workflow_path:
+        print(f"[{execution_id}] Error: workflow JSON not found for selection '{json_file}'")
+        return None, None
+
+    prompt = load_prompt_from_file(workflow_path)
+    if not isinstance(prompt, dict) or not prompt:
+        print(f"[{execution_id}] Failed to load workflow '{workflow_path}': unsupported or empty structure.")
+        return None, None
+
+    workflow_info = get_workflow_defaults_and_visibility(
+        workflow_name if workflow_name else "",
+        workflow_dir if workflow_dir else OUTPUT_DIR,
+        resolution_prefixes,
+        resolution_presets,
+        MAX_DYNAMIC_COMPONENTS
+    )
+
+    queue_client_id = None
     try:
-        with open(json_path, "r", encoding="utf-8") as file_json:
-            prompt = json.load(file_json)
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        print(f"[{execution_id}] 读取或解析 JSON 文件时出错 ({json_path}): {e}")
-        return None, None
+        if 'comfyui_previewer' in globals():
+            previewer_client = getattr(comfyui_previewer, "client_id", None)
+            if isinstance(previewer_client, str) and previewer_client:
+                queue_client_id = previewer_client
+    except Exception:
+        queue_client_id = None
 
-    # --- 更新 Prompt ---
-    # 首先获取工作流中实际存在的动态节点的定义
-    # 注意：get_workflow_defaults_and_visibility 现在返回更详细的动态组件信息
-    # 我们需要从 prompt (原始JSON) 中直接查找节点ID，或者依赖 get_workflow_defaults_and_visibility 返回的ID
-    # 为简化，这里假设 get_workflow_defaults_and_visibility 返回的 dynamic_components 包含节点ID
-    # 并且 dynamic_*_values 列表中的顺序与 get_workflow_defaults_and_visibility 找到的节点顺序一致
+    output_tracking_token = execution_id.replace("-", "")
+    image_result_ids, video_result_ids = _assign_unique_ids_to_outputs(prompt, output_tracking_token)
+    if not image_result_ids and not video_result_ids:
+        print(f"[{execution_id}] Warning: no Hua output nodes discovered; results will rely on default ComfyUI paths.")
+    if not queue_client_id:
+        queue_client_id = f"gradio_workflow_{output_tracking_token}"
 
-    workflow_info = get_workflow_defaults_and_visibility(json_file, OUTPUT_DIR, resolution_prefixes, resolution_presets, MAX_DYNAMIC_COMPONENTS)
-    
-    # --- 单例节点查找 ---
-    image_input_key = find_key_by_class_type(prompt, "GradioInputImage")
-    video_input_key = find_key_by_class_type(prompt, "VHS_LoadVideo")
-    seed_key = find_key_by_class_type(prompt, "Hua_gradio_Seed")
-    text_bad_key = find_key_by_class_type(prompt, "GradioTextBad")
-    fenbianlv_key = find_key_by_class_type(prompt, "Hua_gradio_resolution")
-    checkpoint_key = find_key_by_class_type(prompt, "Hua_CheckpointLoaderSimple")
-    unet_key = find_key_by_class_type(prompt, "Hua_UNETLoader") # 确保类名正确
-    hua_output_key = find_key_by_class_type(prompt, "Hua_Output")
-    hua_video_output_key = find_key_by_class_type(prompt, "Hua_Video_Output")
-    
-    inputfilename = None # 初始化
+    snapshot_mtime = time.time()
+    preexisting_outputs = {}
+    try:
+        for existing_path in get_output_images(OUTPUT_DIR):
+            try:
+                preexisting_outputs[existing_path] = os.path.getmtime(existing_path)
+            except OSError:
+                preexisting_outputs[existing_path] = None
+    except Exception as exc:
+        print(f"[{execution_id}] Warning: unable to snapshot output directory before run: {exc}")
+
+    image_input_key = find_key_by_class_type(prompt, 'GradioInputImage')
+    video_input_key = find_key_by_class_type(prompt, 'VHS_LoadVideo')
+    seed_key = find_key_by_class_type(prompt, 'Hua_gradio_Seed')
+    text_bad_key = find_key_by_class_type(prompt, 'GradioTextBad')
+    resolution_key = find_key_by_class_type(prompt, 'Hua_gradio_resolution')
+    checkpoint_key = find_key_by_class_type(prompt, 'Hua_CheckpointLoaderSimple')
+    unet_key = find_key_by_class_type(prompt, 'Hua_UNETLoader')
+    hua_output_key = find_key_by_class_type(prompt, 'Hua_Output')
+    hua_video_output_key = find_key_by_class_type(prompt, 'Hua_Video_Output')
+
+    saved_mask_filename = None
+    saved_mask_path = None
+
     if image_input_key:
-        if inputimage1 is not None:
+        base_img, mask_img = _coerce_uploaded_image_to_pil(inputimage1, execution_id, return_mask=True)
+        if base_img is not None:
             try:
-                # 确保 inputimage1 是 PIL Image 对象
-                if isinstance(inputimage1, np.ndarray):
-                    img = Image.fromarray(inputimage1)
-                elif isinstance(inputimage1, Image.Image):
-                    img = inputimage1
-                else:
-                    print(f"[{execution_id}] 警告: 未知的输入图像类型: {type(inputimage1)}。尝试跳过图像输入。")
-                    img = None
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                inputfilename = f"gradio_input_{timestamp}_{random.randint(100, 999)}.png"
+                save_path = os.path.join(INPUT_DIR, inputfilename)
+                base_img.convert('RGBA').save(save_path)
+                prompt[image_input_key].setdefault('inputs', {})['image'] = inputfilename
+                print(f"[{execution_id}] Saved input image to {save_path}")
+            except Exception as exc:
+                print(f"[{execution_id}] Failed to save input image: {exc}")
+        if mask_img is not None:
+            try:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                saved_mask_filename = f"gradio_input_mask_{timestamp}_{random.randint(100, 999)}.png"
+                saved_mask_path = os.path.join(INPUT_DIR, saved_mask_filename)
+                mask_l = mask_img.convert('L')
+                if base_img and mask_l.size != base_img.size:
+                    try:
+                        mask_l = mask_l.resize(base_img.size, Image.NEAREST)
+                        print(f"[{execution_id}] Resized mask to match input image {base_img.size}.")
+                    except Exception as resize_exc:
+                        print(f"[{execution_id}] Warning: failed to resize mask: {resize_exc}")
+                alpha_channel = ImageOps.invert(mask_l)
+                alpha_channel.save(saved_mask_path)
+                print(f"[{execution_id}] Saved mask to {saved_mask_path}")
+            except Exception as mask_exc:
+                print(f"[{execution_id}] Warning: unable to save mask payload: {mask_exc}")
+                saved_mask_filename = None
+                saved_mask_path = None
+    elif inputimage1 is not None:
+        print(f"[{execution_id}] Warning: input payload provided but no image node found in workflow.")
 
-                if img:
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    inputfilename = f"gradio_input_{timestamp}_{random.randint(100, 999)}.png"
-                    save_path = os.path.join(INPUT_DIR, inputfilename)
-                    img.save(save_path)
-                    prompt[image_input_key]["inputs"]["image"] = inputfilename
-                    print(f"[{execution_id}] 输入图像已保存到: {save_path}")
-            except Exception as e:
-                print(f"[{execution_id}] 保存输入图像时出错: {e}")
-                # 不设置图像输入，让工作流使用默认值（如果存在）
-                if "image" in prompt[image_input_key]["inputs"]:
-                    del prompt[image_input_key]["inputs"]["image"] # 或者设置为 None，取决于节点如何处理
-        else:
-             # 如果没有输入图像，确保节点输入中没有残留的文件名
-             if image_input_key and "image" in prompt.get(image_input_key, {}).get("inputs", {}):
-                 # 尝试移除或设置为空，取决于节点期望
-                 # prompt[image_input_key]["inputs"]["image"] = None
-                 print(f"[{execution_id}] 无输入图像提供，清除节点 {image_input_key} 的 image 输入。")
-                 # 或者如果节点必须有输入，则可能需要报错或使用默认图像
-                 # return None, None # 如果图生图节点必须有输入
+    if saved_mask_filename:
+        _inject_mask_into_prompt(prompt, saved_mask_filename, execution_id)
 
-    # --- 处理视频输入 ---
-    inputvideofilename = None
     if video_input_key:
-        if input_video is not None and os.path.exists(input_video):
+        if input_video and os.path.exists(input_video):
             try:
-                # Gradio 返回的是临时文件路径，需要复制到 ComfyUI 的 input 目录
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                # 保留原始扩展名
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                 original_ext = os.path.splitext(input_video)[1]
                 inputvideofilename = f"gradio_input_{timestamp}_{random.randint(100, 999)}{original_ext}"
                 dest_path = os.path.join(INPUT_DIR, inputvideofilename)
-                shutil.copy2(input_video, dest_path) # 使用 copy2 保留元数据
-                prompt[video_input_key]["inputs"]["video"] = inputvideofilename
-                print(f"[{execution_id}] 输入视频已复制到: {dest_path}")
-            except Exception as e:
-                print(f"[{execution_id}] 复制输入视频时出错: {e}")
-                # 清除节点输入，让其使用默认值（如果存在）
-                if "video" in prompt[video_input_key]["inputs"]:
-                    del prompt[video_input_key]["inputs"]["video"]
+                shutil.copy2(input_video, dest_path)
+                prompt[video_input_key]['inputs']['video'] = inputvideofilename
+                print(f"[{execution_id}] Copied input video to {dest_path}")
+            except Exception as exc:
+                print(f"[{execution_id}] Failed to handle input video: {exc}")
+                prompt[video_input_key]['inputs'].pop('video', None)
         else:
-            # 如果没有输入视频或路径无效，确保节点输入中没有残留的文件名
-            if "video" in prompt.get(video_input_key, {}).get("inputs", {}):
-                print(f"[{execution_id}] 无有效输入视频提供，清除节点 {video_input_key} 的 video 输入。")
-                # 移除或设置为空，取决于节点期望
-                 # prompt[video_input_key]["inputs"]["video"] = None
+            prompt.get(video_input_key, {}).get('inputs', {}).pop('video', None)
 
-    if seed_key:
-        with seed_lock: # 保护对 last_used_seed 的访问
-            current_seed = 0
-            if seed_mode == "随机":
-                current_seed = random.randint(0, 0xffffffff)
-                print(f"[{execution_id}] 种子模式: 随机. 生成种子: {current_seed}")
-            elif seed_mode == "递增":
-                if last_used_seed == -1: # 如果是第一次运行递增
-                    last_used_seed = random.randint(0, 0xffffffff -1) # 随机选一个初始值，避免总是从0开始且确保能+1
-                last_used_seed = (last_used_seed + 1) & 0xffffffff # 递增并处理溢出 (按位与)
-                current_seed = last_used_seed
-                print(f"[{execution_id}] 种子模式: 递增. 使用种子: {current_seed}")
-            elif seed_mode == "递减":
-                if last_used_seed == -1: # 如果是第一次运行递减
-                    last_used_seed = random.randint(1, 0xffffffff) # 随机选一个初始值，避免总是从0开始且确保能-1
-                last_used_seed = (last_used_seed - 1) & 0xffffffff # 递减并处理下溢 (按位与)
-                current_seed = last_used_seed
-                print(f"[{execution_id}] 种子模式: 递减. 使用种子: {current_seed}")
-            elif seed_mode == "固定":
-                try:
-                    current_seed = int(fixed_seed) & 0xffffffff # 确保是整数且在范围内
-                    last_used_seed = current_seed # 固定模式也更新 last_used_seed
-                    print(f"[{execution_id}] 种子模式: 固定. 使用种子: {current_seed}")
-                except (ValueError, TypeError):
-                    current_seed = random.randint(0, 0xffffffff)
-                    last_used_seed = current_seed
-                    print(f"[{execution_id}] 种子模式: 固定. 固定种子值无效 ('{fixed_seed}')，回退到随机种子: {current_seed}")
-            else: # 未知模式，默认为随机
+    current_seed = None
+    with seed_lock:
+        if seed_mode == 'Random':
+            current_seed = random.randint(0, 0xffffffff)
+            last_used_seed = current_seed
+        elif seed_mode == 'Increment':
+            if last_used_seed == -1:
+                last_used_seed = random.randint(0, 0xffffffff - 1)
+            last_used_seed = (last_used_seed + 1) & 0xffffffff
+            current_seed = last_used_seed
+        elif seed_mode == 'Decrement':
+            if last_used_seed == -1:
+                last_used_seed = random.randint(1, 0xffffffff)
+            last_used_seed = (last_used_seed - 1) & 0xffffffff
+            current_seed = last_used_seed
+        elif seed_mode == 'Fixed':
+            try:
+                current_seed = int(fixed_seed) & 0xffffffff
+                last_used_seed = current_seed
+            except (ValueError, TypeError):
                 current_seed = random.randint(0, 0xffffffff)
                 last_used_seed = current_seed
-                print(f"[{execution_id}] 未知种子模式 '{seed_mode}'. 回退到随机种子: {current_seed}")
+                print(f"[{execution_id}] Warning: invalid fixed seed '{fixed_seed}', falling back to random {current_seed}")
+        else:
+            current_seed = random.randint(0, 0xffffffff)
+            last_used_seed = current_seed
+            print(f"[{execution_id}] Warning: unknown seed mode '{seed_mode}'. Using random seed {current_seed}")
 
-            prompt[seed_key]["inputs"]["seed"] = current_seed
-    
-    # 更新动态正向提示词
-    actual_positive_prompt_nodes = workflow_info["dynamic_components"]["GradioTextOk"]
+    if current_seed is not None:
+        if seed_key:
+            prompt[seed_key]['inputs']['seed'] = current_seed
+            print(f"[{execution_id}] Using seed {current_seed} ({seed_mode})")
+        else:
+            print(f"[{execution_id}] Using seed {current_seed} ({seed_mode}) (no dedicated seed node found; applying directly to samplers)")
+
+    actual_positive_prompt_nodes = workflow_info['dynamic_components'].get('GradioTextOk', [])
     for i, node_info in enumerate(actual_positive_prompt_nodes):
         if i < len(dynamic_positive_prompts_values):
-            node_id_to_update = node_info["id"]
+            node_id_to_update = node_info.get('id')
             if node_id_to_update in prompt:
-                prompt[node_id_to_update]["inputs"]["string"] = dynamic_positive_prompts_values[i]
-                print(f"[{execution_id}] 更新正向提示节点 {node_id_to_update} (UI组件 {i+1}) 为: '{dynamic_positive_prompts_values[i]}'")
-            else:
-                print(f"[{execution_id}] 警告: 未在prompt中找到正向提示节点ID {node_id_to_update}")
-        else:
-            # 通常不应发生，因为 dynamic_positive_prompts_values 应该与可见组件数量匹配
-            print(f"[{execution_id}] 警告: 正向提示值列表长度不足以覆盖节点 {node_info['id']}")
+                prompt[node_id_to_update]['inputs']['string'] = dynamic_positive_prompts_values[i]
+                print(f"[{execution_id}] Updated positive prompt node {node_id_to_update} (UI slot {i+1}).")
 
+    if negative_prompt_extra_values:
+        for i, extra_value in enumerate(negative_prompt_extra_values):
+            extra_node = workflow_info['dynamic_components'].get('GradioTextBad', [])
+            if i < len(extra_node):
+                node_id = extra_node[i].get('id')
+                if node_id and node_id in prompt:
+                    prompt[node_id]['inputs']['string'] = extra_value
+                    print(f"[{execution_id}] Updated additional negative prompt {node_id} (slot {i+1}).")
 
-    if text_bad_key: prompt[text_bad_key]["inputs"]["string"] = prompt_text_negative
+    if text_bad_key:
+        prompt[text_bad_key]['inputs']['string'] = prompt_text_negative or ''
 
-    if fenbianlv_key:
+    if resolution_key:
         try:
             width_val = int(hua_width)
             height_val = int(hua_height)
-            prompt[fenbianlv_key]["inputs"]["custom_width"] = width_val
-            prompt[fenbianlv_key]["inputs"]["custom_height"] = height_val
-            print(f"[{execution_id}] 设置分辨率: {width_val}x{height_val}")
-            # 添加调试信息
-            print(f"[{execution_id}] 分辨率节点ID: {fenbianlv_key}")
-            print(f"[{execution_id}] 分辨率节点输入: {prompt[fenbianlv_key]['inputs']}")
-        except (ValueError, TypeError, KeyError) as e:
-             print(f"[{execution_id}] 更新分辨率时出错: {e}. 使用默认值或跳过。")
-             # 打印当前prompt结构帮助调试
-             print(f"[{execution_id}] 当前prompt结构: {json.dumps(prompt, indent=2, ensure_ascii=False)}")
+            prompt[resolution_key]['inputs']['custom_width'] = width_val
+            prompt[resolution_key]['inputs']['custom_height'] = height_val
+            print(f"[{execution_id}] Set workflow resolution to {width_val}x{height_val}")
+        except (ValueError, TypeError) as exc:
+            print(f"[{execution_id}] Warning: unable to update resolution values: {exc}")
 
-    # 更新动态Lora模型选择
-    actual_lora_nodes = workflow_info["dynamic_components"]["Hua_LoraLoaderModelOnly"]
+    if checkpoint_key and hua_checkpoint != 'None':
+        prompt[checkpoint_key]['inputs']['ckpt_name'] = hua_checkpoint
+    if unet_key and hua_unet != 'None':
+        prompt[unet_key]['inputs']['unet_name'] = hua_unet
+
+    actual_lora_nodes = workflow_info['dynamic_components'].get('Hua_LoraLoaderModelOnly', [])
     for i, node_info in enumerate(actual_lora_nodes):
         if i < len(dynamic_loras_values):
-            node_id_to_update = node_info["id"]
-            lora_name_from_ui = dynamic_loras_values[i]
-            if node_id_to_update in prompt and lora_name_from_ui != "None":
-                prompt[node_id_to_update]["inputs"]["lora_name"] = lora_name_from_ui
-                print(f"[{execution_id}] 更新Lora节点 {node_id_to_update} (UI组件 {i+1}) 为: '{lora_name_from_ui}'")
-            elif lora_name_from_ui == "None":
-                 print(f"[{execution_id}] Lora节点 {node_id_to_update} (UI组件 {i+1}) 选择为 'None'，不更新。")
-            else:
-                print(f"[{execution_id}] 警告: 未在prompt中找到Lora节点ID {node_id_to_update}")
+            node_id = node_info.get('id')
+            selected = dynamic_loras_values[i]
+            if node_id in prompt:
+                prompt[node_id]['inputs']['lora_name'] = selected if selected != 'None' else node_info.get('value', 'None')
 
-    if checkpoint_key and hua_checkpoint != "None": prompt[checkpoint_key]["inputs"]["ckpt_name"] = hua_checkpoint
-    if unet_key and hua_unet != "None": prompt[unet_key]["inputs"]["unet_name"] = hua_unet
-
-    # 更新动态Int节点输入
-    actual_int_nodes = workflow_info["dynamic_components"]["HuaIntNode"]
+    actual_int_nodes = workflow_info['dynamic_components'].get('HuaIntNode', [])
     for i, node_info in enumerate(actual_int_nodes):
         if i < len(dynamic_int_nodes_values):
-            node_id_to_update = node_info["id"]
-            int_value_from_ui = dynamic_int_nodes_values[i]
-            if node_id_to_update in prompt and int_value_from_ui is not None:
+            node_id = node_info.get('id')
+            value = dynamic_int_nodes_values[i]
+            if node_id in prompt and value is not None:
                 try:
-                    prompt[node_id_to_update]["inputs"]["int_value"] = int(int_value_from_ui)
-                    print(f"[{execution_id}] 更新Int节点 {node_id_to_update} (UI组件 {i+1}) 为: {int(int_value_from_ui)}")
-                except (ValueError, TypeError, KeyError) as e:
-                    print(f"[{execution_id}] 更新Int节点 {node_id_to_update} 时出错: {e}. 使用默认值或跳过。")
-            else:
-                 print(f"[{execution_id}] 警告: 未在prompt中找到Int节点ID {node_id_to_update} 或值为None")
-    
-    # 更新动态Float节点输入
-    actual_float_nodes = workflow_info["dynamic_components"]["HuaFloatNode"]
+                    prompt[node_id]['inputs']['int_value'] = int(value)
+                except (ValueError, TypeError):
+                    pass
+
+    actual_float_nodes = workflow_info['dynamic_components'].get('HuaFloatNode', [])
     for i, node_info in enumerate(actual_float_nodes):
         if i < len(dynamic_float_nodes_values):
-            node_id_to_update = node_info["id"]
-            float_value_from_ui = dynamic_float_nodes_values[i]
-            if node_id_to_update in prompt and float_value_from_ui is not None:
+            node_id = node_info.get('id')
+            value = dynamic_float_nodes_values[i]
+            if node_id in prompt and value is not None:
                 try:
-                    prompt[node_id_to_update]["inputs"]["float_value"] = float(float_value_from_ui)
-                    print(f"[{execution_id}] 更新Float节点 {node_id_to_update} (UI组件 {i+1}) 为: {float(float_value_from_ui)}")
-                except (ValueError, TypeError, KeyError) as e:
-                    print(f"[{execution_id}] 更新Float节点 {node_id_to_update} 时出错: {e}. 使用默认值或跳过。")
-            else:
-                print(f"[{execution_id}] 警告: 未在prompt中找到Float节点ID {node_id_to_update} 或值为None")
+                    prompt[node_id]['inputs']['float_value'] = float(value)
+                except (ValueError, TypeError):
+                    pass
 
-    # --- 设置输出节点的 unique_id ---
-    if hua_output_key:
-        prompt[hua_output_key]["inputs"]["unique_id"] = execution_id
-        output_type = 'image'
-        print(f"[{execution_id}] 已将 unique_id 设置给图片输出节点 {hua_output_key}")
-    elif hua_video_output_key:
-        prompt[hua_video_output_key]["inputs"]["unique_id"] = execution_id
-        output_type = 'video'
-        print(f"[{execution_id}] 已将 unique_id 设置给视频输出节点 {hua_video_output_key}")
-    else:
-        print(f"[{execution_id}] 警告: 未找到 '🌙图像输出到gradio前端' 或 '🎬视频输出到gradio前端' 节点，可能无法获取结果。")
-        return None, None # 如果必须有输出节点才能工作，则返回失败
+    ksampler_settings = _parse_ksampler_settings(workflow_info, dynamic_ksampler_values or [])
+    actual_ksampler_nodes = workflow_info['dynamic_components'].get('KSampler', [])
+    seed_override = current_seed if seed_mode in {"Random", "Increment", "Decrement", "Fixed"} else None
 
-    # --- 发送请求并等待结果 ---
+    for idx, node_info in enumerate(actual_ksampler_nodes):
+        if idx < len(ksampler_settings):
+            node_id = node_info.get('id')
+            if node_id in prompt:
+                settings = ksampler_settings[idx]
+                node_inputs = prompt[node_id].setdefault('inputs', {})
+                node_inputs['steps'] = settings['steps']
+                node_inputs['cfg'] = settings['cfg']
+                node_inputs['sampler_name'] = settings['sampler_name']
+                node_inputs['scheduler'] = settings['scheduler']
+                node_inputs['start_at_step'] = settings['start_at_step']
+                node_inputs['end_at_step'] = settings['end_at_step']
+                node_inputs['add_noise'] = settings['add_noise']
+                node_inputs['return_with_leftover_noise'] = settings['return_with_leftover_noise']
+                if seed_override is not None:
+                    node_inputs[settings['seed_field']] = seed_override
+                elif settings['seed_value'] not in (None, ''):
+                    node_inputs[settings['seed_field']] = settings['seed_value']
+
+    mask_settings = _parse_mask_settings(dynamic_mask_generator_values or [])
+    actual_mask_nodes = workflow_info['dynamic_components'].get('APersonMaskGenerator', [])
+    for idx, node_info in enumerate(actual_mask_nodes):
+        if idx < len(mask_settings):
+            node_id = node_info.get('id')
+            if node_id in prompt:
+                node_inputs = prompt[node_id].setdefault('inputs', {})
+                config = mask_settings[idx]
+                node_inputs['face_mask'] = bool(config.get('face_mask', True))
+                node_inputs['background_mask'] = bool(config.get('background_mask', False))
+                node_inputs['hair_mask'] = bool(config.get('hair_mask', False))
+                node_inputs['body_mask'] = bool(config.get('body_mask', False))
+                node_inputs['clothes_mask'] = bool(config.get('clothes_mask', False))
+                node_inputs['confidence'] = float(config.get('confidence', 0.15))
+                node_inputs['refine_mask'] = bool(config.get('refine_mask', False))
+
+    image_loader_nodes = workflow_info['dynamic_components'].get('ImageLoaders', [])
+    loader_settings = _parse_image_loader_settings(image_loader_nodes, dynamic_image_loader_values or [])
+    for idx, node_info in enumerate(image_loader_nodes):
+        node_id = node_info.get('id')
+        if node_id in prompt and idx < len(loader_settings):
+            node_inputs = prompt[node_id].setdefault('inputs', {})
+            config = loader_settings[idx]
+            node_inputs['resize'] = bool(config.get('resize', False))
+            node_inputs['width'] = config.get('width')
+            node_inputs['height'] = config.get('height')
+            node_inputs['keep_proportion'] = bool(config.get('keep_proportion', False))
+            node_inputs['divisible_by'] = config.get('divisible_by')
     try:
-        print(f"[{execution_id}] 调用 start_queue 发送请求...")
-        success = start_queue(prompt) # 发送请求到 ComfyUI
-        if not success:
-             print(f"[{execution_id}] 请求发送失败 (start_queue returned False). ComfyUI后端拒绝了任务或发生错误。")
-             return "COMFYUI_REJECTED", None # 特殊返回值表示后端拒绝
-        print(f"[{execution_id}] 请求已发送，开始等待结果...")
-    except Exception as e:
-        print(f"[{execution_id}] 调用 start_queue 时发生意外错误: {e}")
+        prompt_id = start_queue(prompt, client_id=queue_client_id)
+        if prompt_id is None:
+            print(f"[{execution_id}] Failed to send prompt to ComfyUI queue.")
+            return None, None
+
+        tracking_id = prompt_id or output_tracking_token
+
+        # Only wait for history completion if we have Hua output nodes (which write their own status)
+        # Otherwise, skip straight to filesystem diff to avoid hanging on history API
+        status_entry = None
+        if image_result_ids or video_result_ids:
+            status_entry = _wait_for_prompt_completion(queue_client_id, tracking_id, timeout=300)
+        else:
+            # Poll the /queue endpoint to wait for our prompt to finish
+            deadline = time.time() + 300  # 5 minute timeout
+            while time.time() < deadline:
+                try:
+                    resp = requests.get("http://127.0.0.1:8188/queue", timeout=5)
+                    if resp.ok:
+                        queue_data = resp.json()
+                        # Check if our prompt is still in queue_running or queue_pending
+                        # Queue items are lists: [number, prompt_id, {...}, class_type]
+                        in_running = any((item[1] if isinstance(item, (list, tuple)) and len(item) > 1 else item.get('prompt_id', '')) == prompt_id
+                                       for item in queue_data.get('queue_running', []))
+                        in_pending = any((item[1] if isinstance(item, (list, tuple)) and len(item) > 1 else item.get('prompt_id', '')) == prompt_id
+                                       for item in queue_data.get('queue_pending', []))
+                        if not in_running and not in_pending:
+                            break
+                except Exception:
+                    pass  # Silently retry on errors
+                time.sleep(0.5)
+            time.sleep(1)  # Brief delay to let filesystem settle
+
+        if status_entry:
+            status_block = status_entry.get("status")
+            status_text = ""
+            detail_text = ""
+            if isinstance(status_block, dict):
+                status_text = status_block.get("status") or status_block.get("result") or ""
+                detail_text = status_block.get("message") or status_block.get("error") or status_block.get("detail") or ""
+            elif isinstance(status_block, str):
+                status_text = status_block
+            normalized_status = status_text.lower() if status_text else ""
+            if normalized_status in {"error", "failed", "failure", "cancelled", "canceled", "stopped"}:
+                print(f"[{execution_id}] ComfyUI reported status '{normalized_status}' for prompt {tracking_id}.")
+                if detail_text:
+                    print(f"[{execution_id}] Detail: {detail_text}")
+                return "COMFYUI_REJECTED", None
+        else:
+            print(f"[{execution_id}] Warning: prompt {tracking_id} did not report completion before timeout; checking for outputs anyway.")
+
+        image_payloads, pending_image_ids = _wait_for_output_json(image_result_ids)
+        video_payloads, pending_video_ids = _wait_for_output_json(video_result_ids)
+
+        if pending_image_ids:
+            log_message(f"[{execution_id}] Timed out waiting for image outputs from IDs: {', '.join(pending_image_ids.keys())}")
+        if pending_video_ids:
+            log_message(f"[{execution_id}] Timed out waiting for video outputs from IDs: {', '.join(pending_video_ids.keys())}")
+
+        image_paths, image_errors = _extract_paths_from_output_payload(image_payloads, kind="image")
+        video_paths, video_errors = _extract_paths_from_output_payload(video_payloads, kind="video")
+
+        for error_msg in image_errors + video_errors:
+            log_message(f"[{execution_id}] Output parsing warning: {error_msg}")
+
+        if video_paths:
+            print(f"[{execution_id}] Collected {len(video_paths)} video file(s) from Hua_Video_Output nodes.")
+            return "video", video_paths
+        if image_paths:
+            print(f"[{execution_id}] Collected {len(image_paths)} image file(s) from Hua_Output nodes.")
+            return "image", image_paths
+
+        history_image_paths, history_video_paths, history_errors = _extract_paths_from_history_entry(status_entry)
+        for error_msg in history_errors:
+            log_message(f"[{execution_id}] History output warning: {error_msg}")
+        if history_video_paths:
+            print(f"[{execution_id}] Collected {len(history_video_paths)} video file(s) from ComfyUI history.")
+            return "video", history_video_paths
+        if history_image_paths:
+            print(f"[{execution_id}] Collected {len(history_image_paths)} image file(s) from ComfyUI history.")
+            return "image", history_image_paths
+
+        try:
+            post_run_outputs = get_output_images(OUTPUT_DIR)
+        except Exception as exc:
+            post_run_outputs = []
+            log_message(f"[{execution_id}] Warning: failed to enumerate output directory after run: {exc}")
+
+        fresh_outputs = []
+        for candidate_path in post_run_outputs:
+            try:
+                mtime = os.path.getmtime(candidate_path)
+            except OSError:
+                continue
+            previous_mtime = preexisting_outputs.get(candidate_path)
+            if previous_mtime is None or mtime > (previous_mtime or 0):
+                if mtime >= snapshot_mtime - 0.01:
+                    fresh_outputs.append(candidate_path)
+
+        if fresh_outputs:
+            log_message(f"[{execution_id}] Falling back to filesystem diff; detected {len(fresh_outputs)} new image(s).")
+            for sample_path in fresh_outputs[:3]:
+                try:
+                    log_message(f"[{execution_id}] New image detected: {sample_path} (mtime={os.path.getmtime(sample_path):.3f})")
+                except OSError:
+                    log_message(f"[{execution_id}] New image detected: {sample_path}")
+            return "image", fresh_outputs
+
+        fallback_paths = []
+        if hua_output_key and hua_output_key in prompt:
+            filename_prefix = prompt[hua_output_key].get('inputs', {}).get('filename_prefix')
+            if isinstance(filename_prefix, list):
+                fallback_paths.extend(filename_prefix)
+            elif isinstance(filename_prefix, str):
+                fallback_paths.append(filename_prefix)
+        if fallback_paths:
+            log_message(f"[{execution_id}] Falling back to workflow filename_prefix values: {fallback_paths}")
+            return "image", fallback_paths
+
+        log_message(f"[{execution_id}] No output files detected for prompt {tracking_id}.")
+        return None, None
+    except Exception as exc:
+        print(f"[{execution_id}] Exception while starting queue: {exc}")
         return None, None
 
-    # --- 精确文件获取逻辑 ---
-    temp_file_path = os.path.join(TEMP_DIR, f"{execution_id}.json")
-    # 增加日志，打印 TEMP_DIR 的实际路径
-    log_message(f"[{execution_id}] TEMP_DIR is: {TEMP_DIR}")
-    log_message(f"[{execution_id}] 开始等待临时文件: {temp_file_path}")
 
-    start_time = time.time()
-    wait_timeout = 1000 # 保持原来的超时
-    check_interval = 1
-    files_in_temp_dir_logged = False # 标志位，确保只记录一次目录内容
+def _split_run_inputs(raw_args):
+    args = list(raw_args)
+    expected_base = (
+        MAX_DYNAMIC_COMPONENTS  # positive prompts
+        + 1  # primary negative prompt
+        + MAX_DYNAMIC_COMPONENTS  # extra negative prompts
+        + 1  # json file
+        + 2  # width, height
+        + MAX_DYNAMIC_COMPONENTS  # lora dropdowns
+        + 2  # checkpoint, unet
+        + MAX_DYNAMIC_COMPONENTS  # float inputs
+        + MAX_DYNAMIC_COMPONENTS  # int inputs
+        + MAX_IMAGE_LOADERS * IMAGE_LOADER_FIELD_COUNT  # image loader controls
+        + 2  # seed mode, fixed seed
+        + 1  # queue count
+    )
 
-    while time.time() - start_time < wait_timeout:
-        if os.path.exists(temp_file_path):
-            log_message(f"[{execution_id}] 检测到临时文件 (耗时: {time.time() - start_time:.1f}秒)")
-            try:
-                log_message(f"[{execution_id}] Waiting briefly before reading {temp_file_path}...") # 使用 log_message
-                time.sleep(1.0) # 增加等待时间到 1 秒
+    if len(args) < expected_base:
+        args.extend([None] * (expected_base - len(args)))
 
-                with open(temp_file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                    if not content:
-                        log_message(f"[{execution_id}] 警告: 临时文件为空。") # 使用 log_message
-                        time.sleep(check_interval)
-                        continue
-                    log_message(f"[{execution_id}] Read content: '{content[:200]}...'") # 使用 log_message
+    idx = 0
+    positive_prompts = list(args[idx:idx + MAX_DYNAMIC_COMPONENTS]); idx += MAX_DYNAMIC_COMPONENTS
+    prompt_negative = args[idx]; idx += 1
+    negative_extras = list(args[idx:idx + MAX_DYNAMIC_COMPONENTS]); idx += MAX_DYNAMIC_COMPONENTS
+    json_file = args[idx]; idx += 1
+    hua_width = args[idx]; idx += 1
+    hua_height = args[idx]; idx += 1
+    lora_values = list(args[idx:idx + MAX_DYNAMIC_COMPONENTS]); idx += MAX_DYNAMIC_COMPONENTS
+    checkpoint = args[idx]; idx += 1
+    unet = args[idx]; idx += 1
+    float_values = list(args[idx:idx + MAX_DYNAMIC_COMPONENTS]); idx += MAX_DYNAMIC_COMPONENTS
+    int_values = list(args[idx:idx + MAX_DYNAMIC_COMPONENTS]); idx += MAX_DYNAMIC_COMPONENTS
+    image_loader_values = list(args[idx:idx + (MAX_IMAGE_LOADERS * IMAGE_LOADER_FIELD_COUNT)]); idx += MAX_IMAGE_LOADERS * IMAGE_LOADER_FIELD_COUNT
+    seed_mode = args[idx]; idx += 1
+    fixed_seed = args[idx]; idx += 1
+    queue_count_value = args[idx] if idx < len(args) else None
+    idx += 1
 
-                output_paths_data = json.loads(content)
-                log_message(f"[{execution_id}] Parsed JSON data type: {type(output_paths_data)}") # 使用 log_message
+    advanced = list(args[idx:])
+    expected_ksampler = MAX_KSAMPLER_CONTROLS * 9
+    expected_mask = MAX_MASK_GENERATORS * MASK_FIELD_COUNT
+    expected_advanced = expected_ksampler + expected_mask
+    if len(advanced) < expected_advanced:
+        advanced.extend([None] * (expected_advanced - len(advanced)))
+    elif len(advanced) > expected_advanced:
+        advanced = advanced[:expected_advanced]
 
-                # --- 检查错误结构 ---
-                if isinstance(output_paths_data, dict) and "error" in output_paths_data:
-                    error_message = output_paths_data.get("error", "Unknown error from node.")
-                    generated_files = output_paths_data.get("generated_files", [])
-                    log_message(f"[{execution_id}] 错误: 节点返回错误: {error_message}. 文件列表 (可能不完整): {generated_files}") # 使用 log_message
-                    try:
-                        os.remove(temp_file_path)
-                        log_message(f"[{execution_id}] 已删除包含错误的临时文件。") # 使用 log_message
-                    except OSError as e:
-                        log_message(f"[{execution_id}] 删除包含错误的临时文件失败: {e}") # 使用 log_message
-                    return None, None # 返回失败
+    ksampler_flat = advanced[:expected_ksampler]
+    mask_flat = advanced[expected_ksampler:]
 
-                # --- 提取路径列表 ---
-                output_paths = []
-                if isinstance(output_paths_data, dict) and "generated_files" in output_paths_data:
-                    output_paths = output_paths_data["generated_files"]
-                    log_message(f"[{execution_id}] Extracted 'generated_files': {output_paths} (Count: {len(output_paths)})") # 使用 log_message
-                elif isinstance(output_paths_data, list): # 处理旧格式以防万一
-                     output_paths = output_paths_data
-                     log_message(f"[{execution_id}] Parsed JSON directly as list: {output_paths} (Count: {len(output_paths)})") # 使用 log_message
-                else:
-                    log_message(f"[{execution_id}] 错误: 无法识别的 JSON 结构。") # 使用 log_message
-                    try: os.remove(temp_file_path)
-                    except OSError: pass
-                    return None, None # 无法识别的结构
+    return {
+        "positive_prompts": positive_prompts,
+        "prompt_negative": prompt_negative,
+        "negative_extras": negative_extras,
+        "json_file": json_file,
+        "hua_width": hua_width,
+        "hua_height": hua_height,
+        "loras": lora_values,
+        "checkpoint": checkpoint,
+        "unet": unet,
+        "floats": float_values,
+        "ints": int_values,
+        "image_loaders": image_loader_values,
+        "seed_mode": seed_mode,
+        "fixed_seed": fixed_seed,
+        "queue_count": queue_count_value,
+        "ksampler_flat": ksampler_flat,
+        "mask_flat": mask_flat,
+    }
 
-                # --- 详细验证路径 ---
-                log_message(f"[{execution_id}] Starting path validation for {len(output_paths)} paths...") # 使用 log_message
-                valid_paths = []
-                invalid_paths = []
-                for i, p in enumerate(output_paths):
-                    abs_p = os.path.abspath(p)
-                    exists = os.path.exists(abs_p)
-                    log_message(f"[{execution_id}] Validating path {i+1}/{len(output_paths)}: '{p}' -> Absolute: '{abs_p}' -> Exists: {exists}") # 使用 log_message
-                    if exists:
-                        valid_paths.append(abs_p)
-                    else:
-                        invalid_paths.append(p)
-
-                log_message(f"[{execution_id}] Validation complete. Valid: {len(valid_paths)}, Invalid: {len(invalid_paths)}") # 使用 log_message
-
-                try:
-                    os.remove(temp_file_path)
-                    log_message(f"[{execution_id}] 已删除临时文件。") # 使用 log_message
-                except OSError as e:
-                    log_message(f"[{execution_id}] 删除临时文件失败: {e}") # 使用 log_message
-
-                if not valid_paths:
-                    log_message(f"[{execution_id}] 错误: 未找到有效的输出文件路径。Invalid paths were: {invalid_paths}") # 使用 log_message
-                    return None, None
-
-                first_valid_path = valid_paths[0]
-                if first_valid_path.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp')):
-                    determined_output_type = 'image'
-                elif first_valid_path.lower().endswith(('.mp4', '.webm', '.avi', '.mov', '.mkv')):
-                    determined_output_type = 'video'
-                else:
-                    log_message(f"[{execution_id}] 警告: 未知的文件类型: {first_valid_path}。默认为图片。") # 使用 log_message
-                    determined_output_type = 'image'
-
-                if output_type and determined_output_type != output_type:
-                     log_message(f"[{execution_id}] 警告: 工作流输出节点类型 ({output_type}) 与实际文件类型 ({determined_output_type}) 不匹配。") # 使用 log_message
-
-                log_message(f"[{execution_id}] 任务成功完成，返回类型 '{determined_output_type}' 和 {len(valid_paths)} 个有效路径。") # 使用 log_message
-                return determined_output_type, valid_paths
-
-            except json.JSONDecodeError as e:
-                log_message(f"[{execution_id}] 读取或解析临时文件 JSON 失败: {e}. 文件内容: '{content[:100]}...'") # 使用 log_message
-                time.sleep(check_interval * 2)
-            except Exception as e:
-                log_message(f"[{execution_id}] 处理临时文件时发生未知错误: {e}") # 使用 log_message
-                try: os.remove(temp_file_path)
-                except OSError: pass
-                return None, None
-
-        # 如果等待超过 N 秒仍未找到文件，记录一下 TEMP_DIR 的内容，帮助调试
-        if not files_in_temp_dir_logged and (time.time() - start_time) > 5: # 例如等待5秒后
-            try:
-                temp_dir_contents = os.listdir(TEMP_DIR)
-                log_message(f"[{execution_id}] 等待超过5秒，TEMP_DIR ('{TEMP_DIR}') 内容: {temp_dir_contents}")
-            except Exception as e_dir:
-                log_message(f"[{execution_id}] 无法列出 TEMP_DIR 内容: {e_dir}")
-            files_in_temp_dir_logged = True # 避免重复记录
-
-        time.sleep(check_interval)
-
-    # 超时处理
-    log_message(f"[{execution_id}] 等待临时文件超时 ({wait_timeout}秒)。TEMP_DIR ('{TEMP_DIR}') 最终内容可能已在上面记录。") # 使用 log_message
-    return None, None # 超时，返回 None
-
-# fuck and get_workflow_defaults_and_visibility are now imported from ui_def.
-# The helper find_key_by_class_type_internal was moved to ui_def.py as it's used by them.
-
-# --- 队列处理函数 (更新签名以包含动态组件列表) ---
-def run_queued_tasks(
-    inputimage1, input_video, 
-    # Capture all dynamic positive prompts using *args or by naming them if MAX_DYNAMIC_COMPONENTS is fixed
-    # Assuming run_button.click inputs are: input_image, input_video, *positive_prompt_texts, prompt_negative, ...
-    # So, we need to capture these based on MAX_DYNAMIC_COMPONENTS
-    # Let's define them explicitly for clarity up to MAX_DYNAMIC_COMPONENTS
-    # This requires knowing the exact order from run_button.click
-    # The order in run_button.click is:
-    # input_image, input_video, 
-    # *positive_prompt_texts, (size MAX_DYNAMIC_COMPONENTS)
-    # prompt_negative, 
-    # json_dropdown, hua_width, hua_height, 
-    # *lora_dropdowns, (size MAX_DYNAMIC_COMPONENTS)
-    # hua_checkpoint_dropdown, hua_unet_dropdown, 
-    # *float_inputs, (size MAX_DYNAMIC_COMPONENTS)
-    # *int_inputs, (size MAX_DYNAMIC_COMPONENTS)
-    # seed_mode_dropdown, fixed_seed_input,
-    # queue_count
-
-    # We'll use *args and slicing for dynamic parts if function signature becomes too long,
-    # or list them all if MAX_DYNAMIC_COMPONENTS is small and fixed.
-    # For now, let's assume they are passed positionally and we'll reconstruct lists.
-    # This is tricky. A better way is to pass *args to run_queued_tasks and then unpack.
-    # Or, more simply, modify run_button.click to pass lists directly if Gradio allows.
-    # Since Gradio passes them as individual args, we must list them or use *args.
-    
-    # Let's list them out based on run_button.click inputs:
-    dynamic_prompt_1, dynamic_prompt_2, dynamic_prompt_3, dynamic_prompt_4, dynamic_prompt_5, # From *positive_prompt_texts
-    prompt_text_negative, 
-    json_file, 
-    hua_width, hua_height, 
-    dynamic_lora_1, dynamic_lora_2, dynamic_lora_3, dynamic_lora_4, dynamic_lora_5,       # From *lora_dropdowns
-    hua_checkpoint, hua_unet, 
-    dynamic_float_1, dynamic_float_2, dynamic_float_3, dynamic_float_4, dynamic_float_5, # From *float_inputs
-    dynamic_int_1, dynamic_int_2, dynamic_int_3, dynamic_int_4, dynamic_int_5,         # From *int_inputs
-    seed_mode, fixed_seed, 
-    queue_count=1, progress=gr.Progress(track_tqdm=True)
-):
+def run_queued_tasks(inputimage1, input_video, *dynamic_args, queue_count=1, progress=gr.Progress(track_tqdm=True)):
     global accumulated_image_results, last_video_result, executor
 
-    # Reconstruct lists for dynamic components
-    dynamic_positive_prompts_values = [dynamic_prompt_1, dynamic_prompt_2, dynamic_prompt_3, dynamic_prompt_4, dynamic_prompt_5]
-    dynamic_loras_values = [dynamic_lora_1, dynamic_lora_2, dynamic_lora_3, dynamic_lora_4, dynamic_lora_5]
-    dynamic_float_nodes_values = [dynamic_float_1, dynamic_float_2, dynamic_float_3, dynamic_float_4, dynamic_float_5]
-    dynamic_int_nodes_values = [dynamic_int_1, dynamic_int_2, dynamic_int_3, dynamic_int_4, dynamic_int_5]
+    # Helper function to convert update dict to tuple matching outputs order
+    # outputs=[queue_status_display, output_gallery, output_video, main_output_tabs_component,
+    #          live_preview_image, live_preview_status, selected_gallery_image_state,
+    #          photopea_image_data_state, photopea_data_bus, photopea_status]
+    def dict_to_tuple(update_dict):
+        try:
+            result = (
+                update_dict.get("status", gr.update()),
+                update_dict.get("gallery", gr.update()),
+                update_dict.get("video", gr.update()),
+                update_dict.get("tabs", gr.update()),
+                update_dict.get("preview_img", gr.update()),
+                update_dict.get("preview_status", gr.update()),
+                update_dict.get("selected_state", None),
+                update_dict.get("photopea_state", None),
+                update_dict.get("photopea_bus", gr.update()),
+                update_dict.get("photopea_status", gr.update())
+            )
+            return result
+        except Exception as e:
+            log_message(f"[ERROR] dict_to_tuple failed: {e}")
+            return (gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), None, None, gr.update(), gr.update())
+
+    unpacked_inputs = _split_run_inputs(dynamic_args)
+    dynamic_positive_prompts_values = unpacked_inputs["positive_prompts"]
+    prompt_text_negative = unpacked_inputs["prompt_negative"] or ""
+    negative_prompt_extras = unpacked_inputs["negative_extras"]
+    json_file = unpacked_inputs["json_file"]
+    hua_width = unpacked_inputs["hua_width"]
+    hua_height = unpacked_inputs["hua_height"]
+    dynamic_loras_values = unpacked_inputs["loras"]
+    hua_checkpoint = unpacked_inputs["checkpoint"]
+    hua_unet = unpacked_inputs["unet"]
+    dynamic_float_nodes_values = unpacked_inputs["floats"]
+    dynamic_int_nodes_values = unpacked_inputs["ints"]
+    dynamic_image_loader_values = unpacked_inputs["image_loaders"]
+    seed_mode = (unpacked_inputs["seed_mode"] or "Random").strip()
+    fixed_seed = unpacked_inputs["fixed_seed"]
+    queue_count_value = unpacked_inputs["queue_count"]
+    if queue_count_value is None:
+        queue_count_value = queue_count
+    try:
+        queue_count_value = int(queue_count_value)
+    except (TypeError, ValueError):
+        queue_count_value = 1
+    queue_count_value = max(1, queue_count_value)
+
+    dynamic_ksampler_values = unpacked_inputs["ksampler_flat"]
+    dynamic_mask_generator_values = unpacked_inputs["mask_flat"]
 
     current_batch_image_results = []
 
-    # 1. 将新任务加入队列
-    if queue_count > 1:
+    if queue_count_value > 1:
         with results_lock:
             accumulated_image_results = []
             current_batch_image_results = []
-            last_video_result = None # 批量任务开始时清除旧视频
-    elif queue_count == 1:
-         # 单任务模式，清除旧视频结果，图片结果将在成功后直接替换
-         with results_lock:
-             last_video_result = None
+            last_video_result = None
+    else:
+        with results_lock:
+            last_video_result = None
 
-    # 将所有参数打包到 task_params_tuple for generate_image
     task_params_tuple = (
-        inputimage1, input_video,
-        dynamic_positive_prompts_values, # Pass the list
+        inputimage1,
+        input_video,
+        dynamic_positive_prompts_values,
         prompt_text_negative,
         json_file,
-        hua_width, hua_height,
-        dynamic_loras_values,            # Pass the list
-        hua_checkpoint, hua_unet,
-        dynamic_float_nodes_values,      # Pass the list
-        dynamic_int_nodes_values,        # Pass the list
-        seed_mode, fixed_seed
+        hua_width,
+        hua_height,
+        dynamic_loras_values,
+        hua_checkpoint,
+        hua_unet,
+        dynamic_float_nodes_values,
+        dynamic_int_nodes_values,
+        dynamic_ksampler_values,
+        dynamic_mask_generator_values,
+        dynamic_image_loader_values,
+        seed_mode,
+        fixed_seed,
+        negative_prompt_extras,
     )
-    log_message(f"[QUEUE_DEBUG] 接收到新任务请求 (种子模式: {seed_mode})。当前队列长度 (加锁前): {len(task_queue)}")
+
+    log_message(f"[QUEUE] Adding {queue_count_value} job(s) to queue.")
     with queue_lock:
-        for _ in range(max(1, int(queue_count))):
-            task_queue.append(task_params_tuple) 
+        for _ in range(queue_count_value):
+            task_queue.append(task_params_tuple)
         current_queue_size = len(task_queue)
-        log_message(f"[QUEUE_DEBUG] 已添加 {queue_count} 个任务到队列。当前队列长度 (加锁后): {current_queue_size}")
-    log_message(f"[QUEUE_DEBUG] 任务添加完成，释放锁。")
+    log_message(f"[QUEUE] Queue size after enqueue: {current_queue_size}")
 
-    # 初始状态更新：显示当前累积结果和队列信息
-    # Default to results tab initially
-    initial_updates = {
-        queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: {'是' if processing_event.is_set() else '否'}"),
-        main_output_tabs_component: gr.Tabs(selected="tab_generate_result") # Default to results tab
-    }
+    # Prepare initial updates as tuple matching outputs order:
+    # outputs=[queue_status_display, output_gallery, output_video, main_output_tabs_component,
+    #          live_preview_image, live_preview_status, selected_gallery_image_state,
+    #          photopea_image_data_state, photopea_data_bus, photopea_status]
     with results_lock:
-        initial_updates[output_gallery] = gr.update(value=accumulated_image_results[:])
-        initial_updates[output_video] = gr.update(value=last_video_result)
+        initial_gallery = accumulated_image_results[:]
+        initial_video = last_video_result
 
-    log_message(f"[QUEUE_DEBUG] 准备 yield 初始状态更新。队列: {current_queue_size}, 处理中: {processing_event.is_set()}")
-    yield initial_updates
-    log_message(f"[QUEUE_DEBUG] 已 yield 初始状态更新。")
+    yield (
+        gr.update(value=f"In Queue: {current_queue_size} | Processing: {'Yes' if processing_event.is_set() else 'No'}"),  # queue_status_display
+        gr.update(value=initial_gallery),  # output_gallery
+        gr.update(value=initial_video),  # output_video
+        gr.Tabs(selected="tab_generate_result"),  # main_output_tabs_component
+        gr.update(),  # live_preview_image (no change)
+        gr.update(),  # live_preview_status (no change)
+        None,  # selected_gallery_image_state (no change)
+        None,  # photopea_image_data_state (no change)
+        gr.update(),  # photopea_data_bus (no change)
+        gr.update()  # photopea_status (no change)
+    )
 
-    # 2. 检查是否已有进程在处理队列
-    log_message(f"[QUEUE_DEBUG] 检查处理状态: processing_event.is_set() = {processing_event.is_set()}")
-    if processing_event.is_set():
-        log_message("[QUEUE_DEBUG] 已有任务在处理队列，新任务已排队。函数返回。")
-        return
+    # Check if worker is already active - if so, skip starting a new one
+    # but still go through the finally block to yield final status
+    should_process_queue = not processing_event.is_set()
 
-    # 3. 开始处理队列
-    log_message(f"[QUEUE_DEBUG] 没有任务在处理，准备设置 processing_event 为 True。")
-    processing_event.set()
-    log_message(f"[QUEUE_DEBUG] processing_event 已设置为 True。开始处理循环。")
+    if not should_process_queue:
+        log_message("[QUEUE] Worker already active. Tasks added to queue but will be processed by existing worker.")
+        # Don't start a new worker, but still go through finally block
+    else:
+        processing_event.set()
+        log_message("[QUEUE] Worker started.")
 
     def process_task(task_params):
         try:
-            output_type, new_paths = generate_image(*task_params)
-            return output_type, new_paths
-        except Exception as e:
-            log_message(f"[QUEUE_DEBUG] Exception in process_task: {e}")
+            return generate_image(*task_params)
+        except Exception as exc:
+            log_message(f"[QUEUE] Exception while executing task: {exc}")
             return None, None
 
     try:
-        log_message("[QUEUE_DEBUG] Entering main processing loop (while True).")
-        while True:
-            task_to_run = None
-            current_queue_size = 0
-            log_message("[QUEUE_DEBUG] Checking queue for tasks (acquiring lock)...")
+        # Only process queue if we're the active worker
+        while should_process_queue:
             with queue_lock:
                 if task_queue:
                     task_to_run = task_queue.popleft()
                     current_queue_size = len(task_queue)
-                    log_message(f"[QUEUE_DEBUG] Task popped from queue. Remaining: {current_queue_size}")
                 else:
-                    log_message("[QUEUE_DEBUG] Queue is empty. Breaking loop.")
                     break
-            log_message("[QUEUE_DEBUG] Queue lock released.")
+            log_message(f"[QUEUE] Dequeued task. Remaining queue size: {current_queue_size}")
 
-            if not task_to_run:
-                 log_message("[QUEUE_DEBUG] Warning: No task found after lock release, but loop didn't break?")
-                 continue
-
-            # 更新状态：显示正在处理和队列大小
             with results_lock:
                 current_images_copy = accumulated_image_results[:]
                 current_video = last_video_result
-            log_message(f"[QUEUE_DEBUG] Preparing to yield 'Processing' status. Queue: {current_queue_size}")
-            yield {
-                queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: 是"),
-                output_gallery: gr.update(value=current_images_copy),
-                output_video: gr.update(value=current_video)
-            }
-            log_message(f"[QUEUE_DEBUG] Yielded 'Processing' status.")
 
-            if task_to_run:
-                log_message(f"[QUEUE_DEBUG] Starting execution for popped task. Remaining queue: {current_queue_size}")
-                
-                # --- KSampler Check and Tab Switch ---
-                # task_to_run is the tuple: (inputimage1, input_video, dynamic_positive_prompts_values, 
-                #                           prompt_text_negative, json_file, hua_width, hua_height, 
-                #                           dynamic_loras_values, ...)
-                # json_file is at index 4 of task_to_run (0-indexed)
-                current_task_json_file = task_to_run[4] 
-                should_switch_to_preview = False
-                if current_task_json_file and isinstance(current_task_json_file, str): # Ensure it's a string before using
-                    json_path_for_check = os.path.join(OUTPUT_DIR, current_task_json_file)
-                    if os.path.exists(json_path_for_check):
-                        try:
-                            with open(json_path_for_check, "r", encoding="utf-8") as f_check:
-                                workflow_prompt = json.load(f_check)
-                            VALID_KSAMPLER_CLASS_TYPES = ["KSampler", "KSamplerAdvanced", "KSamplerSelect"]
-                            for node_id, node_data in workflow_prompt.items():
-                                class_type = node_data.get("class_type")
-                                if isinstance(node_data, dict) and class_type in VALID_KSAMPLER_CLASS_TYPES:
-                                    should_switch_to_preview = True
-                                    log_message(f"[QUEUE_DEBUG] KSampler-like node (type: {class_type}) found in {current_task_json_file}. Will switch to preview tab.")
-                                    break
-                        except Exception as e_json_check:
-                            log_message(f"[QUEUE_DEBUG] Error checking for KSampler in {current_task_json_file}: {e_json_check}")
-                
-                if should_switch_to_preview:
-                    yield { main_output_tabs_component: gr.Tabs(selected="tab_k_sampler_preview") }
-                # --- End KSampler Check ---
+            log_message(f"[QUEUE] About to yield status update")
+            try:
+                yield dict_to_tuple({
+                    "status": gr.update(value=f"In Queue: {current_queue_size} | Processing: Yes"),
+                    "gallery": gr.update(value=current_images_copy),
+                    "video": gr.update(value=current_video),
+                })
+                log_message(f"[QUEUE] Yielded successfully")
+            except Exception as e:
+                log_message(f"[ERROR] Yield failed: {e}")
+                raise
 
-                progress(0, desc=f"处理任务 (队列剩余 {current_queue_size})")
-                log_message(f"[QUEUE_DEBUG] Progress set to 0. Desc: Processing task (Queue remaining {current_queue_size})")
-                
-                # 提交任务到线程池
-                future = executor.submit(process_task, task_to_run)
-                log_message(f"[QUEUE_DEBUG] Task submitted to thread pool")
-
-                task_interrupted_by_user = False
-                # 等待任务完成，但每0.1秒检查一次，并检查中断信号
-                while not future.done():
-                    if interrupt_requested_event.is_set():
-                        log_message("[QUEUE_DEBUG] User interrupt detected while waiting for future.")
-                        task_interrupted_by_user = True
-                        break
-                    time.sleep(0.1)
-                    # 在等待期间，也需要从 results_lock 中获取最新的累积结果
-                    with results_lock:
-                        current_images_while_waiting = accumulated_image_results[:]
-                        current_video_while_waiting = last_video_result
-                    yield {
-                        queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: 是 (运行中)"),
-                        output_gallery: gr.update(value=current_images_while_waiting),
-                        output_video: gr.update(value=current_video_while_waiting)
-                    }
-                
-                if task_interrupted_by_user:
-                    log_message("[QUEUE_DEBUG] Task was interrupted by user. Setting result to USER_INTERRUPTED.")
-                    output_type, new_paths = "USER_INTERRUPTED", None
-                    interrupt_requested_event.clear() # 清除标志
-
-                    # --- 新增：尝试重置 executor ---
-                    # global executor # 已在函数顶部声明
-                    log_message("[QUEUE_DEBUG] Attempting to shutdown and recreate executor due to user interrupt.")
-                    executor.shutdown(wait=False) 
-                    executor = ThreadPoolExecutor(max_workers=1)
-                    log_message("[QUEUE_DEBUG] Executor shutdown and recreated.")
-                    # --- 新增结束 ---
-                else:
+            current_task_json_file = task_to_run[4]
+            should_switch_to_preview = False
+            if isinstance(current_task_json_file, str):
+                workflow_dir_for_check, workflow_name_for_check, json_path_for_check = resolve_workflow_components(current_task_json_file)
+                if json_path_for_check and os.path.exists(json_path_for_check):
                     try:
-                        output_type, new_paths = future.result()
-                        log_message(f"[QUEUE_DEBUG] Future completed. Type: {output_type}, Paths: {'Yes' if new_paths else 'No'}")
-                    except Exception as e:
-                        log_message(f"[QUEUE_DEBUG] Exception when getting future result: {e}")
-                        output_type, new_paths = None, None # 任务执行出错
-                
-                progress(1) # 任务完成（无论成功与否，或被中断）
-                log_message(f"[QUEUE_DEBUG] Progress set to 1.")
+                        prompt_for_preview = load_prompt_from_file(json_path_for_check)
+                        if isinstance(prompt_for_preview, dict):
+                            for node_data in prompt_for_preview.values():
+                                if not isinstance(node_data, dict):
+                                    continue
+                                class_type = node_data.get("class_type")
+                                if class_type in {"KSampler", "KSamplerAdvanced", "KSamplerSelect"}:
+                                    should_switch_to_preview = True
+                                    break
+                    except Exception as exc:
+                        log_message(f"[QUEUE] Failed to inspect workflow for preview switch: {exc}")
+            if should_switch_to_preview:
+                yield dict_to_tuple({"tabs": gr.Tabs(selected="tab_k_sampler_preview")})
 
-                if output_type == "USER_INTERRUPTED":
-                    log_message("[QUEUE_DEBUG] Task was interrupted by user. Updating UI.")
-                    # current_queue_size 已经是最新的（在 task_to_run = task_queue.popleft() 之后）
-                    with results_lock:
-                        current_images_copy = accumulated_image_results[:]
-                        current_video = last_video_result
-                    yield {
-                        queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: 否 (已中断)"),
-                        output_gallery: gr.update(value=current_images_copy),
-                        output_video: gr.update(value=current_video),
-                    }
-                    log_message(f"[QUEUE_DEBUG] Yielded USER_INTERRUPTED update. Queue: {current_queue_size}")
-                    # 让循环继续，以便 finally 块可以正确清理 processing_event
-                    # 如果这是最后一个任务，循环会在下一次迭代时自然结束
+            log_message(f"[QUEUE] About to submit task to executor")
+            try:
+                progress(0, desc=f"Processing task (queue remaining {current_queue_size})")
+            except Exception as e:
+                log_message(f"[QUEUE] Progress call failed (non-fatal): {e}")
 
-                elif output_type == "COMFYUI_REJECTED":
-                    log_message("[QUEUE_DEBUG] Task rejected by ComfyUI backend or critical error in start_queue. Clearing remaining Gradio queue.")
-                    with queue_lock:
-                        task_queue.clear() # 清空Gradio队列中所有剩余任务
-                        current_queue_size = len(task_queue) # 应为0
-                    with results_lock:
-                        current_images_copy = accumulated_image_results[:]
-                        current_video = last_video_result
-                    log_message(f"[QUEUE_DEBUG] Preparing to yield COMFYUI_REJECTED update. Queue: {current_queue_size}")
-                    yield {
-                         queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: 是 (后端错误，队列已清空)"),
-                         output_gallery: gr.update(value=current_images_copy),
-                         output_video: gr.update(value=current_video),
-                    }
-                    log_message(f"[QUEUE_DEBUG] Yielded COMFYUI_REJECTED update. Loop will now check empty queue and exit to finally.")
-                
-                elif new_paths: # 任务成功且有结果 (output_type 不是 COMFYUI_REJECTED or USER_INTERRUPTED)
-                    log_message(f"[QUEUE_DEBUG] Task successful, got {len(new_paths)} new paths of type '{output_type}'.")
-                    update_dict = {}
-                    with results_lock:
-                        if output_type == 'image':
-                            if queue_count == 1: # 单任务模式
-                                accumulated_image_results = new_paths # 替换
-                            else: # 批量任务模式
-                                current_batch_image_results.extend(new_paths) # 累加到当前批次
-                                accumulated_image_results = current_batch_image_results[:] # 更新全局累积结果
-                            last_video_result = None # 清除旧视频（如果是图片任务）
-                            update_dict[output_gallery] = gr.update(value=accumulated_image_results[:], visible=True)
-                            update_dict[output_video] = gr.update(value=None, visible=False) # 隐藏视频输出
-                        elif output_type == 'video':
-                            last_video_result = new_paths[0] if new_paths else None # 视频只显示最新的一个
-                            accumulated_image_results = [] # 清除旧图片（如果是视频任务）
-                            update_dict[output_gallery] = gr.update(value=[], visible=False) # 隐藏图片输出
-                            update_dict[output_video] = gr.update(value=last_video_result, visible=True) # 显示视频输出
-                        else: # 未知类型 (理论上不应发生，因为 generate_image 控制了 output_type)
-                             log_message(f"[QUEUE_DEBUG] Unknown or unexpected output type '{output_type}'. Treating as image.")
-                             # 默认为图片处理或保持原样
-                             accumulated_image_results.extend(new_paths) # 尝试添加
-                             update_dict[output_gallery] = gr.update(value=accumulated_image_results[:])
-                             update_dict[output_video] = gr.update(value=last_video_result)
+            future = executor.submit(process_task, task_to_run)
+            log_message(f"[QUEUE] Task submitted, waiting for completion")
 
-                        log_message(f"[QUEUE_DEBUG] Updated results (lock acquired). Images: {len(accumulated_image_results)}, Video: {last_video_result is not None}")
+            task_interrupted = False
+            while not future.done():
+                if interrupt_requested_event.is_set():
+                    log_message("[QUEUE] Interrupt requested by user.")
+                    task_interrupted = True
+                    break
+                time.sleep(0.1)
+                with results_lock:
+                    current_images_copy = accumulated_image_results[:]
+                    current_video = last_video_result
+                yield dict_to_tuple({
+                    "status": gr.update(value=f"In Queue: {current_queue_size} | Processing: Yes (running)"),
+                    "gallery": gr.update(value=current_images_copy),
+                    "video": gr.update(value=current_video),
+                })
 
-                    update_dict[queue_status_display] = gr.update(value=f"队列中: {current_queue_size} | 处理中: 是 (完成)")
-                    log_message(f"[QUEUE_DEBUG] Preparing to yield success update. Queue: {current_queue_size}")
-                    yield update_dict
-                    log_message(f"[QUEUE_DEBUG] Yielded success update.")
-                else: # 任务失败 (output_type is None, or new_paths is None/empty but not COMFYUI_REJECTED)
-                    log_message("[QUEUE_DEBUG] Task failed or returned no paths (general failure, not COMFYUI_REJECTED).")
-                    with results_lock:
-                        current_images_copy = accumulated_image_results[:]
-                        current_video = last_video_result
-                    log_message(f"[QUEUE_DEBUG] Preparing to yield general failure update. Queue: {current_queue_size}")
-                    yield {
-                         queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: 是 (失败)"),
-                         output_gallery: gr.update(value=current_images_copy),
-                         output_video: gr.update(value=current_video),
-                    }
-                    log_message(f"[QUEUE_DEBUG] Yielded general failure update.")
+            if task_interrupted:
+                interrupt_requested_event.clear()
+                try:
+                    executor.shutdown(wait=False)
+                except Exception as exc:
+                    log_message(f"[QUEUE] Failed to shutdown executor after interrupt: {exc}")
+                executor = ThreadPoolExecutor(max_workers=1)
+                yield dict_to_tuple({"status": gr.update(value=f"In Queue: {current_queue_size} | Processing: Interrupted")})
+                progress(0, desc="Interrupted task")
+                continue
+
+            try:
+                output_type, new_paths = future.result()
+                log_message(f"[QUEUE] Task completed. Output type: {output_type}, Paths count: {len(new_paths) if new_paths else 0}")
+            except Exception as exc:
+                log_message(f"[QUEUE] Future raised exception: {exc}")
+                output_type, new_paths = None, None
+
+            if output_type == "COMFYUI_REJECTED":
+                yield dict_to_tuple({
+                    "status": gr.update(value=f"In Queue: {current_queue_size} | Processing: Rejected"),
+                    "gallery": gr.update(value=accumulated_image_results[:]),
+                    "video": gr.update(value=last_video_result),
+                })
+                continue
+
+            # Log if no output was received
+            if not output_type or not new_paths:
+                log_message(f"[QUEUE] Warning: Task completed but no valid output received (type={output_type}, paths={new_paths})")
+
+            if output_type in {"image", "video"} and new_paths:
+                update_dict = {}
+                with results_lock:
+                    if output_type == "image":
+                        if queue_count_value == 1:
+                            accumulated_image_results = _format_gallery_items(new_paths)
+                        else:
+                            current_batch_image_results.extend(new_paths)
+                            accumulated_image_results = _format_gallery_items(current_batch_image_results[:])
+                        last_video_result = None
+                        update_dict["gallery"] = gr.update(value=accumulated_image_results[:], visible=True)
+                        update_dict["video"] = gr.update(value=None, visible=False)
+
+                        latest_display_path = accumulated_image_results[-1] if accumulated_image_results else None
+                        latest_display_path = _ensure_absolute_path(latest_display_path)
+                        if latest_display_path and os.path.exists(latest_display_path):
+                            final_preview = _load_image_from_path(latest_display_path, f"final-{os.path.basename(latest_display_path)}")
+                            if final_preview is not None:
+                                update_dict["preview_img"] = gr.update(value=final_preview)
+                                update_dict["preview_status"] = gr.update(value=f"Final image ready • {os.path.basename(latest_display_path)}")
+                                encoded_preview = _encode_pil_to_data_url(final_preview)
+                                update_dict["selected_state"] = latest_display_path
+                                update_dict["photopea_state"] = encoded_preview
+                                update_dict["photopea_bus"] = gr.update(value=encoded_preview or "")
+                                update_dict["photopea_status"] = gr.update(value="Latest result synced. Open Photopea to edit.")
+                    else:
+                        last_video_result = _ensure_absolute_path(new_paths[0])
+                        accumulated_image_results = []
+                        update_dict["gallery"] = gr.update(value=[], visible=False)
+                        update_dict["video"] = gr.update(value=last_video_result, visible=True)
+                update_dict["status"] = gr.update(value=f"In Queue: {current_queue_size} | Processing: Completed")
+                log_message(f"[QUEUE] About to yield completion update with {len(update_dict)} keys")
+                yield dict_to_tuple(update_dict)
+            else:
+                with results_lock:
+                    current_images_copy = accumulated_image_results[:]
+                    current_video = last_video_result
+                yield dict_to_tuple({
+                    "status": gr.update(value=f"In Queue: {current_queue_size} | Processing: Failed"),
+                    "gallery": gr.update(value=current_images_copy),
+                    "video": gr.update(value=current_video),
+                })
 
     finally:
-        log_message(f"[QUEUE_DEBUG] Entering finally block. Clearing processing_event (was {processing_event.is_set()}).")
-        processing_event.clear()
-        log_message(f"[QUEUE_DEBUG] processing_event cleared (is now {processing_event.is_set()}).")
-        with queue_lock: current_queue_size = len(task_queue)
+        # Only clear processing_event if we were the active worker
+        if should_process_queue:
+            processing_event.clear()
+            log_message("[QUEUE] Worker finished, processing_event cleared.")
+        else:
+            log_message("[QUEUE] Passive monitor finished (worker still active elsewhere).")
+
+        with queue_lock:
+            current_queue_size = len(task_queue)
         with results_lock:
             final_images = accumulated_image_results[:]
             final_video = last_video_result
-        log_message(f"[QUEUE_DEBUG] Preparing to yield final status update. Queue: {current_queue_size}, Processing: No. Switching to results tab.")
-        yield {
-            queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: 否"),
-            output_gallery: gr.update(value=final_images),
-            output_video: gr.update(value=final_video),
-            main_output_tabs_component: gr.Tabs(selected="tab_generate_result") # Switch back to results tab
-        }
-        log_message("[QUEUE_DEBUG] Yielded final status update. Exiting run_queued_tasks.")
+        log_message(f"[QUEUE] Finally block - yielding final status")
+        try:
+            yield dict_to_tuple({
+                "status": gr.update(value=f"In Queue: {current_queue_size} | Processing: {'Yes' if processing_event.is_set() else 'No'}"),
+                "gallery": gr.update(value=final_images),
+                "video": gr.update(value=final_video),
+                "tabs": gr.Tabs(selected="tab_generate_result"),
+            })
+        except Exception as e:
+            log_message(f"[ERROR] Finally block yield failed (client may have disconnected): {e}")
 
-# --- 赞助码处理函数 ---
-def show_sponsor_code():
-    sponsor_info = get_sponsor_html()
-    # 返回一个更新指令，让 Markdown 组件可见并显示内容
-    return gr.update(value=sponsor_info, visible=True)
-
-# --- 清除函数 ---
 def clear_queue():
     global task_queue, queue_lock, interrupt_requested_event, processing_event
     
-    action_log_messages = [] # 用于 gr.Info()
+    action_log_messages = []  # accumulate messages for gr.Info()
 
     with queue_lock:
         is_currently_processing_a_task_in_comfyui = processing_event.is_set()
@@ -1063,405 +2312,513 @@ def clear_queue():
         log_message(f"[CLEAR_QUEUE] Entry. Gradio pending queue size: {num_tasks_waiting_in_gradio_queue}, ComfyUI processing active: {is_currently_processing_a_task_in_comfyui}")
 
         if is_currently_processing_a_task_in_comfyui and num_tasks_waiting_in_gradio_queue == 0:
-            # 情况1: ComfyUI 正在处理一个任务 (该任务已从Gradio队列取出，在executor中运行), 
-            # 且 Gradio 的等待队列为空。这是“仅剩当前任务”的情况，需要中断它。
+            # Case 1: ComfyUI is actively processing a task while the Gradio queue is empty. Interrupt the running task.
             log_message("[CLEAR_QUEUE] Action: Interrupting the single, currently running ComfyUI task.")
             
-            # 发送 HTTP 中断请求到 ComfyUI
+            # Send HTTP interrupt request to ComfyUI
             interrupt_comfyui_status_message = trigger_comfyui_interrupt() 
-            action_log_messages.append(f"尝试中断 ComfyUI 当前任务: {interrupt_comfyui_status_message}")
+            action_log_messages.append(f"Attempted to interrupt the active ComfyUI task: {interrupt_comfyui_status_message}")
             log_message(f"[CLEAR_QUEUE] ComfyUI interrupt triggered via HTTP: {interrupt_comfyui_status_message}")
 
-            # 设置 Gradio 内部的中断标志。
-            # run_queued_tasks 中的循环会检测到这个事件，并为正在运行的 future 对象进行相应处理。
+            # Set the internal interrupt flag.
+            # run_queued_tasks loop will handle the future accordingly.
             interrupt_requested_event.set()
             log_message("[CLEAR_QUEUE] Gradio internal interrupt_requested_event was SET.")
             
-            # task_queue 此时应为空，无需 clear。
+            # task_queue should be empty in this scenario.
             
         elif num_tasks_waiting_in_gradio_queue > 0:
-            # 情况2: Gradio 的等待队列中有任务。清除这些等待中的任务。
-            # 不中断可能正在 ComfyUI 中运行的任务。
+            # Case 2: pending tasks exist in the Gradio queue. Clear them without interrupting the running task.
             cleared_count = num_tasks_waiting_in_gradio_queue
-            task_queue.clear() # 清空 Gradio 的等待队列
+            task_queue.clear()  # clear pending queue entries
             log_message(f"[CLEAR_QUEUE] Action: Cleared {cleared_count} task(s) from Gradio's queue. Any ComfyUI task currently processing was NOT interrupted by this action.")
-            action_log_messages.append(f"已清除 Gradio 队列中的 {cleared_count} 个等待任务。")
+            action_log_messages.append(f"Cleared {cleared_count} pending task(s) from the Gradio queue.")
             
-            # 如果之前有一个外部中断请求的标志 (例如，通过已被移除的独立中断按钮设置的，理论上不太可能发生)
-            # 并且我们这次 *没有* 尝试中断 ComfyUI，那么清除那个旧的标志是安全的。
+            # If an interrupt flag was previously set and we did not interrupt this time, clearing it is safe.
             if interrupt_requested_event.is_set():
                 interrupt_requested_event.clear()
                 log_message("[CLEAR_QUEUE] Cleared a pre-existing interrupt_requested_event because we are only clearing the Gradio queue this time.")
         else:
-            # 情况3: ComfyUI 没有在处理任务，Gradio 的等待队列也为空。没什么可做的。
+            # Case 3: no tasks running and queue already empty.
             log_message("[CLEAR_QUEUE] Action: No tasks currently processing in ComfyUI and Gradio queue is empty. Nothing to clear or interrupt.")
-            action_log_messages.append("队列已为空，无任务处理中。")
+            action_log_messages.append("Queue already empty; nothing to clear.")
 
-    # 通过 gr.Info() 显示操作摘要给用户
+    # Show operation summary to the user
     if action_log_messages:
         gr.Info(" ".join(action_log_messages))
 
-    # 更新队列状态的UI显示
-    with queue_lock: # 重新获取锁以获得最新的队列大小 (如果清除了，应该是0)
+    # Update queue status in the UI
+    with queue_lock:  # grab latest queue size (should be 0 if cleared)
         current_gradio_queue_size_for_display = len(task_queue) 
     
-    # processing_event 的状态由 run_queued_tasks 的主循环和 finally 块管理。
-    # 如果我们通过此函数中断了一个任务，run_queued_tasks 的 finally 块最终会清除 processing_event。
-    # 如果我们只清除了等待队列，processing_event 对于正在运行任务的状态会保持，直到它自然完成或被其他方式中断。
+    # processing_event state is managed inside run_queued_tasks.
+    # If we interrupted a task here, the finally block in run_queued_tasks will clear it.
+    # If we only cleared the waiting queue, processing_event stays set until the running task finishes or is interrupted.
     current_processing_status_for_display = processing_event.is_set()
     
     log_message(f"[CLEAR_QUEUE] Exit. Gradio queue size for display: {current_gradio_queue_size_for_display}, ComfyUI processing status for display: {current_processing_status_for_display}")
     
-    return gr.update(value=f"队列中: {current_gradio_queue_size_for_display} | 处理中: {'是' if current_processing_status_for_display else '否'}")
+    return gr.update(value=f"In Queue: {current_gradio_queue_size_for_display} | Processing: {'Yes' if current_processing_status_for_display else 'No'}")
 
 def clear_history():
     global accumulated_image_results, last_video_result
     with results_lock:
         accumulated_image_results.clear()
         last_video_result = None
-    log_message("图像和视频历史已清除。")
+    log_message("Cleared cached image and video history.")
     with queue_lock: current_queue_size = len(task_queue)
     return {
-        output_gallery: gr.update(value=[]), # 清空但不隐藏
-        output_video: gr.update(value=None), # 清空但不隐藏
-        queue_status_display: gr.update(value=f"队列中: {current_queue_size} | 处理中: {'是' if processing_event.is_set() else '否'}")
+        output_gallery: gr.update(value=[]),  # clear but keep visible
+        output_video: gr.update(value=None),  # clear but keep visible
+        queue_status_display: gr.update(value=f"In Queue: {current_queue_size} | Processing: {'Yes' if processing_event.is_set() else 'No'}")
     }
 
 
-# --- Gradio 界面 ---
+# --- Gradio UI ---
 
 # Combine imported HACKER_CSS with monitor CSS
-combined_css = HACKER_CSS + "\n" + monitor_css
+combined_css = "\n".join([HACKER_CSS, monitor_css, UI_THEME_CSS])
 
 with gr.Blocks(css=combined_css) as demo:
-    with gr.Tab("封装comfyui工作流"):
-        with gr.Row():
-           with gr.Column():  # 左侧列
-               # --- 添加实时日志显示区域 (包含系统监控) ---
-               with gr.Accordion("实时日志 (ComfyUI)", open=True, elem_classes="log-display-container"): # 保持日志区域打开
-                   with gr.Group(elem_id="log_area_relative_wrapper"): # 新增内部 Group 用于定位系统监控
-                       log_display = gr.Textbox(
-                           label="日志输出",
-                           lines=20,
-                           max_lines=20,
-                           autoscroll=True,
-                           interactive=False,
-                           show_copy_button=True,
-                           elem_classes="log-display-container"
-                       )
-                       # 系统监控 HTML 输出组件
-                       floating_monitor_html_output = gr.HTML(elem_classes="floating-monitor-outer-wrapper")
-                
-               image_accordion = gr.Accordion("上传图像 (折叠,有gradio传入图像节点才会显示上传)", visible=True, open=True)
-               with image_accordion:
-                   input_image = gr.Image(type="pil", label="上传图像", height=256, width=256)
-    
-               # --- 添加视频上传组件 ---
-               video_accordion = gr.Accordion("上传视频 (折叠,有gradio传入视频节点才会显示上传)", visible=False, open=True) # 初始隐藏
-               with video_accordion:
-                   # 使用 filepath 类型，因为 ComfyUI 节点需要文件名
-                   # sources=["upload"] 限制为仅上传
-                   input_video = gr.Video(label="上传视频", sources=["upload"], height=256, width=256)
-    
-               with gr.Row():
-                   with gr.Column(scale=3):
-                       json_dropdown = gr.Dropdown(choices=get_json_files(), label="选择工作流")
-                   with gr.Column(scale=1):
-                       with gr.Column(scale=1): # 调整比例使按钮不至于太宽
-                           refresh_button = gr.Button("🔄 刷新工作流")
-                       with gr.Column(scale=1):
-                           refresh_model_button = gr.Button("🔄 刷新模型")
-    
-    
-    
-               with gr.Row():
-                   with gr.Accordion("正向提示文本(折叠)", open=True) as positive_prompt_col:
-                       # prompt_positive = gr.Textbox(label="正向提示文本 1", elem_id="prompt_positive_1") # 将被动态组件取代
-                       # prompt_positive_2 = gr.Textbox(label="正向提示文本 2", elem_id="prompt_positive_2")
-                       # prompt_positive_3 = gr.Textbox(label="正向提示文本 3", elem_id="prompt_positive_3")
-                       # prompt_positive_4 = gr.Textbox(label="正向提示文本 4", elem_id="prompt_positive_4")
-                       # --- 动态正向提示词组件 ---
-                       positive_prompt_texts = []
-                       for i in range(MAX_DYNAMIC_COMPONENTS):
-                           positive_prompt_texts.append(
-                               gr.Textbox(label=f"正向提示 {i+1}", visible=False, elem_id=f"dynamic_positive_prompt_{i+1}")
-                           )
-                       # --- 动态正向提示词组件结束 ---
-               with gr.Column() as negative_prompt_col: # 负向提示保持单个
-                   prompt_negative = gr.Textbox(label="负向提示文本", elem_id="prompt_negative")
-    
-               with gr.Row() as resolution_row:
-                   with gr.Column(scale=1):
-                       resolution_dropdown = gr.Dropdown(choices=resolution_presets, label="分辨率预设", value=resolution_presets[0])
-                   with gr.Column(scale=1):
-                       with gr.Accordion("宽度和高度设置", open=False):
-                           with gr.Column(scale=1):
-                               hua_width = gr.Number(label="宽度", value=512, minimum=64, step=64, elem_id="hua_width_input")
-                               hua_height = gr.Number(label="高度", value=512, minimum=64, step=64, elem_id="hua_height_input")
-                               ratio_display = gr.Markdown("当前比例: 1:1")
-                       with gr.Row():
-                           with gr.Column(scale=1):
-                              flip_btn = gr.Button("↔ 切换宽高")
-    
-    
-    
+    selected_gallery_image_state = gr.State(value=None)
+    photopea_image_data_state = gr.State(value=None)
+    theme_bootstrap = gr.HTML(THEME_BOOTSTRAP_HTML, visible=False)
 
-    
-    
-    
-    
-    
-    
-    
-           with gr.Column(): # 右侧列
-               with gr.Tabs(elem_id="main_output_tabs") as main_output_tabs_component: # WRAPPER TABS
-                   with gr.Tab("生成结果", id="tab_generate_result"):
-                       output_gallery = gr.Gallery(label="生成图片结果", columns=3, height=600, preview=True, object_fit="contain", visible=False) # 保持原样
-                       output_video = gr.Video(label="生成视频结果", height=600, autoplay=True, loop=True, visible=False) # 保持原样
-                   with gr.Tab("k采样预览", id="tab_k_sampler_preview"):
-                       with gr.Tab("实时预览"): # This is a nested Tab, not an issue for the parent switching
-                           live_preview_image = gr.Image(label="实时预览", type="pil", interactive=False, height=512, show_label=False)
-                       with gr.Tab("状态"): # This is a nested Tab
-                           live_preview_status = gr.Textbox(label="预览状态", interactive=False, lines=2)
-                   with gr.Tab("预览所有输出图片", id="tab_all_outputs_preview"):
-                       output_preview_gallery = gr.Gallery(label="输出图片预览", columns=4, height="auto", preview=True, object_fit="contain")
-                       load_output_button = gr.Button("加载输出图片")
-
-
-
-    
-               # --- 添加队列控制按钮 ---
-               with gr.Row():
-                   queue_status_display = gr.Markdown("队列中: 0 | 处理中: 否") # 移到按钮上方
-    
-               with gr.Row():
-                   with gr.Row():
-                       run_button = gr.Button("🚀 开始跑图 (加入队列)", variant="primary",elem_id="align-center")
-                       clear_queue_button = gr.Button("🧹 清除队列",elem_id="align-center")
-                       
-    
-                   with gr.Row():
-                       clear_history_button = gr.Button("🗑️ 清除显示历史")
-                        # --- 添加赞助按钮和显示区域 ---
-                       sponsor_button = gr.Button("💖 赞助作者")
-                   with gr.Row():
-                       queue_count = gr.Number(label="队列数量", value=1, minimum=1, step=1, precision=0)
-
-    
-    
-    
-    
-               sponsor_display = gr.Markdown(visible=False) # 初始隐藏
-               with gr.Row():
-
-                   # interrupt_action_status Textbox 已移除，将通过 gr.Info() 显示弹窗
-                   with gr.Column(scale=1, visible=False) as seed_options_col: # 种子选项列，初始隐藏
-                       seed_mode_dropdown = gr.Dropdown(
-                           choices=["随机", "递增", "递减", "固定"],
-                           value="随机",
-                           label="种子模式",
-                           elem_id="seed_mode_dropdown"
-                       )
-                       fixed_seed_input = gr.Number(
-                           label="固定种子值",
-                           value=0,
-                           minimum=0,
-                           maximum=0xffffffff, # Max unsigned 32-bit int
-                           step=1,
-                           precision=0,
-                           visible=False, # 初始隐藏，仅在模式为 "固定" 时显示
-                           elem_id="fixed_seed_input"
-                       )
-                       
-                   with gr.Column(scale=1):
-                       hua_unet_dropdown = gr.Dropdown(choices=unet_list, label="选择 UNet 模型", value="None", elem_id="hua_unet_dropdown", visible=False) # 初始隐藏
-
-
-               with gr.Row():
-                   with gr.Column(scale=1):
-                       # hua_lora_dropdown = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 1", value="None", elem_id="hua_lora_dropdown", visible=False) # 初始隐藏
-                       # hua_lora_dropdown_2 = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 2", value="None", elem_id="hua_lora_dropdown_2", visible=False) # 新增，初始隐藏
-                       # hua_lora_dropdown_3 = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 3", value="None", elem_id="hua_lora_dropdown_3", visible=False) # 新增，初始隐藏
-                       # hua_lora_dropdown_4 = gr.Dropdown(choices=lora_list, label="选择 Lora 模型 4", value="None", elem_id="hua_lora_dropdown_4", visible=False) # 新增，初始隐藏
-                       # --- 动态 Lora 下拉框 ---
-                       lora_dropdowns = []
-                       for i in range(MAX_DYNAMIC_COMPONENTS):
-                           lora_dropdowns.append(
-                               gr.Dropdown(choices=lora_list, label=f"Lora {i+1}", value="None", visible=False, elem_id=f"dynamic_lora_dropdown_{i+1}")
-                           )
-                       # --- 动态 Lora 下拉框结束 ---
-                   with gr.Column(scale=1): # Checkpoint 和 Unet 保持单例
-                       hua_checkpoint_dropdown = gr.Dropdown(choices=checkpoint_list, label="选择 Checkpoint 模型", value="None", elem_id="hua_checkpoint_dropdown", visible=False) # 初始隐藏
-
-
-               # --- 添加 Float 和 Int 输入组件 (初始隐藏) ---
-               with gr.Row() as float_int_row: # 保持此行用于整体可见性控制（如果需要）
-                    with gr.Column(scale=1):
-                        # hua_float_input = gr.Number(label="浮点数输入 (Float)", visible=False, elem_id="hua_float_input")
-                        # hua_float_input_2 = gr.Number(label="浮点数输入 2 (Float)", visible=False, elem_id="hua_float_input_2")
-                        # hua_float_input_3 = gr.Number(label="浮点数输入 3 (Float)", visible=False, elem_id="hua_float_input_3")
-                        # hua_float_input_4 = gr.Number(label="浮点数输入 4 (Float)", visible=False, elem_id="hua_float_input_4")
-                        # --- 动态 Float 输入 ---
-                        float_inputs = []
-                        for i in range(MAX_DYNAMIC_COMPONENTS):
-                            float_inputs.append(
-                                gr.Number(label=f"浮点数 {i+1}", visible=False, elem_id=f"dynamic_float_input_{i+1}")
+    with gr.Tabs(elem_id="hua-main-tabs"):
+        with gr.TabItem("ComfyUI Workflow Wrapper", id="tab_workflow_main"):
+            with gr.Row(equal_height=False, elem_classes=["hua-main-row"]):
+                with gr.Column(scale=6, min_width=720, elem_classes=["hua-pane", "hua-pane-left"]):
+                    with gr.Accordion("Live Logs (ComfyUI)", open=True, elem_classes="log-display-container"):
+                        with gr.Group(elem_id="log_area_relative_wrapper"):
+                            log_display = gr.Textbox(
+                                label="Logs",
+                                lines=20,
+                                max_lines=20,
+                                autoscroll=True,
+                                interactive=False,
+                                show_copy_button=True,
+                                elem_classes="log-display-container"
                             )
-                    # --- 动态 Float 输入结束 ---
-                    with gr.Column(scale=1):
-                        # hua_int_input = gr.Number(label="整数输入 (Int)", precision=0, visible=False, elem_id="hua_int_input") # precision=0 for integer
-                        # hua_int_input_2 = gr.Number(label="整数输入 2 (Int)", precision=0, visible=False, elem_id="hua_int_input_2")
-                        # hua_int_input_3 = gr.Number(label="整数输入 3 (Int)", precision=0, visible=False, elem_id="hua_int_input_3")
-                        # hua_int_input_4 = gr.Number(label="整数输入 4 (Int)", precision=0, visible=False, elem_id="hua_int_input_4")
-                        # --- 动态 Int 输入 ---
-                        int_inputs = []
-                        for i in range(MAX_DYNAMIC_COMPONENTS):
-                            int_inputs.append(
-                                gr.Number(label=f"整数 {i+1}", precision=0, visible=False, elem_id=f"dynamic_int_input_{i+1}")
+                            floating_monitor_html_output = gr.HTML(elem_classes="floating-monitor-outer-wrapper")
+
+                    with gr.Accordion("Upload Image", open=True, visible=True) as image_accordion:
+                        base_image_kwargs = {
+                            "label": "Upload / Inpaint Image",
+                            "height": 512,
+                            "width": "100%",
+                            "elem_id": "hua-image-input",
+                        }
+                        if GRADIO_HAS_IMAGE_EDITOR:
+                            image_editor_kwargs = dict(base_image_kwargs)
+                            image_editor_kwargs.update({
+                                "image_mode": "RGBA",
+                                "sources": ["upload", "clipboard"],
+                                "type": "pil",
+                                "layers": True,
+                                "transforms": (),
+                                "canvas_size": None,
+                                "brush": gr.Brush(default_size=56, color_mode="fixed", colors=["#ffffffff"], default_color="#ffffffff"),
+                                "eraser": gr.Eraser(default_size=48),
+                            })
+                            input_image = gr.ImageEditor(**image_editor_kwargs)
+                        elif GRADIO_IMAGE_SUPPORTS_TOOL:
+                            image_kwargs = dict(base_image_kwargs)
+                            if GRADIO_IMAGE_SUPPORTS_TYPE:
+                                image_kwargs["type"] = "pil"
+                            if GRADIO_IMAGE_SUPPORTS_IMAGE_MODE:
+                                image_kwargs["image_mode"] = "RGBA"
+                            image_kwargs["tool"] = "sketch"
+                            if GRADIO_IMAGE_SUPPORTS_BRUSH:
+                                image_kwargs["brush_radius"] = 40
+                            if GRADIO_IMAGE_SUPPORTS_SOURCES:
+                                image_kwargs["sources"] = ["upload", "clipboard"]
+                            input_image = gr.Image(**image_kwargs)
+                        else:
+                            fallback_kwargs = dict(base_image_kwargs)
+                            if GRADIO_IMAGE_SUPPORTS_TYPE:
+                                fallback_kwargs["type"] = "pil"
+                            if GRADIO_IMAGE_SUPPORTS_IMAGE_MODE:
+                                fallback_kwargs["image_mode"] = "RGBA"
+                            if GRADIO_IMAGE_SUPPORTS_SOURCES:
+                                fallback_kwargs["sources"] = ["upload", "clipboard"]
+                            input_image = gr.Image(**fallback_kwargs)
+
+                    with gr.Accordion("Upload Video", open=False, visible=False) as video_accordion:
+                        video_kwargs = {
+                            "label": "Upload Video",
+                            "height": 360,
+                            "width": "100%",
+                        }
+                        if GRADIO_VIDEO_SUPPORTS_SOURCES:
+                            video_kwargs["sources"] = ["upload"]
+                        input_video = gr.Video(**video_kwargs)
+
+                    for i in range(MAX_IMAGE_LOADERS):
+                        with gr.Accordion(f"Image Loader Settings {i+1}", open=False, visible=False) as loader_section:
+                            resize_checkbox = gr.Checkbox(label="Resize", value=False, visible=False)
+                            with gr.Row():
+                                width_number = gr.Number(label="Width", minimum=1, step=1, visible=False)
+                                height_number = gr.Number(label="Height", minimum=1, step=1, visible=False)
+                            keep_proportion_checkbox = gr.Checkbox(label="Keep Proportion", value=False, visible=False)
+                            divisible_number = gr.Number(label="Divisible By", minimum=1, step=1, visible=False)
+                        IMAGE_LOADER_ACCORDION_COMPONENTS.append(loader_section)
+                        IMAGE_LOADER_COMPONENTS_FLAT.extend([
+                            resize_checkbox,
+                            width_number,
+                            height_number,
+                            keep_proportion_checkbox,
+                            divisible_number,
+                        ])
+
+                    initial_json_choices = get_json_files()
+                    initial_json_value = initial_json_choices[0] if initial_json_choices else None
+
+                    with gr.Row():
+                        with gr.Column(scale=4, min_width=420):
+                            json_dropdown = gr.Dropdown(choices=initial_json_choices, value=initial_json_value, label="Select Workflow")
+                        with gr.Column(scale=2, min_width=220):
+                            refresh_button = gr.Button("Refresh Workflows")
+                            refresh_model_button = gr.Button("Refresh Models")
+
+                    with gr.Row():
+                        with gr.Column(scale=2):
+                            with gr.Accordion("Positive Prompts", open=True):
+                                positive_prompt_texts = []
+                                for i in range(MAX_DYNAMIC_COMPONENTS):
+                                    positive_prompt_texts.append(
+                                        gr.Textbox(label=f"Prompt {i+1}", visible=False, elem_id=f"dynamic_positive_prompt_{i+1}")
+                                    )
+                        with gr.Column(scale=2):
+                            with gr.Accordion("Negative Prompts", open=False) as negative_prompt_accordion:
+                                prompt_negative = gr.Textbox(label="Primary Negative Prompt", elem_id="prompt_negative")
+                                negative_prompt_extras = []
+                                for i in range(MAX_DYNAMIC_COMPONENTS):
+                                    extra = gr.Textbox(
+                                        label=f"Negative Prompt Extra {i+1}",
+                                        visible=False,
+                                        elem_id=f"dynamic_negative_prompt_{i+1}"
+                                    )
+                                    negative_prompt_extras.append(extra)
+                                    NEGATIVE_PROMPT_COMPONENTS.append(extra)
+
+                    with gr.Row() as resolution_row:
+                        with gr.Column(scale=2, min_width=280):
+                            resolution_dropdown = gr.Dropdown(choices=resolution_presets, label="Resolution Preset", value=resolution_presets[0])
+                        with gr.Column(scale=2, min_width=280):
+                            with gr.Accordion("Width and Height", open=False):
+                                with gr.Column():
+                                    hua_width = gr.Number(label="Width", value=512, minimum=64, step=64, elem_id="hua_width_input")
+                                    hua_height = gr.Number(label="Height", value=512, minimum=64, step=64, elem_id="hua_height_input")
+                                    ratio_display = gr.Markdown("Current ratio: 1:1")
+                            flip_btn = gr.Button("Swap Width/Height")
+
+                    with gr.Row():
+                        queue_status_display = gr.Markdown("In Queue: 0 | Processing: No")
+
+                    with gr.Row():
+                        run_button = gr.Button("Generate (enqueue)", variant="primary", elem_id="align-center")
+                        clear_queue_button = gr.Button("Clear Queue", elem_id="align-center")
+                        clear_history_button = gr.Button("Clear History")
+                        sponsor_button = gr.Button("Sponsor Author")
+                        queue_count = gr.Number(label="Queue Count", value=1, minimum=1, step=1, precision=0)
+                    sponsor_display = gr.Markdown(visible=False)
+
+                    with gr.Row():
+                        with gr.Column(scale=1, visible=False) as seed_options_col:
+                            seed_mode_dropdown = gr.Dropdown(
+                                choices=["Random", "Increment", "Decrement", "Fixed"],
+                                value="Random",
+                                label="Seed Mode",
+                                elem_id="seed_mode_dropdown"
                             )
-                        # --- 动态 Int 输入结束 ---
+                            fixed_seed_input = gr.Number(
+                                label="Fixed Seed Value",
+                                value=0,
+                                minimum=0,
+                                maximum=0xffffffff,
+                                step=1,
+                                precision=0,
+                                visible=False,
+                                elem_id="fixed_seed_input"
+                            )
 
+                    with gr.Row():
+                        with gr.Column(scale=1):
+                            hua_unet_dropdown = gr.Dropdown(
+                                choices=unet_list,
+                                label="Select UNet Model",
+                                value="None",
+                                elem_id="hua_unet_dropdown",
+                                visible=False,
+                            )
+                        with gr.Column(scale=1):
+                            lora_dropdowns = []
+                            for i in range(MAX_DYNAMIC_COMPONENTS):
+                                lora_dropdowns.append(
+                                    gr.Dropdown(
+                                        choices=lora_list,
+                                        label=f"Lora {i+1}",
+                                        value="None",
+                                        visible=False,
+                                        elem_id=f"dynamic_lora_dropdown_{i+1}"
+                                    )
+                                )
+                        with gr.Column(scale=1):
+                            hua_checkpoint_dropdown = gr.Dropdown(
+                                choices=checkpoint_list,
+                                label="Select Checkpoint",
+                                value="None",
+                                elem_id="hua_checkpoint_dropdown",
+                                visible=False,
+                            )
 
-               with gr.Row():
-                   # interrupt_button_main_tab 已被移除
-                   gr.Markdown('我要打十个') # 保留这句骚话                       
-                   
-               # with gr.Row(): # queue_status_display 已移到上方
-               #     with gr.Column(scale=1):
-               #         queue_status_display = gr.Markdown("队列中: 0 | 处理中: 否")
-               
-               
+                    with gr.Row() as float_int_row:
+                        with gr.Column(scale=1):
+                            float_inputs = []
+                            for i in range(MAX_DYNAMIC_COMPONENTS):
+                                float_inputs.append(
+                                    gr.Number(
+                                        label=f"Float Input {i+1}",
+                                        visible=False,
+                                        elem_id=f"dynamic_float_input_{i+1}"
+                                    )
+                                )
+                        with gr.Column(scale=1):
+                            int_inputs = []
+                            for i in range(MAX_DYNAMIC_COMPONENTS):
+                                int_inputs.append(
+                                    gr.Number(
+                                        label=f"Int Input {i+1}",
+                                        visible=False,
+                                        elem_id=f"dynamic_int_input_{i+1}"
+                                    )
+                                )
 
-    with gr.Tab("设置"):
-        with gr.Column(): # 使用 Column 布局
+                    with gr.Accordion("Sampler Settings", open=False) as ksampler_settings_parent:
+                        for i in range(MAX_KSAMPLER_CONTROLS):
+                            with gr.Accordion(f"KSampler {i+1}", open=False, visible=False) as ks_section:
+                                ks_steps = gr.Slider(label="Steps", minimum=1, maximum=150, step=1, value=20, visible=True)
+                                ks_cfg = gr.Slider(label="CFG", minimum=0.0, maximum=30.0, step=0.1, value=7.0, visible=True)
+                                ks_sampler = gr.Dropdown(choices=SAMPLER_NAME_CHOICES, allow_custom_value=True, label="Sampler", value="euler", visible=True)
+                                ks_scheduler = gr.Dropdown(choices=SCHEDULER_CHOICES, allow_custom_value=True, label="Scheduler", value="simple", visible=True)
+                                with gr.Row():
+                                    ks_start = gr.Slider(label="Start Step", minimum=0, maximum=10000, step=1, value=0, visible=True)
+                                    ks_end = gr.Slider(label="End Step", minimum=0, maximum=10000, step=1, value=0, visible=True)
+                                ks_add_noise = gr.Dropdown(choices=BOOL_CHOICE, label="Add Noise", value="enable", visible=True)
+                                ks_return_leftover = gr.Dropdown(choices=BOOL_CHOICE, label="Return With Leftover Noise", value="disable", visible=True)
+                                ks_noise_seed = gr.Textbox(label="Noise Seed", value="", placeholder="Leave blank for random", visible=True)
+                            KSAMPLER_COMPONENT_GROUPS.append({
+                                "accordion": ks_section,
+                                "steps": ks_steps,
+                                "cfg": ks_cfg,
+                                "sampler": ks_sampler,
+                                "scheduler": ks_scheduler,
+                                "start": ks_start,
+                                "end": ks_end,
+                                "add_noise": ks_add_noise,
+                                "return_leftover": ks_return_leftover,
+                                "noise_seed": ks_noise_seed,
+                            })
+                            KSAMPLER_ACCORDION_COMPONENTS.append(ks_section)
+                            KSAMPLER_COMPONENTS_FLAT.extend([
+                                ks_steps,
+                                ks_cfg,
+                                ks_sampler,
+                                ks_scheduler,
+                                ks_start,
+                                ks_end,
+                                ks_add_noise,
+                                ks_return_leftover,
+                                ks_noise_seed,
+                            ])
 
-            gr.Markdown("## 🎛️ ComfyUI 节点徽章控制")
-            gr.Markdown("控制 ComfyUI 界面中节点 ID 徽章的显示方式。设置完成请刷新comfyui界面即可。")
-            node_badge_mode_radio = gr.Radio(
-                choices=["Show all", "Hover", "None"],
-                value="Show all", # 默认值可以尝试从 ComfyUI 获取，但这里先设为 Show all
-                label="选择节点 ID 徽章显示模式"
-            )
-            node_badge_output_text = gr.Textbox(label="更新结果", interactive=False)
+                    with gr.Accordion("Mask & Detection Settings", open=False) as mask_settings_parent:
+                        for i in range(MAX_MASK_GENERATORS):
+                            with gr.Accordion(f"Mask Generator {i+1}", open=False, visible=False) as mask_section:
+                                mask_face = gr.Checkbox(label="Face Mask", value=True, visible=True)
+                                mask_background = gr.Checkbox(label="Background Mask", value=False, visible=True)
+                                mask_hair = gr.Checkbox(label="Hair Mask", value=False, visible=True)
+                                mask_body = gr.Checkbox(label="Body Mask", value=False, visible=True)
+                                mask_clothes = gr.Checkbox(label="Clothes Mask", value=False, visible=True)
+                                mask_confidence = gr.Slider(label="Confidence", minimum=0.0, maximum=1.0, step=0.01, value=0.15, visible=True)
+                                mask_refine = gr.Checkbox(label="Refine Mask", value=False, visible=True)
+                            MASK_COMPONENT_GROUPS.append({
+                                "accordion": mask_section,
+                                "face_mask": mask_face,
+                                "background_mask": mask_background,
+                                "hair_mask": mask_hair,
+                                "body_mask": mask_body,
+                                "clothes_mask": mask_clothes,
+                                "confidence": mask_confidence,
+                                "refine_mask": mask_refine,
+                            })
+                            MASK_ACCORDION_COMPONENTS.append(mask_section)
+                            MASK_COMPONENTS_FLAT.extend([
+                                mask_face,
+                                mask_background,
+                                mask_hair,
+                                mask_body,
+                                mask_clothes,
+                                mask_confidence,
+                                mask_refine,
+                            ])
+                    mask_generator_notice = gr.Markdown(MASK_GENERATOR_NOTICE_TEXT, visible=False)
 
-            # 将事件处理移到 UI 定义之后
-            node_badge_mode_radio.change(
-                fn=update_node_badge_mode,
-                inputs=node_badge_mode_radio,
-                outputs=node_badge_output_text
-            )
-            # TODO: 添加一个按钮或在加载时尝试获取当前设置并更新 Radio 的 value
+                with gr.Column(scale=5, min_width=640, elem_classes=["hua-pane", "hua-pane-right"]):
+                    with gr.Tabs(elem_id="main_output_tabs") as main_output_tabs_component:
+                        with gr.Tab("Results & Preview", id="tab_generate_result"):
+                            with gr.Row():
+                                with gr.Column(scale=2):
+                                    output_gallery = gr.Gallery(
+                                        label="Image Results",
+                                        columns=3,
+                                        height=720,
+                                        preview=True,
+                                        object_fit="contain",
+                                        visible=False
+                                    )
+                                    video_output_kwargs = {
+                                        "label": "Video Results",
+                                        "height": 720,
+                                        "autoplay": True,
+                                        "visible": False,
+                                    }
+                                    if GRADIO_VIDEO_SUPPORTS_LOOP:
+                                        video_output_kwargs["loop"] = True
+                                    output_video = gr.Video(**video_output_kwargs)
+                                with gr.Column(scale=1):
+                                    live_preview_image = gr.Image(
+                                        label="Live Preview",
+                                        type="pil",
+                                        interactive=False,
+                                        height=560,
+                                        show_label=True
+                                    )
+                                    live_preview_status = gr.Textbox(
+                                        label="Preview Status",
+                                        interactive=False,
+                                        lines=2
+                                    )
+                        with gr.Tab("Preview All Outputs", id="tab_all_outputs_preview"):
+                            output_preview_gallery = gr.Gallery(
+                                label="Output Images Preview",
+                                columns=4,
+                                height=640,
+                                preview=True,
+                                object_fit="contain"
+                            )
+                            load_output_button = gr.Button("Load Output Images")
+        with gr.TabItem("Photopea Editor", id="tab_photopea_editor"):
+            with gr.Column():
+                gr.Markdown("### Photopea Editor")
+                photopea_status = gr.Markdown("Load or select an image, then send it to Photopea for detailed edits.", elem_id="photopea-status")
+                with gr.Row():
+                    load_photopea_button = gr.Button("Send to Photopea", variant="secondary", elem_id="hua-photopea-send")
+                    photopea_fetch_button = gr.Button("Import from Photopea", variant="secondary", elem_id="hua-photopea-fetch")
+                photopea_html_panel = gr.HTML(PHOTOPEA_EMBED_HTML, elem_id="photopea-embed", elem_classes=["hua-photopea-html"])
+                photopea_data_bus = gr.Textbox(value="", visible=False, interactive=False, elem_id="hua-photopea-data-store")
+                photopea_import_box = gr.Textbox(visible=False, elem_id="photopea-import-data")
+        with gr.TabItem("Settings", id="tab_settings"):
+            with gr.Column():
+                gr.Markdown("## ComfyUI Control")
+                gr.Markdown("Restart ComfyUI or interrupt the queue worker.")
+                with gr.Row():
+                    reboot_button = gr.Button("Reboot ComfyUI")
+                reboot_output = gr.Textbox(label="Reboot Result", interactive=False)
+                reboot_button.click(fn=reboot_manager, inputs=[], outputs=[reboot_output])
 
-            gr.Markdown("---") # 添加分隔线
-            gr.Markdown("## ⚡ ComfyUI 控制")
-            gr.Markdown("重启 ComfyUI 或中断当前正在执行的任务。")
-
-            with gr.Row():
-                reboot_button = gr.Button("🔄 重启ComfyUI")
-                # interrupt_button (原位置) 已被移除
-
-            reboot_output = gr.Textbox(label="重启结果", interactive=False)
-            # interrupt_output (原位置) 已被移除
-
-            # 将事件处理移到 UI 定义之后
-            reboot_button.click(fn=reboot_manager, inputs=[], outputs=[reboot_output])
-            # interrupt_button.click (原位置) 已被移除
-
-
-
-            gr.Markdown("## ⚙️ 插件核心设置") 
-            gr.Markdown("---")
-
-            gr.Markdown("### 🎨 动态组件数量")
-            gr.Markdown(
-                "设置在UI中为正向提示、Lora、浮点数和整数输入动态生成的组件的最大数量。\n"
-                "**注意：此更改将在下次启动插件 (或重启 ComfyUI) 后生效，以改变实际显示的组件数量。**"
-            )
-            
-            # UI组件的初始值也从配置文件读取，确保显示的是当前生效的或即将生效的配置
-            initial_max_comp_for_ui = load_plugin_settings().get("max_dynamic_components", DEFAULT_MAX_DYNAMIC_COMPONENTS)
-            
-            max_dynamic_components_input = gr.Number(
-                label="最大动态组件数量 (1-20)", 
-                value=initial_max_comp_for_ui, 
-                minimum=1, 
-                maximum=20, # 设定一个合理的上限
-                step=1, 
-                precision=0,
-                elem_id="max_dynamic_components_setting_input"
-            )
-            save_max_components_button = gr.Button("保存动态组件数量设置")
-            max_components_save_status = gr.Markdown("", elem_id="max_components_save_status_md") # 用于显示保存状态和提示
-
-            def handle_save_max_components(new_max_value_from_input):
-                try:
-                    # Gradio Number input might pass a float if not careful, ensure int
-                    new_max_value = int(float(new_max_value_from_input)) 
-                    if not (1 <= new_max_value <= 20): # 后端再次验证范围
-                        return gr.update(value="<p style='color:red;'>错误：值必须介于 1 和 20 之间。</p>")
-                except ValueError:
-                    return gr.update(value="<p style='color:red;'>错误：请输入一个有效的整数。</p>")
-
-                # 重新加载当前设置，以防其他设置项被意外覆盖（如果未来有其他设置项）
-                current_settings = load_plugin_settings() 
-                current_settings["max_dynamic_components"] = new_max_value
-                status_message = save_plugin_settings(current_settings)
-                
-                # 更新全局MAX_DYNAMIC_COMPONENTS，主要用于确保get_workflow_defaults_and_visibility在同一次会话中如果被调用能拿到新值
-                # 但这不会改变已经实例化的Gradio组件数量
-                # global MAX_DYNAMIC_COMPONENTS
-                # MAX_DYNAMIC_COMPONENTS = new_max_value 
-                # print(f"UI中更新了max_dynamic_components的配置，新值为: {new_max_value}。重启后生效于UI组件数量。")
-
-                return gr.update(value=f"<p style='color:green;'>{status_message} 请重启插件或 ComfyUI 以使更改生效。</p>")
-
-            save_max_components_button.click(
-                fn=handle_save_max_components,
-                inputs=[max_dynamic_components_input],
-                outputs=[max_components_save_status]
-            )
-            
-            gr.Markdown("---") # 分隔线
-
-    with gr.Tab("信息"):
-        with gr.Column():
-            gr.Markdown("### ℹ️ 插件与开发者信息") # 添加标题
-
-            # GitHub Repo Button
-            github_repo_btn = gr.Button("本插件 GitHub 仓库")
-            gitthub_display = gr.Markdown(visible=False) # 此选项卡中用于显示链接的区域
-            github_repo_btn.click(lambda: gr.update(value="https://github.com/kungful/ComfyUI_to_webui.git",visible=True), inputs=[], outputs=[gitthub_display]) # 修正: 指向 gitthub_display
-
-            # Free Mirror Button
-            free_mirror_btn = gr.Button("开发者的免费镜像")
-            free_mirror_diplay = gr.Markdown(visible=False) # 此选项卡中用于显示链接的区域
-            free_mirror_btn.click(lambda: gr.update(value="https://www.xiangongyun.com/image/detail/7b36c1a3-da41-4676-b5b3-03ec25d6e197",visible=True), inputs=[], outputs=[free_mirror_diplay]) # 修正: 指向 free_mirror_diplay
-
-            # Sponsor Button & Display Area
-            sponsor_info_btn = gr.Button("💖 赞助开发者")
-            info_sponsor_display = gr.Markdown(visible=False) # 此选项卡中用于显示赞助信息的区域
-            sponsor_info_btn.click(fn=show_sponsor_code, inputs=[], outputs=[info_sponsor_display]) # 目标新的显示区域
-
-            # Contact Button & Display Area
-            contact_btn = gr.Button("开发者联系方式")
-            contact_display = gr.Markdown(visible=False) # 联系信息显示区域
-            # 使用 lambda 更新 Markdown 组件的值并使其可见
-            contact_btn.click(lambda: gr.update(value="**邮箱:** blenderkrita@gmail.com", visible=True), inputs=[], outputs=[contact_display])
-
-            # Tutorial Button
-            tutorial_btn = gr.Button("使用教程 (GitHub)")
-            tutorial_display = gr.Markdown(visible=False) # 此选项卡中用于显示链接的区域
-            tutorial_btn.click(lambda: gr.update(value="https://github.com/kungful/ComfyUI_to_webui.git",visible=True), inputs=[], outputs=[tutorial_display]) # 修正: 指向 tutorial_display
-
-            # 添加一些间距或说明
-            gr.Markdown("---")
-            gr.Markdown("点击上方按钮获取相关信息或跳转链接。")
-
-    with gr.Tab("API JSON 管理"):
-        define_api_json_management_ui()
-
-
-    # --- 事件处理 ---
+                gr.Markdown("## Plugin Core Settings")
+                gr.Markdown("---")
+                gr.Markdown("### Dynamic Component Count")
+                gr.Markdown("Set the maximum number of dynamically generated components. Restart required to take effect.")
+                initial_max_comp_for_ui = load_plugin_settings().get("max_dynamic_components", DEFAULT_MAX_DYNAMIC_COMPONENTS)
+                max_dynamic_components_input = gr.Number(label="Max dynamic components (1-20)", value=initial_max_comp_for_ui, minimum=1, maximum=20, step=1, precision=0, elem_id="max_dynamic_components_setting_input")
+                save_max_components_button = gr.Button("Save dynamic component count")
+                max_components_save_status = gr.Markdown("", elem_id="max_components_save_status_md")
+                def handle_save_max_components(new_max_value_from_input):
+                    try:
+                        new_max_value = int(float(new_max_value_from_input))
+                        if not (1 <= new_max_value <= 20):
+                            return gr.update(value="<p style='color:red;'>Error: value must be between 1 and 20.</p>")
+                    except ValueError:
+                        return gr.update(value="<p style='color:red;'>Error: please enter a valid integer.</p>")
+                    current_settings = load_plugin_settings()
+                    current_settings["max_dynamic_components"] = new_max_value
+                    status_message = save_plugin_settings(current_settings)
+                    return gr.update(value=f"<p style='color:green;'>{status_message} Please restart the plugin or ComfyUI for changes to take effect.</p>")
+                save_max_components_button.click(fn=handle_save_max_components, inputs=[max_dynamic_components_input], outputs=[max_components_save_status])
+                gr.Markdown("---")
+                gr.Markdown("### Appearance")
+                gr.Markdown("Choose the interface theme. System mode follows your OS preference.")
+                theme_choices = [THEME_MODE_LABELS[key] for key in ("system", "light", "dark")]
+                theme_selector = gr.Radio(choices=theme_choices, value=CURRENT_THEME_LABEL, label="Color theme")
+                theme_status = gr.Markdown(visible=False)
+                theme_apply_html = gr.HTML("", visible=False, elem_id="hua-theme-sync")
+                def handle_theme_change(selected_label):
+                    canonical = THEME_LABEL_TO_VALUE.get(selected_label, "system")
+                    current_settings = load_plugin_settings()
+                    current_settings["theme_mode"] = canonical
+                    status_message = save_plugin_settings(current_settings)
+                    script = f"<script>window.huaApplyTheme && window.huaApplyTheme('{canonical}');</script>"
+                    return (
+                        gr.update(value=f"Theme preference set to **{selected_label}**. {status_message}", visible=True),
+                        gr.update(value=script)
+                    )
+                theme_selector.change(
+                    fn=handle_theme_change,
+                    inputs=[theme_selector],
+                    outputs=[theme_status, theme_apply_html]
+                )
+                gr.Markdown("---")
+        with gr.TabItem("Civitai Browser", id="tab_civitai_browser"):
+            with gr.Column():
+                gr.Markdown("### Browse & Download Models from Civitai")
+                stored_civitai_key = plugin_settings_on_load.get("civitai_api_key", "") if isinstance(plugin_settings_on_load, dict) else ""
+                with gr.Row():
+                    civitai_api_key_input = gr.Textbox(label="Civitai API Key (optional)", value=stored_civitai_key, type="password", placeholder="Paste API key or leave blank.")
+                    civitai_save_key_button = gr.Button("Save Key", variant="secondary")
+                civitai_key_status = gr.Markdown(visible=False)
+                with gr.Row():
+                    civitai_query = gr.Textbox(label="Search", placeholder="Model name, tag, etc.")
+                    civitai_type = gr.Dropdown(label="Model Type", choices=["", "Checkpoint", "LORA", "LoCon", "TextualInversion", "VAE", "Controlnet"], value="")
+                    civitai_sort = gr.Dropdown(label="Sort By", choices=list(CIVITAI_SORT_MAP.keys()), value="Highest Rated")
+                with gr.Row():
+                    civitai_page = gr.Number(value=1, minimum=1, step=1, label="Page", precision=0)
+                    civitai_per_page = gr.Number(value=20, minimum=1, maximum=50, step=1, label="Results / Page", precision=0)
+                    civitai_nsfw = gr.Dropdown(label="NSFW", choices=["Hide", "Show", "Only"], value="Hide")
+                    civitai_search_button = gr.Button("Search", variant="primary")
+                civitai_results_state = gr.State(value=[])
+                civitai_selected_model_state = gr.State(value=None)
+                civitai_selected_file_state = gr.State(value=None)
+                civitai_search_status = gr.Markdown(visible=False)
+                civitai_results_dropdown = gr.Dropdown(label="Results", choices=[], value=None)
+                civitai_model_details = gr.Markdown(visible=False)
+                civitai_preview_gallery = gr.Gallery(label="Preview Images", visible=False, height=300)
+                civitai_version_dropdown = gr.Dropdown(label="Versions", choices=[], value=None, visible=False)
+                civitai_file_dropdown = gr.Dropdown(label="Files", choices=[], value=None, visible=False)
+                civitai_target_dir = gr.Textbox(label="Download Directory", value="", placeholder="Absolute path to save the file.")
+                civitai_download_button = gr.Button("Download Selected File", variant="primary")
+                civitai_download_status = gr.Markdown(visible=False)
+        with gr.TabItem("Info", id="tab_info"):
+            with gr.Column():
+                gr.Markdown("### Plugin & Developer Info")
+                github_repo_btn = gr.Button("GitHub Repository")
+                gitthub_display = gr.Markdown(visible=False)
+                github_repo_btn.click(lambda: gr.update(value="https://github.com/kungful/ComfyUI_to_webui.git", visible=True), inputs=[], outputs=[gitthub_display])
+                free_mirror_btn = gr.Button("Developer's Free Image")
+                free_mirror_display = gr.Markdown(visible=False)
+                free_mirror_btn.click(lambda: gr.update(value="https://www.xiangongyun.com/image/detail/7b36c1a3-da41-4676-b5b3-03ec25d6e197", visible=True), inputs=[], outputs=[free_mirror_display])
+                contact_btn = gr.Button("Developer Contact")
+                contact_display = gr.Markdown(visible=False)
+                contact_btn.click(lambda: gr.update(value="**Email:** blenderkrita@gmail.com", visible=True), inputs=[], outputs=[contact_display])
+                tutorial_btn = gr.Button("Tutorial (GitHub)")
+                tutorial_display = gr.Markdown(visible=False)
+                tutorial_btn.click(lambda: gr.update(value="https://github.com/kungful/ComfyUI_to_webui.git", visible=True), inputs=[], outputs=[tutorial_display])
+                gr.Markdown("---")
+                gr.Markdown("Click the buttons above for links and information.")
+        with gr.TabItem("API JSON Manager", id="tab_api_json_manager"):
+            define_api_json_management_ui()
+# --- Event Handlers ---
 
     def refresh_workflow_and_ui(current_selected_json_file):
         log_message(f"[REFRESH_WORKFLOW_UI] Triggered. Current selection: {current_selected_json_file}")
@@ -1494,223 +2851,976 @@ with gr.Blocks(css=combined_css) as demo:
         log_message(f"[REFRESH_WORKFLOW_UI] Returning {len(final_updates)} updates. Dropdown will be set to '{json_to_load_for_ui_update}'.")
         return final_updates
 
-    # --- 节点徽章设置事件 (已在 Tab 内定义) ---
+    # --- Node badge events (handled in Settings tab) ---
     # node_badge_mode_radio.change(fn=update_node_badge_mode, inputs=node_badge_mode_radio, outputs=node_badge_output_text)
 
-    # --- 其他事件处理 ---
+    # --- Additional event handlers ---
     resolution_dropdown.change(fn=update_from_preset, inputs=resolution_dropdown, outputs=[resolution_dropdown, hua_width, hua_height, ratio_display])
     hua_width.change(fn=update_from_inputs, inputs=[hua_width, hua_height], outputs=[resolution_dropdown, ratio_display])
     hua_height.change(fn=update_from_inputs, inputs=[hua_width, hua_height], outputs=[resolution_dropdown, ratio_display])
     flip_btn.click(fn=flip_resolution, inputs=[hua_width, hua_height], outputs=[hua_width, hua_height])
 
-    # JSON 下拉菜单改变时，更新所有相关组件的可见性、默认值 + 输出区域可见性
+    # When JSON selection changes, update all related component visibility and defaults
     def update_ui_on_json_change(json_file):
-        defaults = get_workflow_defaults_and_visibility(json_file, OUTPUT_DIR, resolution_prefixes, resolution_presets, MAX_DYNAMIC_COMPONENTS)
-        
+        workflow_dir, workflow_name, workflow_path = resolve_workflow_components(json_file)
+        if workflow_dir and workflow_name:
+            defaults = get_workflow_defaults_and_visibility(
+                workflow_name,
+                workflow_dir,
+                resolution_prefixes,
+                resolution_presets,
+                MAX_DYNAMIC_COMPONENTS
+            )
+        elif json_file:
+            defaults = get_workflow_defaults_and_visibility(
+                json_file,
+                OUTPUT_DIR,
+                resolution_prefixes,
+                resolution_presets,
+                MAX_DYNAMIC_COMPONENTS
+            )
+        else:
+            defaults = get_workflow_defaults_and_visibility(
+                "",
+                OUTPUT_DIR,
+                resolution_prefixes,
+                resolution_presets,
+                MAX_DYNAMIC_COMPONENTS
+            )
+
         updates = []
 
-        # 单例组件
-        updates.append(gr.update(visible=defaults["visible_image_input"]))
-        updates.append(gr.update(visible=defaults["visible_video_input"]))
-        updates.append(gr.update(visible=defaults["visible_neg_prompt"], value=defaults["default_neg_prompt"]))
-        
-        updates.append(gr.update(visible=defaults["visible_resolution"])) # resolution_row
+        updates.append(gr.update(visible=defaults["visible_image_input"]))  # image_accordion
+        updates.append(gr.update(visible=defaults["visible_video_input"]))  # video_accordion
+        updates.append(gr.update(visible=defaults["visible_neg_prompt"]))  # negative_prompt_accordion
+        updates.append(gr.update(value=defaults["default_neg_prompt"]))  # prompt_negative
+
+        negative_nodes = defaults.get("negative_prompt_nodes", [])
+        for i in range(MAX_DYNAMIC_COMPONENTS):
+            if i < len(negative_nodes):
+                node_data = negative_nodes[i]
+                node_id = node_data.get("id")
+                label = node_data.get("title") or node_id or f"Negative Prompt Extra {i+1}"
+                if node_id and label != node_id:
+                    label = f"{label} (ID: {node_id})"
+                elif node_id:
+                    label = f"Negative Prompt Extra {i+1} (ID: {node_id})"
+                updates.append(gr.update(visible=True, label=label, value=node_data.get("value", "")))
+            else:
+                updates.append(gr.update(visible=False, label=f"Negative Prompt Extra {i+1}", value=""))
+
+        updates.append(gr.update(visible=defaults["visible_resolution"]))  # resolution_row
         closest_preset = find_closest_preset(defaults["default_width"], defaults["default_height"], resolution_presets, resolution_prefixes)
         ratio_str = calculate_aspect_ratio(defaults["default_width"], defaults["default_height"])
-        ratio_display_text = f"当前比例: {ratio_str}"
-        updates.append(gr.update(value=closest_preset)) # resolution_dropdown
-        updates.append(gr.update(value=defaults["default_width"])) # hua_width
-        updates.append(gr.update(value=defaults["default_height"])) # hua_height
-        updates.append(gr.update(value=ratio_display_text)) # ratio_display
+        ratio_display_text = f"Current ratio: {ratio_str}"
+        updates.append(gr.update(value=closest_preset))
+        updates.append(gr.update(value=defaults["default_width"]))
+        updates.append(gr.update(value=defaults["default_height"]))
+        updates.append(gr.update(value=ratio_display_text))
 
         updates.append(gr.update(visible=defaults["visible_checkpoint"], value=defaults["default_checkpoint"]))
         updates.append(gr.update(visible=defaults["visible_unet"], value=defaults["default_unet"]))
-        updates.append(gr.update(visible=defaults["visible_seed_indicator"])) # seed_options_col
-        updates.append(gr.update(visible=defaults["visible_image_output"])) # output_gallery
-        updates.append(gr.update(visible=defaults["visible_video_output"])) # output_video
+        updates.append(gr.update(visible=defaults["visible_seed_indicator"]))
+        updates.append(gr.update(visible=defaults["visible_image_output"]))
+        updates.append(gr.update(visible=defaults["visible_video_output"]))
 
-        # 动态组件: GradioTextOk (positive_prompt_texts)
         dynamic_prompts_data = defaults["dynamic_components"]["GradioTextOk"]
         for i in range(MAX_DYNAMIC_COMPONENTS):
             if i < len(dynamic_prompts_data):
                 node_data = dynamic_prompts_data[i]
-                label = node_data.get("title", f"正向提示 {i+1}")
-                if label == node_data.get("id"): # if title was just node id
-                    label = f"正向提示 {i+1} (ID: {node_data.get('id')})"
+                node_id = node_data.get("id")
+                node_title = node_data.get("title") or f"Prompt {i+1}"
+                if node_id and node_title != node_id:
+                    label = f"{node_title} (ID: {node_id})"
+                elif node_id:
+                    label = f"Prompt {i+1} (ID: {node_id})"
+                else:
+                    label = f"Prompt {i+1}"
                 updates.append(gr.update(visible=True, label=label, value=node_data.get("value", "")))
             else:
-                updates.append(gr.update(visible=False, label=f"正向提示 {i+1}", value=""))
-        
-        # 动态组件: Hua_LoraLoaderModelOnly (lora_dropdowns)
-        dynamic_loras_data = defaults["dynamic_components"]["Hua_LoraLoaderModelOnly"]
-        # 获取当前的 Lora 列表用于检查
-        current_lora_list = get_model_list("loras") # <--- 获取最新列表
-        print(f"[UI_UPDATE_DEBUG] Current Lora list for validation: {current_lora_list[:5]}... (Total: {len(current_lora_list)})") # 打印部分列表用于调试
+                updates.append(gr.update(visible=False, label=f"Prompt {i+1}", value=""))
 
+        dynamic_loras_data = defaults["dynamic_components"]["Hua_LoraLoaderModelOnly"]
         for i in range(MAX_DYNAMIC_COMPONENTS):
             if i < len(dynamic_loras_data):
                 node_data = dynamic_loras_data[i]
-                lora_value_from_json = node_data.get("value", "None")
-                label = node_data.get("title", f"Lora {i+1}")
-                if label == node_data.get("id"):
-                    label = f"Lora {i+1} (ID: {node_data.get('id')})"
-
-                # --- 新增检查和日志 ---
-                final_lora_value_to_set = "None" # 默认值
-                if lora_value_from_json != "None":
-                    if lora_value_from_json in current_lora_list:
-                        final_lora_value_to_set = lora_value_from_json
-                        print(f"[UI_UPDATE_DEBUG] Lora {i+1} (ID: {node_data['id']}): Value '{lora_value_from_json}' found in list. Setting dropdown.")
-                    else:
-                        print(f"[UI_UPDATE_DEBUG] Lora {i+1} (ID: {node_data['id']}): Value '{lora_value_from_json}' NOT FOUND in current Lora list. Setting dropdown to 'None'.")
-                else:
-                     print(f"[UI_UPDATE_DEBUG] Lora {i+1} (ID: {node_data['id']}): Value from JSON is 'None'. Setting dropdown to 'None'.")
-                # --- 检查和日志结束 ---
-
-                updates.append(gr.update(visible=True, label=label, value=final_lora_value_to_set)) # <--- 使用检查后的值
-            else:
-                updates.append(gr.update(visible=False, label=f"Lora {i+1}", value="None"))
-
-        # --- 为分辨率添加日志 ---
-        print(f"[UI_UPDATE_DEBUG] Resolution: Setting Width={defaults['default_width']}, Height={defaults['default_height']}")
-        # --- 日志结束 ---
-
-        # 动态组件: HuaIntNode (int_inputs)
-        dynamic_ints_data = defaults["dynamic_components"]["HuaIntNode"]
-        for i in range(MAX_DYNAMIC_COMPONENTS):
-            if i < len(dynamic_ints_data):
-                node_data = dynamic_ints_data[i]
                 node_id = node_data.get("id")
-                node_title = node_data.get("title")
-                # 获取来自 inputs["name"] 的值，假设它被 get_workflow_defaults_and_visibility 传递为 name_from_node
-                input_name_prefix = node_data.get("name_from_node")
+                node_title = node_data.get("title") or f"Lora {i+1}"
+                if node_id and node_title != node_id:
+                    label = f"{node_title} (ID: {node_id})"
+                elif node_id:
+                    label = f"Lora {i+1} (ID: {node_id})"
+                else:
+                    label = f"Lora {i+1}"
+                updates.append(gr.update(visible=True, label=label, value=node_data.get("value", "None"), choices=lora_list))
+            else:
+                updates.append(gr.update(visible=False, label=f"Lora {i+1}", value="None", choices=lora_list))
 
-                label_parts = []
-                if input_name_prefix: # 如果 JSON 中定义了 name
-                    label_parts.append(input_name_prefix)
-
-                # 添加节点本身的标题或通用名称
-                # 如果有 input_name_prefix，node_title 更多是作为补充说明
-                if node_title and node_title != node_id:
-                    label_parts.append(node_title)
-                elif not input_name_prefix: # 只有在没有 name 前缀时，才考虑添加通用描述符 "整数"
-                    label_parts.append(f"整数")
-
-                # 确保标签不为空，并添加 ID
-                if not label_parts: # 极端情况下的回退
-                    label_parts.append(f"整数 {i+1}")
-                
-                label = " - ".join(label_parts) + f" (ID: {node_id})"
-                
+        dynamic_int_nodes = defaults["dynamic_components"]["HuaIntNode"]
+        for i in range(MAX_DYNAMIC_COMPONENTS):
+            if i < len(dynamic_int_nodes):
+                node_data = dynamic_int_nodes[i]
+                node_id = node_data.get("id")
+                node_title = node_data.get("title") or f"Integer {i+1}"
+                if node_id and node_title != node_id:
+                    label = f"{node_title} (ID: {node_id})"
+                elif node_id:
+                    label = f"Integer {i+1} (ID: {node_id})"
+                else:
+                    label = f"Integer {i+1}"
                 updates.append(gr.update(visible=True, label=label, value=node_data.get("value", 0)))
             else:
-                updates.append(gr.update(visible=False, label=f"整数 {i+1}", value=0))
+                updates.append(gr.update(visible=False, label=f"Integer {i+1}", value=0))
 
-        # 动态组件: HuaFloatNode (float_inputs)
-        dynamic_floats_data = defaults["dynamic_components"]["HuaFloatNode"]
+        dynamic_float_nodes = defaults["dynamic_components"]["HuaFloatNode"]
         for i in range(MAX_DYNAMIC_COMPONENTS):
-            if i < len(dynamic_floats_data):
-                node_data = dynamic_floats_data[i]
+            if i < len(dynamic_float_nodes):
+                node_data = dynamic_float_nodes[i]
                 node_id = node_data.get("id")
-                node_title = node_data.get("title")
-                # 获取来自 inputs["name"] 的值，假设它被 get_workflow_defaults_and_visibility 传递为 name_from_node
-                input_name_prefix = node_data.get("name_from_node")
-
-                label_parts = []
-                if input_name_prefix: # 如果 JSON 中定义了 name
-                    label_parts.append(input_name_prefix)
-
-                # 添加节点本身的标题或通用名称
-                # 如果有 input_name_prefix，node_title 更多是作为补充说明
-                if node_title and node_title != node_id:
-                    label_parts.append(node_title)
-                elif not input_name_prefix: # 只有在没有 name 前缀时，才考虑添加通用描述符 "浮点数"
-                    label_parts.append(f"浮点数")
-
-                # 确保标签不为空，并添加 ID
-                if not label_parts: # 极端情况下的回退
-                    label_parts.append(f"浮点数 {i+1}")
-                
-                label = " - ".join(label_parts) + f" (ID: {node_id})"
-                
+                node_title = node_data.get("title") or f"Float {i+1}"
+                if node_id and node_title != node_id:
+                    label = f"{node_title} (ID: {node_id})"
+                elif node_id:
+                    label = f"Float {i+1} (ID: {node_id})"
+                else:
+                    label = f"Float {i+1}"
                 updates.append(gr.update(visible=True, label=label, value=node_data.get("value", 0.0)))
             else:
-                updates.append(gr.update(visible=False, label=f"浮点数 {i+1}", value=0.0))
-        
+                updates.append(gr.update(visible=False, label=f"Float {i+1}", value=0.0))
+
+        image_loader_nodes = defaults["dynamic_components"].get("ImageLoaders", [])
+        image_loader_accordion_updates = []
+        image_loader_value_updates = []
+        for idx in range(MAX_IMAGE_LOADERS):
+            if idx < len(image_loader_nodes):
+                node_info = image_loader_nodes[idx]
+                node_id = node_info.get("id")
+                node_title = node_info.get("title") or f"Image Loader {idx+1}"
+                connected_suffix = " [Connected]" if node_info.get("connected") else ""
+                label = f"{node_title}{connected_suffix}"
+                if node_id:
+                    label = f"{label} (ID: {node_id})"
+                image_loader_accordion_updates.append(gr.update(visible=True, label=label, open=False))
+                image_loader_value_updates.extend([
+                    gr.update(visible=True, value=node_info.get("resize", False)),
+                    gr.update(visible=True, value=node_info.get("width")),
+                    gr.update(visible=True, value=node_info.get("height")),
+                    gr.update(visible=True, value=node_info.get("keep_proportion", False)),
+                    gr.update(visible=True, value=node_info.get("divisible_by")),
+                ])
+            else:
+                image_loader_accordion_updates.append(gr.update(visible=False, open=False))
+                image_loader_value_updates.extend([
+                    gr.update(visible=False, value=False),
+                    gr.update(visible=False, value=None),
+                    gr.update(visible=False, value=None),
+                    gr.update(visible=False, value=False),
+                    gr.update(visible=False, value=None),
+                ])
+        updates.extend(image_loader_accordion_updates)
+        updates.extend(image_loader_value_updates)
+
+        dynamic_ksampler_data = defaults["dynamic_components"].get("KSampler", [])
+        ksampler_accordion_updates = []
+        ksampler_value_updates = []
+        for idx in range(MAX_KSAMPLER_CONTROLS):
+            if idx < len(dynamic_ksampler_data):
+                node_data = dynamic_ksampler_data[idx]
+                node_id = node_data.get("id")
+                label = node_data.get("title") or node_id or f"KSampler {idx+1}"
+                if node_id:
+                    label = f"{label} (ID: {node_id})"
+                ksampler_accordion_updates.append(gr.update(visible=True, label=label, open=False))
+                steps_value = node_data.get("steps", 20)
+                cfg_value = node_data.get("cfg", 7.0)
+                seed_hint = node_data.get("seed_hint", "")
+                seed_display_value = node_data.get("seed", "")
+                seed_update_kwargs = {"visible": True, "value": seed_display_value or "", "placeholder": ""}
+                if seed_hint:
+                    seed_update_kwargs["placeholder"] = f"Saved seed: {seed_hint} (clear for random)"
+                ksampler_value_updates.extend([
+                    gr.update(visible=True, value=steps_value),
+                    gr.update(visible=True, value=cfg_value),
+                    gr.update(visible=True, value=node_data.get("sampler_name", "")),
+                    gr.update(visible=True, value=node_data.get("scheduler", "")),
+                    gr.update(visible=True, value=node_data.get("start_at_step", 0)),
+                    gr.update(visible=True, value=node_data.get("end_at_step", 0)),
+                    gr.update(visible=True, value=node_data.get("add_noise", "enable")),
+                    gr.update(visible=True, value=node_data.get("return_with_leftover_noise", "disable")),
+                    gr.update(**seed_update_kwargs),
+                ])
+            else:
+                ksampler_accordion_updates.append(gr.update(visible=False))
+                ksampler_value_updates.extend([
+                    gr.update(visible=False, value=20),
+                    gr.update(visible=False, value=7.0),
+                    gr.update(visible=False, value=""),
+                    gr.update(visible=False, value=""),
+                    gr.update(visible=False, value=0),
+                    gr.update(visible=False, value=0),
+                    gr.update(visible=False, value="enable"),
+                    gr.update(visible=False, value="disable"),
+                    gr.update(visible=False, value=""),
+                ])
+        updates.extend(ksampler_accordion_updates)
+        updates.extend(ksampler_value_updates)
+
+        dynamic_mask_data = defaults["dynamic_components"].get("APersonMaskGenerator", [])
+        mask_accordion_updates = []
+        mask_value_updates = []
+        for idx in range(MAX_MASK_GENERATORS):
+            if idx < len(dynamic_mask_data):
+                node_data = dynamic_mask_data[idx]
+                node_id = node_data.get("id")
+                label = node_data.get("title") or node_id or f"Mask Generator {idx+1}"
+                if node_id:
+                    label = f"{label} (ID: {node_id})"
+                mask_accordion_updates.append(gr.update(visible=True, label=label, open=False))
+                mask_value_updates.extend([
+                    gr.update(visible=True, value=bool(node_data.get("face_mask", True))),
+                    gr.update(visible=True, value=bool(node_data.get("background_mask", False))),
+                    gr.update(visible=True, value=bool(node_data.get("hair_mask", False))),
+                    gr.update(visible=True, value=bool(node_data.get("body_mask", False))),
+                    gr.update(visible=True, value=bool(node_data.get("clothes_mask", False))),
+                    gr.update(visible=True, value=float(node_data.get("confidence", 0.15))),
+                    gr.update(visible=True, value=bool(node_data.get("refine_mask", False))),
+                ])
+            else:
+                mask_accordion_updates.append(gr.update(visible=False))
+                mask_value_updates.extend([
+                    gr.update(visible=False, value=True),
+                    gr.update(visible=False, value=False),
+                    gr.update(visible=False, value=False),
+                    gr.update(visible=False, value=False),
+                    gr.update(visible=False, value=False),
+                    gr.update(visible=False, value=0.15),
+                    gr.update(visible=False, value=False),
+                ])
+        updates.extend(mask_accordion_updates)
+        updates.extend(mask_value_updates)
+        notice_visible = len(dynamic_mask_data) == 0
+        notice_text = MASK_GENERATOR_NOTICE_TEXT if notice_visible else ""
+        updates.append(gr.update(visible=notice_visible, value=notice_text))
+        updates.append(gr.update(value=""))
+
         return tuple(updates)
+
+
 
     json_dropdown.change(
         fn=update_ui_on_json_change,
         inputs=json_dropdown,
-        outputs=[ 
-            image_accordion, video_accordion, prompt_negative,
-            resolution_row, resolution_dropdown, hua_width, hua_height, ratio_display,
-            hua_checkpoint_dropdown, hua_unet_dropdown, seed_options_col,
-            output_gallery, output_video,
-            # Spread out the dynamic component lists into the outputs
+        outputs=[
+            image_accordion,
+            video_accordion,
+            negative_prompt_accordion,
+            prompt_negative,
+            *negative_prompt_extras,
+            resolution_row,
+            resolution_dropdown,
+            hua_width,
+            hua_height,
+            ratio_display,
+            hua_checkpoint_dropdown,
+            hua_unet_dropdown,
+            seed_options_col,
+            output_gallery,
+            output_video,
             *positive_prompt_texts,
             *lora_dropdowns,
             *int_inputs,
-            *float_inputs
+            *float_inputs,
+            *IMAGE_LOADER_ACCORDION_COMPONENTS,
+            *IMAGE_LOADER_COMPONENTS_FLAT,
+            *KSAMPLER_ACCORDION_COMPONENTS,
+            *KSAMPLER_COMPONENTS_FLAT,
+            *MASK_ACCORDION_COMPONENTS,
+            *MASK_COMPONENTS_FLAT,
+            mask_generator_notice,
+            photopea_data_bus
         ]
     )
 
-    # --- 新增：根据种子模式显示/隐藏固定种子输入框 ---
+    # --- Toggle fixed seed input visibility based on seed mode ---
     def toggle_fixed_seed_input(mode):
-        return gr.update(visible=(mode == "固定"))
+        return gr.update(visible=(mode == "Fixed"))
 
     seed_mode_dropdown.change(
         fn=toggle_fixed_seed_input,
         inputs=seed_mode_dropdown,
         outputs=fixed_seed_input
     )
-    # --- 新增结束 ---
+    # --- End toggle helper ---
 
     refresh_button.click(
         fn=refresh_workflow_and_ui,
-        inputs=[json_dropdown], # Pass the current value of json_dropdown
+        inputs=[json_dropdown],
         outputs=[
-            json_dropdown, # First output is for the dropdown itself
-            # Then all the outputs that update_ui_on_json_change targets
-            image_accordion, video_accordion, prompt_negative,
-            resolution_row, resolution_dropdown, hua_width, hua_height, ratio_display,
-            hua_checkpoint_dropdown, hua_unet_dropdown, seed_options_col,
-            output_gallery, output_video,
+            json_dropdown,
+            image_accordion,
+            video_accordion,
+            negative_prompt_accordion,
+            prompt_negative,
+            *negative_prompt_extras,
+            resolution_row,
+            resolution_dropdown,
+            hua_width,
+            hua_height,
+            ratio_display,
+            hua_checkpoint_dropdown,
+            hua_unet_dropdown,
+            seed_options_col,
+            output_gallery,
+            output_video,
             *positive_prompt_texts,
             *lora_dropdowns,
             *int_inputs,
-            *float_inputs
+            *float_inputs,
+            *IMAGE_LOADER_ACCORDION_COMPONENTS,
+            *IMAGE_LOADER_COMPONENTS_FLAT,
+            *KSAMPLER_ACCORDION_COMPONENTS,
+            *KSAMPLER_COMPONENTS_FLAT,
+            *MASK_ACCORDION_COMPONENTS,
+            *MASK_COMPONENTS_FLAT,
+            mask_generator_notice,
+            photopea_data_bus
         ]
     )
+
+    def handle_gallery_select(evt: gr.SelectData | None = None):
+        if evt is None:
+            return gr.update(), None, None, ""
+
+        selected = getattr(evt, "value", None)
+        candidate_path = None
+
+        if isinstance(selected, (list, tuple)) and selected:
+            candidate_path = selected[0]
+        elif isinstance(selected, dict):
+            candidate_path = selected.get("path") or selected.get("name") or selected.get("value")
+        elif isinstance(selected, str):
+            candidate_path = selected
+
+        if isinstance(candidate_path, str):
+            candidate_path = candidate_path.strip()
+            if candidate_path and not os.path.isabs(candidate_path) and not os.path.exists(candidate_path):
+                potential = os.path.join(OUTPUT_DIR, candidate_path)
+                if os.path.exists(potential):
+                    candidate_path = potential
+
+        if not candidate_path or not os.path.exists(candidate_path):
+            log_message(f"[GALLERY_SELECT] Unable to resolve selected image path from value '{selected}'.")
+            return gr.update(), None, None, ""
+
+        pil_img = _load_image_from_path(candidate_path, "gallery-select")
+        if pil_img is None:
+            log_message(f"[GALLERY_SELECT] Failed to load image at '{candidate_path}'.")
+            return gr.update(), candidate_path, None, ""
+
+        try:
+            pil_for_component = pil_img.convert("RGBA")
+        except Exception:
+            pil_for_component = pil_img
+
+        data_url = _encode_pil_to_data_url(pil_for_component)
+        log_message(f"[GALLERY_SELECT] Forwarded '{candidate_path}' to image input.")
+        return gr.update(value=pil_for_component), candidate_path, data_url, (data_url or "")
+
+    def sync_photopea_state(image_payload):
+        base_img, _ = _coerce_uploaded_image_to_pil(image_payload, "photopea-sync", return_mask=True)
+        if base_img is None:
+            return None, ""
+        try:
+            rgba = base_img.convert("RGBA")
+        except Exception:
+            rgba = base_img
+        data_url = _encode_pil_to_data_url(rgba)
+        return data_url, data_url or ""
+
+    def notify_photopea_load(data_url):
+        if not data_url:
+            return gr.update(value="Please select or edit an image before sending it to Photopea.")
+        return gr.update(value="Image sent to Photopea. Switch to the editor above to start editing.")
+
+    def notify_photopea_request():
+        return gr.update(value="Waiting for Photopea to return the edited image...")
+
+    def ingest_photopea_payload(payload_str):
+        print(f"[PHOTOPEA] Received payload (length: {len(payload_str) if payload_str else 0})")
+        if not payload_str:
+            return gr.update(), None, "", gr.update(value=""), gr.update(value="Photopea did not return any data."), None
+
+        raw_data = payload_str
+        export_name = "photopea.png"
+        try:
+            parsed = json.loads(payload_str)
+            if isinstance(parsed, dict):
+                print(f"[PHOTOPEA] Parsed JSON payload with keys: {parsed.keys()}")
+                raw_data = parsed.get("data") or raw_data
+                export_name = parsed.get("name") or export_name
+                print(f"[PHOTOPEA] Export name: {export_name}, data length: {len(raw_data) if raw_data else 0}")
+        except json.JSONDecodeError as e:
+            print(f"[PHOTOPEA] Failed to parse as JSON, using raw data: {e}")
+            pass
+
+        if not raw_data:
+            print("[PHOTOPEA] Error: Empty data received")
+            return gr.update(), None, "", gr.update(value=""), gr.update(value="Received empty data from Photopea."), None
+
+        try:
+            # Handle data URL format (data:image/png;base64,...)
+            if raw_data.startswith("data:"):
+                print("[PHOTOPEA] Detected data URL format, extracting base64...")
+                raw_data = raw_data.split(",", 1)[1] if "," in raw_data else raw_data
+
+            binary = base64.b64decode(raw_data)
+            print(f"[PHOTOPEA] Decoded {len(binary)} bytes of image data")
+            with Image.open(io.BytesIO(binary)) as pil_img:
+                converted = pil_img.convert("RGBA")
+            print(f"[PHOTOPEA] Successfully loaded image: {converted.width}x{converted.height}")
+            data_url = _encode_pil_to_data_url(converted)
+            status_msg = f"Imported '{export_name}' from Photopea ({converted.width}x{converted.height})."
+            print(f"[PHOTOPEA] {status_msg}")
+            return (
+                gr.update(value=converted),
+                data_url,
+                data_url or "",
+                gr.update(value=""),
+                gr.update(value=status_msg),
+                "photopea_import",
+            )
+        except Exception as exc:
+            print(f"[PHOTOPEA] Error importing from Photopea: {exc}")
+            import traceback
+            traceback.print_exc()
+            return (
+                gr.update(),
+                None,
+                "",
+                gr.update(value=""),
+                gr.update(value=f"Failed to import from Photopea: {exc}"),
+                None,
+            )
+
+    def _format_bytes_from_kb(kilobytes: float | int | None) -> str:
+        try:
+            if kilobytes is None:
+                return "Unknown size"
+            bytes_value = float(kilobytes) * 1024.0
+            for unit in ("B", "KB", "MB", "GB", "TB"):
+                if bytes_value < 1024 or unit == "TB":
+                    return f"{bytes_value:.2f} {unit}"
+                bytes_value /= 1024
+        except (TypeError, ValueError):
+            pass
+        return "Unknown size"
+
+    def _sanitize_filename(name: str) -> str:
+        safe = "".join(ch if ch.isalnum() or ch in (" ", ".", "_", "-", "(", ")") else "_" for ch in (name or ""))
+        return safe.strip() or "download.bin"
+
+    def _suggest_civitai_target_directory(model_type: str | None, file_info: dict | None) -> str:
+        base_dir = os.path.join(OUTPUT_DIR, "civitai_downloads")
+        model_folder = (model_type or "misc").replace(" ", "_").lower()
+        return os.path.join(base_dir, model_folder)
+
+    def _determine_civitai_api_key(override_key: str | None) -> str:
+        candidate = (override_key or "").strip()
+        if candidate:
+            return candidate
+        settings = load_plugin_settings()
+        if isinstance(settings, dict):
+            return (settings.get("civitai_api_key") or "").strip()
+        return ""
+
+    def _save_civitai_api_key(api_key_value: str) -> str:
+        settings = load_plugin_settings()
+        if not isinstance(settings, dict):
+            settings = {}
+        settings["civitai_api_key"] = (api_key_value or "").strip()
+        return save_plugin_settings(settings)
+
+    def _civitai_api_get(endpoint: str, params: dict, api_key: str | None, timeout: float = 30.0) -> dict:
+        url = f"{CIVITAI_BASE_URL.rstrip('/')}/{endpoint.lstrip('/')}"
+        headers = {"User-Agent": "ComfyUI-to-WebUI Civitai Client"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        response = requests.get(url, params=params, headers=headers, timeout=timeout)
+        response.raise_for_status()
+        return response.json()
+
+    def _summarize_civitai_model(model: dict) -> str:
+        if not isinstance(model, dict):
+            return ""
+        stats = model.get("stats") or {}
+        downloads = stats.get("downloadCount")
+        rating = stats.get("rating")
+        tags = model.get("tags") or []
+        lines = [f"**{model.get('name', 'Unnamed model')}**"]
+        if model.get("type"):
+            lines.append(f"Type: {model['type']}")
+        if downloads is not None:
+            lines.append(f"Downloads: {downloads}")
+        if rating is not None:
+            try:
+                lines.append(f"Rating: {float(rating):.2f}")
+            except (TypeError, ValueError):
+                lines.append(f"Rating: {rating}")
+        if tags:
+            lines.append("Tags: " + ", ".join(tags[:10]))
+        description = model.get("description") or ""
+        if description:
+            snippet = description[:600]
+            if len(description) > 600:
+                snippet += "…"
+            lines.append("")
+            lines.append(snippet)
+        return "\n".join(lines)
+
+    def _civitai_parse_image_gallery(images: list | None) -> list:
+        gallery = []
+        if not isinstance(images, list):
+            return gallery
+        for image in images[:10]:
+            if not isinstance(image, dict):
+                continue
+            url = image.get("url") or image.get("originalUrl")
+            if not url:
+                continue
+            caption = image.get("meta", {}).get("prompt") or image.get("alt") or ""
+            gallery.append((url, caption))
+        return gallery
+
+    def civitai_save_api_key(api_key_value: str):
+        status = _save_civitai_api_key(api_key_value or "")
+        message = "🔐 Civitai API key saved." if (api_key_value or "").strip() else "🔓 Cleared stored Civitai API key."
+        return gr.update(value=f"{message} ({status})", visible=True)
+
+    def civitai_perform_search(query, model_type, sort_label, page_value, per_page_value, nsfw_setting, api_key_override):
+        api_key = _determine_civitai_api_key(api_key_override)
+        try:
+            page = max(1, int(page_value or 1))
+        except (TypeError, ValueError):
+            page = 1
+        try:
+            per_page = int(per_page_value or 20)
+            per_page = max(1, min(per_page, 50))
+        except (TypeError, ValueError):
+            per_page = 20
+
+        params = {"page": page, "perPage": per_page}
+        if query:
+            params["query"] = query.strip()
+        if model_type:
+            params["types"] = model_type.strip()
+        sort_value = CIVITAI_SORT_MAP.get(sort_label or "")
+        if sort_value:
+            params["sort"] = sort_value
+        nsfw_value = CIVITAI_NSFW_MAP.get(nsfw_setting or "Hide")
+        if nsfw_value:
+            params["nsfw"] = nsfw_value
+
+        try:
+            response = _civitai_api_get("models", params, api_key, timeout=45)
+            items = response.get("items") or []
+        except requests.RequestException as exc:
+            message = f"Search failed: {exc}"
+            return (
+                gr.update(choices=[], value=None, visible=True),
+                [],
+                gr.update(value=message, visible=True),
+                gr.update(value="", visible=False),
+                gr.update(value=[], visible=False),
+                gr.update(choices=[], value=None, visible=False),
+                gr.update(choices=[], value=None, visible=False),
+                None,
+                None,
+                gr.update(value="", visible=False),
+                gr.update(value=_suggest_civitai_target_directory(model_type, None), visible=True),
+            )
+
+        choices = []
+        state_payload = []
+        for idx, model in enumerate(items):
+            if not isinstance(model, dict):
+                continue
+            label_parts = [model.get("name") or f"Model {idx+1}"]
+            model_type_label = model.get("type")
+            if model_type_label:
+                label_parts.append(f"[{model_type_label}]")
+            rating = model.get("stats", {}).get("rating")
+            if rating:
+                try:
+                    label_parts.append(f"⭐ {float(rating):.2f}")
+                except (TypeError, ValueError):
+                    label_parts.append(f"⭐ {rating}")
+            label = " ".join(label_parts)
+            choices.append(label)
+            state_payload.append({"index": idx, "label": label, "model": model})
+
+        message = f"Found {len(state_payload)} model(s)." if state_payload else "No models found."
+        return (
+            gr.update(choices=choices, value=choices[0] if choices else None, visible=bool(choices)),
+            state_payload,
+            gr.update(value=message, visible=True),
+            gr.update(value="", visible=False),
+            gr.update(value=[], visible=False),
+            gr.update(choices=[], value=None, visible=False),
+            gr.update(choices=[], value=None, visible=False),
+            None,
+            None,
+            gr.update(value="", visible=False),
+            gr.update(value=_suggest_civitai_target_directory(model_type, None), visible=True),
+        )
+
+    def civitai_select_model(selected_label, results_state):
+        if not results_state:
+            return (
+                gr.update(value="", visible=False),
+                gr.update(value=[], visible=False),
+                gr.update(choices=[], value=None, visible=False),
+                gr.update(choices=[], value=None, visible=False),
+                None,
+                None,
+                gr.update(value="", visible=False),
+                gr.update(value=_suggest_civitai_target_directory(None, None), visible=True),
+            )
+
+        entry = None
+        for candidate in results_state:
+            if candidate.get("label") == selected_label:
+                entry = candidate
+                break
+        if entry is None:
+            entry = results_state[0]
+
+        model = entry.get("model") or {}
+        versions = model.get("modelVersions") or []
+        version_choices = []
+        selected_version_index = 0 if versions else None
+        for idx, version in enumerate(versions):
+            version_choices.append(version.get("name") or f"Version {idx+1}")
+        preview_items = _civitai_parse_image_gallery(versions[selected_version_index].get("images")) if versions else []
+
+        files = versions[selected_version_index].get("files") if versions else []
+        files = files or []
+        file_choices = []
+        for idx, file_info in enumerate(files):
+            name = file_info.get("name") or f"File {idx+1}"
+            size_kb = file_info.get("sizeKB")
+            if size_kb:
+                name = f"{name} ({_format_bytes_from_kb(size_kb)})"
+            file_choices.append(name)
+
+        model_state = {
+            "model": model,
+            "version_index": selected_version_index,
+            "label": entry.get("label"),
+        }
+        file_state = {"file": files[0], "file_index": 0} if files else None
+
+        details = _summarize_civitai_model(model)
+        target_dir = _suggest_civitai_target_directory(model.get("type"), files[0] if files else None)
+
+        return (
+            gr.update(value=details, visible=True),
+            gr.update(value=preview_items, visible=bool(preview_items)),
+            gr.update(choices=version_choices, value=version_choices[0] if version_choices else None, visible=bool(version_choices)),
+            gr.update(choices=file_choices, value=file_choices[0] if file_choices else None, visible=bool(file_choices)),
+            model_state,
+            file_state,
+            gr.update(value="", visible=False),
+            gr.update(value=target_dir, visible=True),
+        )
+
+    def civitai_select_version(version_label, selected_model_state):
+        if not isinstance(selected_model_state, dict):
+            return (
+                gr.update(choices=[], value=None, visible=False),
+                None,
+                None,
+                gr.update(value=_suggest_civitai_target_directory(None, None), visible=True),
+                gr.update(value="", visible=False),
+            )
+
+        model = selected_model_state.get("model") or {}
+        versions = model.get("modelVersions") or []
+        version_index = 0
+        version_choices = []
+        for idx, version in enumerate(versions):
+            name = version.get("name") or f"Version {idx+1}"
+            version_choices.append(name)
+            if name == version_label:
+                version_index = idx
+
+        files = versions[version_index].get("files") if versions else []
+        files = files or []
+        file_choices = []
+        for idx, file_info in enumerate(files):
+            name = file_info.get("name") or f"File {idx+1}"
+            size_kb = file_info.get("sizeKB")
+            if size_kb:
+                name = f"{name} ({_format_bytes_from_kb(size_kb)})"
+            file_choices.append(name)
+
+        file_state = {"file": files[0], "file_index": 0} if files else None
+
+        selected_model_state = dict(selected_model_state)
+        selected_model_state["version_index"] = version_index
+        target_dir = _suggest_civitai_target_directory(model.get("type"), files[0] if files else None)
+
+        return (
+            gr.update(choices=file_choices, value=file_choices[0] if file_choices else None, visible=bool(file_choices)),
+            selected_model_state,
+            file_state,
+            gr.update(value=target_dir, visible=True),
+            gr.update(value="", visible=False),
+        )
+
+    def civitai_select_file(file_label, selected_model_state):
+        if not isinstance(selected_model_state, dict):
+            return None, None, gr.update(value=_suggest_civitai_target_directory(None, None), visible=True), gr.update(value="", visible=False)
+
+        model = selected_model_state.get("model") or {}
+        version_index = selected_model_state.get("version_index", 0)
+        versions = model.get("modelVersions") or []
+        files = versions[version_index].get("files") if versions else []
+        files = files or []
+
+        file_state = None
+        for idx, file_info in enumerate(files):
+            name = file_info.get("name") or f"File {idx+1}"
+            size_kb = file_info.get("sizeKB")
+            if size_kb:
+                name = f"{name} ({_format_bytes_from_kb(size_kb)})"
+            if name == file_label:
+                file_state = {"file": file_info, "file_index": idx}
+                break
+        if file_state is None and files:
+            file_state = {"file": files[0], "file_index": 0}
+
+        target_dir = _suggest_civitai_target_directory(model.get("type"), file_state["file"] if file_state else None)
+        return selected_model_state, file_state, gr.update(value=target_dir, visible=True), gr.update(value="", visible=False)
+
+    def civitai_download_file_action(selected_model_state, selected_file_state, target_dir_value, api_key_override):
+        state = selected_model_state or {}
+        model = state.get("model")
+        version_index = state.get("version_index", 0)
+        if not model:
+            return gr.update(value="⚠️ Select a model before downloading.", visible=True)
+
+        versions = model.get("modelVersions") or []
+        if not versions or version_index >= len(versions):
+            return gr.update(value="⚠️ Selected model has no versions.", visible=True)
+
+        files = versions[version_index].get("files") or []
+        if not files:
+            return gr.update(value="⚠️ Selected version has no downloadable files.", visible=True)
+
+        if not selected_file_state or "file" not in selected_file_state:
+            file_info = files[0]
+        else:
+            file_info = selected_file_state["file"]
+
+        download_url = file_info.get("downloadUrl")
+        if not download_url:
+            return gr.update(value="⚠️ Selected file does not provide a download URL.", visible=True)
+
+        api_key = _determine_civitai_api_key(api_key_override)
+        target_dir = (target_dir_value or "").strip() or _suggest_civitai_target_directory(model.get("type"), file_info)
+        target_dir = os.path.abspath(target_dir)
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except OSError as exc:
+            return gr.update(value=f"❌ Unable to create directory '{target_dir}': {exc}", visible=True)
+
+        filename = file_info.get("name") or os.path.basename(download_url.split("?", 1)[0])
+        filename = _sanitize_filename(filename)
+        file_path = os.path.join(target_dir, filename)
+        if os.path.exists(file_path):
+            base, ext = os.path.splitext(filename)
+            counter = 1
+            while os.path.exists(os.path.join(target_dir, f"{base}_{counter}{ext}")):
+                counter += 1
+            file_path = os.path.join(target_dir, f"{base}_{counter}{ext}")
+
+        headers = {"User-Agent": "ComfyUI-to-WebUI Civitai Client"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        try:
+            with requests.get(download_url, headers=headers, stream=True, timeout=120) as response:
+                response.raise_for_status()
+                with open(file_path, "wb") as outfile:
+                    for chunk in response.itercontent(chunk_size=8192):
+                        if chunk:
+                            outfile.write(chunk)
+        except requests.RequestException as exc:
+            return gr.update(value=f"❌ Download failed: {exc}", visible=True)
+        except OSError as exc:
+            return gr.update(value=f"❌ Failed to save file: {exc}", visible=True)
+
+        size_bytes = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+        size_label = _format_bytes_from_kb(size_bytes / 1024 if size_bytes else None)
+        return gr.update(value=f"✅ Downloaded to `{file_path}` ({size_label}).", visible=True)
+
+    # get_output_images is imported, needs OUTPUT_DIR
 
     # get_output_images is imported, needs OUTPUT_DIR
     load_output_button.click(fn=lambda: get_output_images(OUTPUT_DIR), inputs=[], outputs=output_preview_gallery)
 
-    # --- 修改运行按钮的点击事件 ---
+    output_gallery.select(
+        fn=handle_gallery_select,
+        inputs=[],
+        outputs=[input_image, selected_gallery_image_state, photopea_image_data_state, photopea_data_bus]
+    )
+
+    output_preview_gallery.select(
+        fn=handle_gallery_select,
+        inputs=[],
+        outputs=[input_image, selected_gallery_image_state, photopea_image_data_state, photopea_data_bus]
+    )
+
+    photopea_sync_events = [getattr(input_image, "change", None), getattr(input_image, "upload", None)]
+    if hasattr(input_image, "edit"):
+        photopea_sync_events.append(getattr(input_image, "edit"))
+    for event_binding in photopea_sync_events:
+        if callable(event_binding):
+            event_binding(
+                fn=sync_photopea_state,
+                inputs=input_image,
+                outputs=[photopea_image_data_state, photopea_data_bus]
+            )
+
+    load_photopea_button.click(
+        fn=notify_photopea_load,
+        inputs=[photopea_data_bus],
+        outputs=[photopea_status]
+    )
+
+    photopea_fetch_button.click(
+        fn=notify_photopea_request,
+        inputs=[],
+        outputs=[photopea_status]
+    )
+
+    photopea_import_box.change(
+        fn=ingest_photopea_payload,
+        inputs=photopea_import_box,
+        outputs=[input_image, photopea_image_data_state, photopea_data_bus, photopea_import_box, photopea_status, selected_gallery_image_state]
+    )
+
+    civitai_save_key_button.click(
+        fn=civitai_save_api_key,
+        inputs=[civitai_api_key_input],
+        outputs=[civitai_key_status]
+    )
+
+    civitai_search_button.click(
+        fn=civitai_perform_search,
+        inputs=[civitai_query, civitai_type, civitai_sort, civitai_page, civitai_per_page, civitai_nsfw, civitai_api_key_input],
+        outputs=[
+            civitai_results_dropdown,
+            civitai_results_state,
+            civitai_search_status,
+            civitai_model_details,
+            civitai_preview_gallery,
+            civitai_version_dropdown,
+            civitai_file_dropdown,
+            civitai_selected_model_state,
+            civitai_selected_file_state,
+            civitai_download_status,
+            civitai_target_dir,
+        ]
+    )
+
+    civitai_results_dropdown.change(
+        fn=civitai_select_model,
+        inputs=[civitai_results_dropdown, civitai_results_state],
+        outputs=[
+            civitai_model_details,
+            civitai_preview_gallery,
+            civitai_version_dropdown,
+            civitai_file_dropdown,
+            civitai_selected_model_state,
+            civitai_selected_file_state,
+            civitai_download_status,
+            civitai_target_dir,
+        ]
+    )
+
+    civitai_version_dropdown.change(
+        fn=civitai_select_version,
+        inputs=[civitai_version_dropdown, civitai_selected_model_state],
+        outputs=[
+            civitai_file_dropdown,
+            civitai_selected_model_state,
+            civitai_selected_file_state,
+            civitai_target_dir,
+            civitai_download_status,
+        ]
+    )
+
+    civitai_file_dropdown.change(
+        fn=civitai_select_file,
+        inputs=[civitai_file_dropdown, civitai_selected_model_state],
+        outputs=[
+            civitai_selected_model_state,
+            civitai_selected_file_state,
+            civitai_target_dir,
+            civitai_download_status,
+        ]
+    )
+
+    civitai_download_button.click(
+        fn=civitai_download_file_action,
+        inputs=[civitai_selected_model_state, civitai_selected_file_state, civitai_target_dir, civitai_api_key_input],
+        outputs=[civitai_download_status]
+    )
+
+    # --- Run button wiring ---
     run_button.click(
         fn=run_queued_tasks,
         inputs=[
-            input_image, input_video, 
-            # Pass the lists of dynamic components directly
-            *positive_prompt_texts, 
-            prompt_negative, # Single negative prompt
-            json_dropdown, hua_width, hua_height, 
+            input_image,
+            input_video,
+            *positive_prompt_texts,
+            prompt_negative,
+            *negative_prompt_extras,
+            json_dropdown,
+            hua_width,
+            hua_height,
             *lora_dropdowns,
-            hua_checkpoint_dropdown, hua_unet_dropdown, 
-            *float_inputs, 
+            hua_checkpoint_dropdown,
+            hua_unet_dropdown,
+            *float_inputs,
             *int_inputs,
-            seed_mode_dropdown, fixed_seed_input,
-            queue_count
+            *IMAGE_LOADER_COMPONENTS_FLAT,
+            seed_mode_dropdown,
+            fixed_seed_input,
+            queue_count,
+            *KSAMPLER_COMPONENTS_FLAT,
+            *MASK_COMPONENTS_FLAT
         ],
-        outputs=[queue_status_display, output_gallery, output_video, main_output_tabs_component]
+        outputs=[
+            queue_status_display,
+            output_gallery,
+            output_video,
+            main_output_tabs_component,
+            live_preview_image,
+            live_preview_status,
+            selected_gallery_image_state,
+            photopea_image_data_state,
+            photopea_data_bus,
+            photopea_status
+        ]
     )
     
-    # interrupt_button_main_tab.click 事件处理器已被移除
+    # interrupt button removed in favour of queue controls
 
-    # --- 添加新按钮的点击事件 ---
+    # --- Additional button events ---
     clear_queue_button.click(fn=clear_queue, inputs=[], outputs=[queue_status_display])
     clear_history_button.click(fn=clear_history, inputs=[], outputs=[output_gallery, output_video, queue_status_display])
-    sponsor_button.click(fn=show_sponsor_code, inputs=[], outputs=[sponsor_display])
 
     refresh_model_button.click(
         lambda: tuple(
@@ -1721,7 +3831,7 @@ with gr.Blocks(css=combined_css) as demo:
         outputs=[*lora_dropdowns, hua_checkpoint_dropdown, hua_unet_dropdown]
     )
 
-    # --- 初始加载 ---
+    # --- Initial load ---
     def on_load_setup():
         json_files = get_json_files()
         # The number of outputs from update_ui_on_json_change is now:
@@ -1729,134 +3839,174 @@ with gr.Blocks(css=combined_css) as demo:
         # = 13 + 4 * 5 = 13 + 20 = 33
         
         if not json_files:
-            print("未找到 JSON 文件，隐藏所有动态组件并设置默认值")
-            
+            print("No workflow JSON files found; hiding dynamic components and using defaults.")
+
             initial_updates = [
-                gr.update(visible=False), # image_accordion
-                gr.update(visible=False), # video_accordion
-                gr.update(visible=False, value=""), # prompt_negative
-                gr.update(visible=False), # resolution_row
-                gr.update(value="custom"), # resolution_dropdown
-                gr.update(value=512),      # hua_width
-                gr.update(value=512),      # hua_height
-                gr.update(value="当前比例: 1:1"), # ratio_display
-                gr.update(visible=False, value="None"), # hua_checkpoint_dropdown
-                gr.update(visible=False, value="None"), # hua_unet_dropdown
-                gr.update(visible=False), # seed_options_col
-                gr.update(visible=False), # output_gallery
-                gr.update(visible=False)  # output_video
+                gr.update(visible=False),  # image_accordion
+                gr.update(visible=False),  # video_accordion
+                gr.update(visible=False),  # negative_prompt_accordion
+                gr.update(visible=False, value=""),  # prompt_negative
             ]
-            # Add updates for dynamic components (all hidden)
-            for _ in range(MAX_DYNAMIC_COMPONENTS): # positive_prompt_texts
-                initial_updates.append(gr.update(visible=False, label="正向提示", value=""))
-            for _ in range(MAX_DYNAMIC_COMPONENTS): # lora_dropdowns
+            for _ in range(MAX_DYNAMIC_COMPONENTS):
+                initial_updates.append(gr.update(visible=False, label="Negative Prompt Extra", value=""))
+            initial_updates.extend([
+                gr.update(visible=False),  # resolution_row
+                gr.update(value="custom"),
+                gr.update(value=512),
+                gr.update(value=512),
+                gr.update(value="Current ratio: 1:1"),
+                gr.update(visible=False, value="None"),
+                gr.update(visible=False, value="None"),
+                gr.update(visible=False),
+                gr.update(visible=False),
+                gr.update(visible=False),
+            ])
+            for _ in range(MAX_DYNAMIC_COMPONENTS):
+                initial_updates.append(gr.update(visible=False, label="Prompt", value=""))
+            for _ in range(MAX_DYNAMIC_COMPONENTS):
                 initial_updates.append(gr.update(visible=False, label="Lora", value="None"))
-            for _ in range(MAX_DYNAMIC_COMPONENTS): # int_inputs
-                initial_updates.append(gr.update(visible=False, label="整数", value=0))
-            for _ in range(MAX_DYNAMIC_COMPONENTS): # float_inputs
-                initial_updates.append(gr.update(visible=False, label="浮点数", value=0.0))
+            for _ in range(MAX_DYNAMIC_COMPONENTS):
+                initial_updates.append(gr.update(visible=False, label="Integer", value=0))
+            for _ in range(MAX_DYNAMIC_COMPONENTS):
+                initial_updates.append(gr.update(visible=False, label="Float", value=0.0))
+            for _ in range(MAX_IMAGE_LOADERS):
+                initial_updates.append(gr.update(visible=False, open=False))
+                initial_updates.extend([
+                    gr.update(visible=False, value=False),
+                    gr.update(visible=False, value=None),
+                    gr.update(visible=False, value=None),
+                    gr.update(visible=False, value=False),
+                    gr.update(visible=False, value=None),
+                ])
+            for _ in range(MAX_KSAMPLER_CONTROLS):
+                initial_updates.append(gr.update(visible=False, open=False))
+            for _ in range(MAX_KSAMPLER_CONTROLS * 9):
+                initial_updates.append(gr.update(visible=False))
+            for _ in range(MAX_MASK_GENERATORS):
+                initial_updates.append(gr.update(visible=False))
+            for _ in range(MAX_MASK_GENERATORS * MASK_FIELD_COUNT):
+                initial_updates.append(gr.update(visible=False))
+            initial_updates.append(gr.update(visible=False, value=""))
             return tuple(initial_updates)
         else:
             default_json = json_files[0]
-            print(f"初始加载，检查默认 JSON: {default_json}")
+            print(f"Initial load check for default JSON: {default_json}")
             return update_ui_on_json_change(default_json) # This now returns a tuple of gr.update calls
 
     demo.load(
         fn=on_load_setup,
         inputs=[],
         outputs=[ # This list must exactly match the components updated by on_load_setup / update_ui_on_json_change
-            image_accordion, video_accordion, prompt_negative,
-            resolution_row, resolution_dropdown, hua_width, hua_height, ratio_display,
-            hua_checkpoint_dropdown, hua_unet_dropdown, seed_options_col,
-            output_gallery, output_video,
+            image_accordion,
+            video_accordion,
+            negative_prompt_accordion,
+            prompt_negative,
+            *negative_prompt_extras,
+            resolution_row,
+            resolution_dropdown,
+            hua_width,
+            hua_height,
+            ratio_display,
+            hua_checkpoint_dropdown,
+            hua_unet_dropdown,
+            seed_options_col,
+            output_gallery,
+            output_video,
             *positive_prompt_texts,
             *lora_dropdowns,
             *int_inputs,
-            *float_inputs
+            *float_inputs,
+            *IMAGE_LOADER_ACCORDION_COMPONENTS,
+            *IMAGE_LOADER_COMPONENTS_FLAT,
+            *KSAMPLER_ACCORDION_COMPONENTS,
+            *KSAMPLER_COMPONENTS_FLAT,
+            *MASK_ACCORDION_COMPONENTS,
+            *MASK_COMPONENTS_FLAT,
+            mask_generator_notice
         ]
     )
 
-    # --- 添加日志轮询 Timer ---
-    # 每 0.1 秒调用 fetch_and_format_logs，并将结果输出到 log_display (加快刷新以改善滚动)
-    log_timer = gr.Timer(0.1, active=True)  # 每 0.1 秒触发一次
+    # --- Log polling timer ---
+    # Poll fetch_and_format_logs every 0.1s for smoother updates
+    log_timer = gr.Timer(0.1, active=True)  # tick every 0.1 seconds
     log_timer.tick(fetch_and_format_logs, inputs=None, outputs=log_display)
 
-    # --- 系统监控流加载 ---
-    # outputs 需要指向在 gr.Blocks 内定义的 floating_monitor_html_output 实例
-    # 确保 floating_monitor_html_output 变量在 demo.load 调用时是可访问的
-    # (它是在 with gr.Blocks(...) 上下文中定义的，所以 demo 对象知道它)
+    # --- System monitor stream ---
+    # outputs should reference floating_monitor_html_output defined above
+    # ensure floating_monitor_html_output is accessible at load time
+    # (defined within the Blocks context so demo knows about it)
     demo.load(fn=update_floating_monitors_stream, inputs=None, outputs=[floating_monitor_html_output], show_progress="hidden")
 
-    # --- ComfyUI 实时预览加载 ---
+    # --- ComfyUI live preview stream ---
     demo.load(
         fn=comfyui_previewer.get_update_generator(),
         inputs=[],
         outputs=[live_preview_image, live_preview_status],
-        show_progress="hidden" # 通常预览不需要进度条
+        show_progress="hidden"  # preview stream does not need progress bar
     )
-    # 启动预览器的工作线程
+    # Start preview worker thread
     # demo.load(fn=comfyui_previewer.start_worker, inputs=[], outputs=[], show_progress="hidden")
-    # 直接在 Gradio 线程启动后调用 start_worker 更可靠
-    # 或者在 on_load_setup 中调用
+    # Starting after Gradio launch is more reliable
+    # Alternatively call from on_load_setup
 
 
-    # --- Gradio 启动代码 ---
-def luanch_gradio(demo_instance): # 接收 demo 实例
-    # 在 Gradio 启动前启动预览器工作线程
-    print("准备启动 ComfyUIPreviewer 工作线程...")
+    # --- Gradio launch helper ---
+def luanch_gradio(demo_instance):  # receive demo instance
+    # Start worker before launching Gradio
+    print("Starting ComfyUIPreviewer worker thread...")
     comfyui_previewer.start_worker()
-    print("ComfyUIPreviewer 工作线程已请求启动。")
+    print("ComfyUIPreviewer worker start requested.")
 
     try:
-        # 尝试查找可用端口，从 7861 开始
+        # try ports 7861-7870 until one is free
         port = 7861
         while True:
             try:
-                # share=True 会尝试创建公网链接，可能需要登录 huggingface
-                # server_name="0.0.0.0" 允许局域网访问
+                # share=True would attempt to create a public link (not needed here)
+                # server_name="0.0.0.0" enables LAN access
                 demo_instance.launch(server_name="0.0.0.0", server_port=port, share=False, prevent_thread_lock=True)
-                print(f"Gradio 界面已在 http://127.0.0.1:{port} (或局域网 IP) 启动")
-                # 启动成功后打开本地链接
+                print(f"Gradio UI started at http://127.0.0.1:{port} (or LAN IP)")
+                # open local link on success
                 webbrowser.open(f"http://127.0.0.1:{port}/")
-                break # 成功启动，退出循环
+                break  # success
             except OSError as e:
                 if "address already in use" in str(e).lower():
-                    print(f"端口 {port} 已被占用，尝试下一个端口...")
+                    print(f"Port {port} already in use, trying next...")
                     port += 1
-                    if port > 7870: # 限制尝试范围
-                        print("无法找到可用端口 (7861-7870)。")
+                    if port > 7870:  # limit retries
+                        print("Unable to find a free port in range 7861-7870.")
                         break
                 else:
-                    print(f"启动 Gradio 时发生未知 OS 错误: {e}")
-                    break # 其他 OS 错误，退出
+                    print(f"Unexpected OS error while starting Gradio: {e}")
+                    break
             except Exception as e:
-                 print(f"启动 Gradio 时发生未知错误: {e}")
-                 break # 其他错误，退出
+                print(f"Unexpected error starting Gradio: {e}")
+                break
     except Exception as e:
-        print(f"执行 luanch_gradio 时出错: {e}")
+        print(f"Error in luanch_gradio: {e}")
 
 
-# 使用守护线程，这样主程序退出时 Gradio 线程也会退出
+# Use a daemon thread so the worker exits with the main program
 gradio_thread = threading.Thread(target=luanch_gradio, args=(demo,), daemon=True)
 gradio_thread.start()
 
-# 注册 atexit 清理函数，以在程序退出时停止 previewer worker
+# Ensure preview worker stops when the process exits
 def cleanup_previewer_on_exit():
-    print("Gradio 应用正在关闭，尝试停止 ComfyUIPreviewer 工作线程...")
+    print("Gradio shutting down; stopping ComfyUIPreviewer worker...")
     if comfyui_previewer:
         comfyui_previewer.stop_worker()
-    print("ComfyUIPreviewer 工作线程已请求停止。")
+    print("ComfyUIPreviewer worker stop requested.")
 
 atexit.register(cleanup_previewer_on_exit)
 
 
-# 主线程可以继续执行其他任务或等待，这里简单地保持运行
-# 注意：如果这是插件的一部分，主线程可能是 ComfyUI 本身，不需要无限循环
-# print("主线程继续运行... 按 Ctrl+C 退出。")
+# Main thread can continue doing other work or just idle
+# In plugin context the main thread is ComfyUI itself, so no loop here
+# print("Main thread running... press Ctrl+C to exit.")
 # try:
 #     while True:
 #         time.sleep(1)
 # except KeyboardInterrupt:
-#     print("收到退出信号，正在关闭...")
-#     # demo.close() # 关闭 Gradio 服务 (如果需要手动关闭)
-#     # cleanup_previewer_on_exit() # 手动调用清理 (atexit 应该会处理)
+#     print("Received exit signal, shutting down...")
+#     # demo.close()  # close Gradio service if needed
+#     # cleanup_previewer_on_exit()  # manual cleanup (atexit handles it)
