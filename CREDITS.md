@@ -8,8 +8,8 @@
 - Original work released under MIT License (2024)
 
 ## This Fork
-**Jessie O'Connor** - [@oconnorja](https://github.com/oconnorja) (if that's your username!)
-- Repository: [Your fork URL will go here]
+**Gingertrout** - [@Gingertrout](https://github.com/Gingertrout)
+- Repository: https://github.com/Gingertrout/ComfyUI_to_webui
 - Major contributions:
   - Fixed critical Gradio 4.44.0 deadlock and hanging issues
   - Implemented intelligent queue polling system
@@ -31,7 +31,7 @@ This project is a fork of ComfyUI_to_webui and maintains the original MIT Licens
 MIT License
 
 Copyright (c) 2024 hua(Kungfu)
-Copyright (c) 2025 Jessie O'Connor (modifications and enhancements)
+Copyright (c) 2025 Gingertrout (modifications and enhancements)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
