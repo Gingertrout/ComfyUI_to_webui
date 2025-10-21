@@ -1587,6 +1587,8 @@ def generate_image(
         print(f"[{execution_id}] Warning: unable to snapshot output directory before run: {exc}")
 
     image_input_key = find_key_by_class_type(prompt, 'GradioInputImage')
+    load_and_resize_key = find_key_by_class_type(prompt, 'LoadAndResizeImage')
+    load_image_key = find_key_by_class_type(prompt, 'LoadImage')  # Also support standard LoadImage
     video_input_key = find_key_by_class_type(prompt, 'VHS_LoadVideo')
     seed_key = find_key_by_class_type(prompt, 'Hua_gradio_Seed')
     text_bad_key = find_key_by_class_type(prompt, 'GradioTextBad')
@@ -1599,7 +1601,10 @@ def generate_image(
     saved_mask_filename = None
     saved_mask_path = None
 
-    if image_input_key:
+    # Determine which image input node type is present
+    effective_image_key = image_input_key or load_and_resize_key or load_image_key
+
+    if effective_image_key:
         base_img, mask_img = _coerce_uploaded_image_to_pil(inputimage1, execution_id, return_mask=True)
         if base_img is not None:
             try:
@@ -1607,8 +1612,12 @@ def generate_image(
                 inputfilename = f"gradio_input_{timestamp}_{random.randint(100, 999)}.png"
                 save_path = os.path.join(INPUT_DIR, inputfilename)
                 base_img.convert('RGBA').save(save_path)
-                prompt[image_input_key].setdefault('inputs', {})['image'] = inputfilename
-                print(f"[{execution_id}] Saved input image to {save_path}")
+
+                # Set the image parameter on whatever node type we found
+                prompt[effective_image_key].setdefault('inputs', {})['image'] = inputfilename
+
+                node_type = prompt[effective_image_key].get('class_type', 'unknown')
+                print(f"[{execution_id}] Saved input image to {save_path} (node type: {node_type})")
             except Exception as exc:
                 print(f"[{execution_id}] Failed to save input image: {exc}")
         if mask_img is not None:
@@ -1631,7 +1640,8 @@ def generate_image(
                 saved_mask_filename = None
                 saved_mask_path = None
     elif inputimage1 is not None:
-        print(f"[{execution_id}] Warning: input payload provided but no image node found in workflow.")
+        print(f"[{execution_id}] Warning: input payload provided but no image input node found in workflow.")
+        print(f"[{execution_id}] Supported node types: GradioInputImage, LoadAndResizeImage, LoadImage")
 
     if saved_mask_filename:
         _inject_mask_into_prompt(prompt, saved_mask_filename, execution_id)
