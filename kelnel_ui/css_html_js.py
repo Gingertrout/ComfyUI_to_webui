@@ -32,6 +32,144 @@ button[title*="badge" i],
 button[data-tooltip*="badge" i] {
     display: none !important;
 }
+
+/* Constrain uploaded images - FORGE APPROACH (Maximum clearance) */
+
+/* Upload Image accordion must contain everything with MAXIMUM space */
+.accordion:has(#hua-image-input) {
+    overflow: visible !important;
+    margin-bottom: 3em !important;
+    padding-bottom: 250px !important; /* MAXIMUM space for tools INSIDE accordion */
+}
+
+/* Upload container - constrain size, contain tools */
+#hua-image-input {
+    width: 100% !important;
+    max-width: 100% !important;
+    position: relative !important; /* Keep tools inside */
+    display: block !important;
+    min-height: 680px !important; /* Maximum room for image + tools */
+}
+
+/* Image and canvas elements - Forge's object-fit approach */
+#hua-image-input img {
+    max-height: 500px !important;
+    max-width: 100% !important;
+    width: auto !important;
+    height: auto !important;
+    object-fit: scale-down !important;
+    display: block !important;
+    margin: 0 auto !important;
+}
+
+#hua-image-input canvas {
+    max-height: 500px !important;
+    max-width: 100% !important;
+    object-fit: scale-down !important;
+    display: block !important;
+    margin: 0 auto !important;
+}
+
+/* SVG layers */
+#hua-image-input svg {
+    max-height: 500px !important;
+    max-width: 100% !important;
+}
+
+/* CRITICAL: Push accordions below DOWN with maximum margin */
+.accordion:has(#hua-image-input) ~ * {
+    position: relative !important;
+    z-index: 1 !important;
+    margin-top: 3em !important; /* Maximum space between Upload Image and next accordion */
+}
+
+/* Dropdown z-index - FORGE APPROACH (High priority for dropdowns) */
+.gradio-dropdown ul.options {
+    z-index: 3000 !important;
+    min-width: fit-content !important;
+    max-width: inherit !important;
+    white-space: nowrap !important;
+}
+
+/* Fix z-index layering - much lower values, let dropdowns win */
+.hua-pane-left {
+    position: relative !important;
+    z-index: 1 !important;
+}
+
+.hua-pane-right {
+    position: relative !important;
+    z-index: 1 !important;
+}
+
+/* Photopea button success state animations */
+@keyframes success-flash {
+    0% { background-color: var(--button-secondary-background-fill); }
+    50% { background-color: #22c55e; }
+    100% { background-color: var(--button-secondary-background-fill); }
+}
+
+@keyframes success-flash-primary {
+    0% { background-color: var(--button-primary-background-fill); }
+    50% { background-color: #22c55e; }
+    100% { background-color: var(--button-primary-background-fill); }
+}
+
+.photopea-success {
+    animation: success-flash 1.5s ease-in-out;
+}
+
+.photopea-success-primary {
+    animation: success-flash-primary 1.5s ease-in-out;
+}
+"""
+
+def get_image_constraint_js():
+    """JavaScript to enforce image constraints - FORGE APPROACH (dynamic expansion)"""
+    return """
+<script>
+(function() {
+    // Forge approach: Only constrain images, let container expand naturally
+    function constrainImages() {
+        const container = document.querySelector('#hua-image-input');
+        if (!container) return;
+
+        // Constrain images and canvases only
+        container.querySelectorAll('img').forEach(img => {
+            img.style.maxHeight = '600px';
+            img.style.maxWidth = '100%';
+            img.style.objectFit = 'scale-down';
+            img.style.display = 'block';
+            img.style.margin = '0 auto';
+        });
+
+        container.querySelectorAll('canvas').forEach(canvas => {
+            canvas.style.maxHeight = '600px';
+            canvas.style.maxWidth = '100%';
+            canvas.style.objectFit = 'scale-down';
+            canvas.style.display = 'block';
+            canvas.style.margin = '0 auto';
+        });
+
+        // Let container grow naturally - no max-height restriction
+        container.style.overflow = 'visible';
+    }
+
+    // Run on load
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => setTimeout(constrainImages, 100));
+    } else {
+        setTimeout(constrainImages, 100);
+    }
+
+    // Watch for new images
+    const observer = new MutationObserver(() => setTimeout(constrainImages, 50));
+    setTimeout(() => {
+        const target = document.querySelector('#hua-image-input');
+        if (target) observer.observe(target, { childList: true, subtree: true });
+    }, 300);
+})();
+</script>
 """
 
 def get_sponsor_html():

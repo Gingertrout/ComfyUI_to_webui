@@ -22,7 +22,7 @@ from functools import lru_cache
 import uuid
 from .kelnel_ui.system_monitor import update_floating_monitors_stream, custom_css as monitor_css, cleanup_nvml # system monitoring module
 from .kelnel_ui.k_Preview import ComfyUIPreviewer # integrate live preview client
-from .kelnel_ui.css_html_js import HACKER_CSS, get_sponsor_html # custom CSS/HTML assets
+from .kelnel_ui.css_html_js import HACKER_CSS, get_sponsor_html, get_image_constraint_js # custom CSS/HTML assets
 from .kelnel_ui.ui_def import ( # workflow helpers
     calculate_aspect_ratio,
     strip_prefix,
@@ -283,19 +283,39 @@ PHOTOPEA_SEND_JS = """
         if (iframe) window.photopeaWindow = iframe.contentWindow;
     }
 
-    if (!window.photopeaWindow) { alert("Photopea not ready"); return; }
+    if (!window.photopeaWindow) {
+        alert("Photopea not ready");
+        return;
+    }
 
     const container = document.querySelector('#hua-image-input');
-    if (!container) { alert("Upload field not found"); return; }
+    if (!container) {
+        alert("Upload field not found");
+        return;
+    }
 
     const sourceCanvas = container.querySelector('canvas');
-    if (!sourceCanvas) { alert("No image. Upload one first."); return; }
+    if (!sourceCanvas) {
+        alert("No image. Upload one first.");
+        return;
+    }
 
     // Canvas is already the image - just export it as data URL
     const dataUrl = sourceCanvas.toDataURL('image/png');
 
     window.photopeaWindow.postMessage('app.open("' + dataUrl + '", null, true);', "*");
-    setTimeout(() => alert("Sent to Photopea!"), 500);
+
+    // Flash button green - find button by searching for text content
+    setTimeout(() => {
+        const buttons = document.querySelectorAll('button');
+        for (let btn of buttons) {
+            if (btn.textContent.includes('Send Upload Image')) {
+                btn.classList.add('photopea-success');
+                setTimeout(() => btn.classList.remove('photopea-success'), 1500);
+                break;
+            }
+        }
+    }, 100);
 }
 """
 
@@ -306,7 +326,10 @@ PHOTOPEA_EXPORT_JS = """
         if (iframe) window.photopeaWindow = iframe.contentWindow;
     }
 
-    if (!window.photopeaWindow) { alert("Photopea not ready"); return; }
+    if (!window.photopeaWindow) {
+        alert("Photopea not ready");
+        return;
+    }
 
     // Step 1: Get canvas dimensions from Photopea
     let dimensionResponses = [];
@@ -347,7 +370,10 @@ PHOTOPEA_EXPORT_JS = """
                 if (e.data === "done") {
                     window.removeEventListener("message", handler);
 
-                    if (!responses || !responses[0]) { alert("No data"); return; }
+                    if (!responses || !responses[0]) {
+                        alert("No data");
+                        return;
+                    }
                     const arrayBuffer = responses[0];
                     const bytes = new Uint8Array(arrayBuffer);
                     let binary = '';
@@ -355,16 +381,33 @@ PHOTOPEA_EXPORT_JS = """
                     const blob = new Blob([new Uint8Array(atob(btoa(binary)).split('').map(c => c.charCodeAt(0)))], {type: 'image/png'});
 
                     const container = document.querySelector('#hua-image-input');
-                    if (!container) { alert("Upload field not found"); return; }
+                    if (!container) {
+                        alert("Upload field not found");
+                        return;
+                    }
                     const fileInput = container.querySelector('input[type="file"]');
-                    if (!fileInput) { alert("File input not found"); return; }
+                    if (!fileInput) {
+                        alert("File input not found");
+                        return;
+                    }
 
                     const file = new File([blob], "photopea_export.png", {type: "image/png"});
                     const dt = new DataTransfer();
                     dt.items.add(file);
                     fileInput.files = dt.files;
                     fileInput.dispatchEvent(new Event('change', {bubbles: true}));
-                    alert("Exported!");
+
+                    // Flash button green - find button by searching for text content
+                    setTimeout(() => {
+                        const buttons = document.querySelectorAll('button');
+                        for (let btn of buttons) {
+                            if (btn.textContent.includes('Export Photopea')) {
+                                btn.classList.add('photopea-success-primary');
+                                setTimeout(() => btn.classList.remove('photopea-success-primary'), 1500);
+                                break;
+                            }
+                        }
+                    }, 100);
                 }
             };
 
@@ -2514,6 +2557,7 @@ combined_css = "\n".join([HACKER_CSS, monitor_css, UI_THEME_CSS])
 with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
     selected_gallery_image_state = gr.State(value=None)
     theme_bootstrap = gr.HTML(THEME_BOOTSTRAP_HTML, visible=False)
+    image_constraint_script = gr.HTML(get_image_constraint_js(), visible=False)
 
     with gr.Tabs(elem_id="hua-main-tabs"):
         with gr.TabItem("ComfyUI Workflow Wrapper", id="tab_workflow_main"):
@@ -2534,7 +2578,7 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
                                 "type": "pil",
                                 "layers": True,
                                 "transforms": (),
-                                "canvas_size": None,
+                                "canvas_size": None,  # Let Gradio handle canvas sizing
                                 "brush": gr.Brush(default_size=56, color_mode="fixed", colors=["#ffffffff"], default_color="#ffffffff"),
                                 "eraser": gr.Eraser(default_size=48),
                             })

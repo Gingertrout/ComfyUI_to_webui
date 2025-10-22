@@ -314,6 +314,29 @@ Install: `pip install -r requirements.txt` (auto-attempted on plugin load)
 6. `node/output_image_to_gradio.py` - Hua output node pattern
 7. `kelnel_ui/ui_def.py:283-414` - Workflow-to-prompt conversion (source of batch_size bug)
 
+## Image Container Constraints (Forge-Inspired)
+
+**Problem:** Gradio 4.44.0 ImageEditor components can overflow their containers, pushing editing tools and uploaded images outside their designated frames.
+
+**Solution Pattern (kelnel_ui/css_html_js.py:36-120):**
+1. **Fixed Height Enforcement**: Set explicit `height: 512px` on `#hua-image-input` with `!important` flags
+2. **Nested Container Control**: Apply max-height to all child elements (`> *`, `.image-container`, etc.)
+3. **Image Scaling**: Use `object-fit: scale-down` (Forge pattern) instead of `contain` with `max-height: 480px` to leave room for tools
+4. **Tool Bar Constraints**: Limit toolbars to `max-height: 40px` with `flex-shrink: 0`
+5. **Canvas Size Parameter**: Set `canvas_size: (512, 480)` in ImageEditor kwargs (gradio_workflow.py:2582)
+6. **Dynamic JavaScript Enforcement**: MutationObserver watches for Gradio DOM changes and re-applies constraints (get_image_constraint_js())
+
+**Key CSS Properties:**
+- `overflow: hidden` on containers prevents spillage
+- `box-sizing: border-box` ensures padding/borders included in height calculations
+- `display: block; margin: auto` centers images within bounded space
+- `position: relative` on tools prevents absolute positioning escape
+
+**Testing:**
+- Upload large images (>1024px) - should scale down to fit
+- Test editing tools - should stay within 512px container
+- Verify mask controls don't slide under right pane (z-index: 100 on left pane)
+
 ## Extension Points
 
 **New Input Types:** Add node class + UI component + discovery logic
