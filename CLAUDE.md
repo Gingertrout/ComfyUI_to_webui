@@ -62,6 +62,64 @@ Workflow nodes are discovered by `class_type` matching (e.g., `GradioTextOk`, `H
 
 This **decouples** ComfyUI execution from Gradio result retrieval.
 
+### Photopea Integration & Dimension Handling (CRITICAL)
+
+**Problem:** Photopea exports and workflow conversions can create incorrect dimensions that cause VRAM overflow.
+
+**Root Causes Fixed:**
+1. **Batch Size Corruption**: During workflow-to-prompt conversion, `EmptyLatentImage.batch_size` was set to 1024 instead of 1, creating 1024 latent images and exhausting VRAM
+2. **Linked Dimensions**: `EmptyLatentImage` dimensions were linked to `LoadAndResizeImage` outputs, which didn't respect resize parameters
+3. **Conflicting Sources**: Dimensions from workflow JSON, UI inputs, and dynamic settings conflicted
+
+**Solution Pattern (gradio_workflow.py:1823-1895):**
+
+```python
+# Dimension Priority: UI inputs > workflow settings > default (768x768)
+target_width = None
+target_height = None
+
+# 1. Check UI inputs (if user changed from default 512x512)
+if ui_width != 512 or ui_height != 512:
+    target_width = ui_width
+    target_height = ui_height
+
+# 2. Fall back to loader_settings (from workflow/Photopea)
+if target_width is None and loader_settings:
+    target_width = loader_settings[0]['width']
+    target_height = loader_settings[0]['height']
+
+# 3. Final fallback to default
+if target_width is None:
+    target_width = 768
+    target_height = 768
+
+# CRITICAL: Override both nodes with same dimensions
+for node in load_and_resize_keys:
+    node['inputs']['width'] = target_width
+    node['inputs']['height'] = target_height
+    node['inputs']['resize'] = True
+    node['inputs']['keep_proportion'] = False
+
+for node in empty_latent_keys:
+    node['inputs']['width'] = target_width
+    node['inputs']['height'] = target_height
+    node['inputs']['batch_size'] = 1  # FIX: Always 1, not 1024!
+```
+
+**Key Implementation Details:**
+- Always set `batch_size = 1` on EmptyLatentImage (line 1890)
+- Break node links by directly setting values instead of using link arrays
+- Disable `keep_proportion` to ensure exact dimensions
+- Apply same dimensions to both `LoadAndResizeImage` and `EmptyLatentImage`
+- Dynamic config runs BEFORE this fix, so we override it
+
+**Testing:**
+- Export image from Photopea at various resolutions (1280x1024, 512x768, etc.)
+- Verify no VRAM overflow errors
+- Check generated image matches expected dimensions
+- Test with UI dimension overrides
+- Verify batch_size stays at 1
+
 ## Key Files
 
 | File | Purpose |
@@ -71,9 +129,12 @@ This **decouples** ComfyUI execution from Gradio result retrieval.
 | `DEADLOCK_FIX.md` | **CRITICAL READING** - Documents queue deadlock fixes and polling strategy |
 | `node/output_image_to_gradio.py` | Hua_Output node - writes results to temp JSON |
 | `node/hua_nodes.py` | Input nodes (prompts, images, seeds, resolution) |
-| `kelnel_ui/ui_def.py` | Workflow helpers, settings management |
+| `kelnel_ui/ui_def.py` | Workflow helpers, settings management, workflow-to-prompt conversion |
 | `kelnel_ui/k_Preview.py` | WebSocket client for live ComfyUI previews |
 | `kelnel_ui/system_monitor.py` | CPU/GPU/RAM monitoring dashboard |
+| `kelnel_ui/photopea_bindings.js` | Photopea integration - bidirectional image transfer |
+| `kelnel_ui/photopea_loader.js` | Photopea iframe loader and event handlers |
+| `kelnel_ui/photopea_utils.js` | Photopea utility functions (base64 conversion, etc.) |
 
 ## Common Development Tasks
 
@@ -248,8 +309,10 @@ Install: `pip install -r requirements.txt` (auto-attempted on plugin load)
 1. `DEADLOCK_FIX.md` - Documents critical queue system fixes
 2. `README.md` - User-facing feature descriptions
 3. Lines 2083-2301 in `gradio_workflow.py` - Queue worker implementation
-4. Lines 1820-1838 in `gradio_workflow.py` - Intelligent polling logic
-5. `node/output_image_to_gradio.py` - Hua output node pattern
+4. Lines 1823-1895 in `gradio_workflow.py` - Photopea dimension handling and batch_size fix
+5. Lines 1820-1838 in `gradio_workflow.py` - Intelligent polling logic (OUTDATED LINE NUMBERS - search for "Intelligent queue polling")
+6. `node/output_image_to_gradio.py` - Hua output node pattern
+7. `kelnel_ui/ui_def.py:283-414` - Workflow-to-prompt conversion (source of batch_size bug)
 
 ## Extension Points
 
