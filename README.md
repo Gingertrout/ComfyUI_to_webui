@@ -10,6 +10,10 @@ Gradio front-end for pairing with ComfyUI workflows. The plugin exposes workflow
 ## 🎯 What's New in This Fork
 - **Fixed critical deadlock issues** with Gradio 4.44.0 streaming
 - **Intelligent queue polling** for workflows without custom output nodes
+- **Enhanced Photopea integration** - automatic dimension detection and VRAM overflow prevention
+  - Smart dimension priority: UI inputs → workflow settings → default (768x768)
+  - Fixed batch_size corruption that caused GPU memory errors
+  - Seamless round-trip editing with correct image dimensions
 - **Enhanced stability** - no more hanging or crashes
 - **Works with standard ComfyUI workflows** - no special nodes required
 - **Extensive English documentation** and code comments
@@ -21,7 +25,10 @@ Gradio front-end for pairing with ComfyUI workflows. The plugin exposes workflow
 - Optional live sampler preview via websocket (requires `websocket-client`).
 - Built-in workflow/model refresh, resolution presets, seed tools, and output gallery/video tabs.
 - Inpaint-ready image input with sketch masking plus one-click "send to input" from gallery results.
-- Embedded Photopea editor for in-browser round-tripping edits without manual downloads.
+- **Embedded Photopea editor** for in-browser image editing with automatic dimension preservation
+  - Export edited images directly back to workflow at correct resolution
+  - Send uploaded images or gallery results to Photopea for quick edits
+  - No manual downloads required - seamless round-trip workflow
 - Integrated Civitai browser with API-key support for searching and downloading models directly into ComfyUI folders.
 - Helper utilities: API JSON manager, log viewer, floating system monitor, and node badge controls.
 
@@ -29,7 +36,7 @@ Gradio front-end for pairing with ComfyUI workflows. The plugin exposes workflow
 1. Clone into `ComfyUI/custom_nodes`:
    ```bash
    cd /path/to/ComfyUI/custom_nodes
-   git clone https://github.com/kungful/ComfyUI_to_webui.git
+   git clone https://github.com/Gingertrout/ComfyUI_to_webui.git
    ```
 2. Install requirements (use the same Python environment that runs ComfyUI):
    ```bash
