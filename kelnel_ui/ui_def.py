@@ -433,6 +433,7 @@ def get_workflow_defaults_and_visibility(json_file, output_dir_path, current_res
         "dynamic_components": {
             "GradioTextOk": [],
             "Hua_LoraLoaderModelOnly": [],
+            "PowerLoraLoader": [],
             "HuaIntNode": [],
             "HuaFloatNode": [],
             "KSampler": [],
@@ -595,6 +596,33 @@ def get_workflow_defaults_and_visibility(json_file, output_dir_path, current_res
             "value": node_info["inputs"].get("lora_name", "None"),
             "title": node_info["title"],
             "class_type": node_info["class_type"]
+        })
+
+    # Power Lora Loader (rgthree) - Multi-lora loader
+    power_lora_nodes = find_all_nodes_by_class_type(prompt, "Power Lora Loader (rgthree)")
+    for node_info in power_lora_nodes:
+        # Extract lora entries from inputs (lora_01, lora_02, etc.)
+        # In prompt format, the loras are stored as lora_01, lora_02, etc. in inputs
+        loras = []
+        inputs = node_info.get("inputs", {})
+
+        # Try to find loras by looking for lora_01, lora_02, etc. keys
+        for key, value in inputs.items():
+            if key.lower().startswith("lora_") and isinstance(value, dict) and "lora" in value:
+                loras.append({
+                    "key": key,
+                    "on": value.get("on", True),
+                    "lora": value.get("lora", "None"),
+                    "strength": value.get("strength", 1.0),
+                    "strengthTwo": value.get("strengthTwo", None)
+                })
+
+        # Always add the node, even if no loras are found (user can configure them in UI)
+        defaults["dynamic_components"]["PowerLoraLoader"].append({
+            "id": node_info["id"],
+            "title": node_info["title"],
+            "class_type": node_info["class_type"],
+            "loras": loras
         })
 
     # HuaIntNode

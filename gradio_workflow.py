@@ -44,8 +44,9 @@ from .kelnel_ui.ui_def import (
 )
 
 # --- Initialize dynamic component limits ---
-plugin_settings_on_load = load_plugin_settings() 
+plugin_settings_on_load = load_plugin_settings()
 MAX_DYNAMIC_COMPONENTS = plugin_settings_on_load.get("max_dynamic_components", DEFAULT_MAX_DYNAMIC_COMPONENTS)
+MAX_LORAS_PER_NODE = 5  # Maximum loras per power lora loader node
 print(f"Plugin start: max dynamic components loaded from settings: {MAX_DYNAMIC_COMPONENTS} (via kelnel_ui.ui_def)")
 # --- End initialization ---
 
@@ -1555,6 +1556,7 @@ def generate_image(
     hua_width,
     hua_height,
     dynamic_loras_values,
+    dynamic_power_loras_values,
     hua_checkpoint,
     hua_unet,
     dynamic_float_nodes_values,
@@ -1776,6 +1778,42 @@ def generate_image(
             selected = dynamic_loras_values[i]
             if node_id in prompt:
                 prompt[node_id]['inputs']['lora_name'] = selected if selected != 'None' else node_info.get('value', 'None')
+
+    # Apply Power Lora Loader values
+    actual_power_lora_nodes = workflow_info['dynamic_components'].get('PowerLoraLoader', [])
+    for node_idx, node_info in enumerate(actual_power_lora_nodes):
+        node_id = node_info.get('id')
+        if not node_id or node_id not in prompt:
+            continue
+
+        # Extract lora values for this node from the flattened array
+        # Structure: [enabled, lora, strength, strength_clip] * MAX_LORAS_PER_NODE per node
+        start_idx = node_idx * MAX_LORAS_PER_NODE * 4
+
+        # Build lora inputs for this node
+        for lora_idx in range(MAX_LORAS_PER_NODE):
+            base_idx = start_idx + (lora_idx * 4)
+            if base_idx + 3 >= len(dynamic_power_loras_values):
+                break
+
+            enabled = dynamic_power_loras_values[base_idx]
+            lora_name = dynamic_power_loras_values[base_idx + 1]
+            strength = dynamic_power_loras_values[base_idx + 2]
+            strength_clip = dynamic_power_loras_values[base_idx + 3]
+
+            # Skip if lora is not enabled or no lora selected
+            if not enabled or not lora_name or lora_name == "None":
+                continue
+
+            # Create or update the lora input entry
+            # Format: lora_01, lora_02, etc. (1-indexed)
+            lora_key = f"lora_{lora_idx + 1:02d}"
+            prompt[node_id]['inputs'][lora_key] = {
+                "on": enabled,
+                "lora": lora_name,
+                "strength": strength if strength is not None else 1.0,
+                "strengthTwo": strength_clip if strength_clip is not None else None
+            }
 
     actual_int_nodes = workflow_info['dynamic_components'].get('HuaIntNode', [])
     for i, node_info in enumerate(actual_int_nodes):
@@ -2084,6 +2122,8 @@ def generate_image(
 
 def _split_run_inputs(raw_args):
     args = list(raw_args)
+    POWER_LORA_FIELD_COUNT = MAX_LORAS_PER_NODE * 4  # enabled, lora, strength, strength_clip per lora
+
     expected_base = (
         MAX_DYNAMIC_COMPONENTS  # positive prompts
         + 1  # primary negative prompt
@@ -2091,6 +2131,7 @@ def _split_run_inputs(raw_args):
         + 1  # json file
         + 2  # width, height
         + MAX_DYNAMIC_COMPONENTS  # lora dropdowns
+        + MAX_DYNAMIC_COMPONENTS * POWER_LORA_FIELD_COUNT  # power lora loader fields
         + 2  # checkpoint, unet
         + MAX_DYNAMIC_COMPONENTS  # float inputs
         + MAX_DYNAMIC_COMPONENTS  # int inputs
@@ -2110,6 +2151,7 @@ def _split_run_inputs(raw_args):
     hua_width = args[idx]; idx += 1
     hua_height = args[idx]; idx += 1
     lora_values = list(args[idx:idx + MAX_DYNAMIC_COMPONENTS]); idx += MAX_DYNAMIC_COMPONENTS
+    power_lora_flat = list(args[idx:idx + (MAX_DYNAMIC_COMPONENTS * POWER_LORA_FIELD_COUNT)]); idx += MAX_DYNAMIC_COMPONENTS * POWER_LORA_FIELD_COUNT
     checkpoint = args[idx]; idx += 1
     unet = args[idx]; idx += 1
     float_values = list(args[idx:idx + MAX_DYNAMIC_COMPONENTS]); idx += MAX_DYNAMIC_COMPONENTS
@@ -2140,6 +2182,7 @@ def _split_run_inputs(raw_args):
         "hua_width": hua_width,
         "hua_height": hua_height,
         "loras": lora_values,
+        "power_loras": power_lora_flat,
         "checkpoint": checkpoint,
         "unet": unet,
         "floats": float_values,
@@ -2217,6 +2260,7 @@ def run_queued_tasks(inputimage1, input_video, *dynamic_args, queue_count=1, pro
     hua_width = unpacked_inputs["hua_width"]
     hua_height = unpacked_inputs["hua_height"]
     dynamic_loras_values = unpacked_inputs["loras"]
+    dynamic_power_loras_values = unpacked_inputs["power_loras"]
     hua_checkpoint = unpacked_inputs["checkpoint"]
     hua_unet = unpacked_inputs["unet"]
     dynamic_float_nodes_values = unpacked_inputs["floats"]
@@ -2256,6 +2300,7 @@ def run_queued_tasks(inputimage1, input_video, *dynamic_args, queue_count=1, pro
         hua_width,
         hua_height,
         dynamic_loras_values,
+        dynamic_power_loras_values,
         hua_checkpoint,
         hua_unet,
         dynamic_float_nodes_values,
@@ -2734,6 +2779,81 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
                                 visible=False,
                             )
 
+                    # Power Lora Loader (rgthree) - Multi-lora UI
+                    power_lora_accordions = []
+                    power_lora_components = []
+
+                    for node_idx in range(MAX_DYNAMIC_COMPONENTS):
+                        with gr.Accordion(f"Power Lora Loader {node_idx+1}", visible=False, open=False) as accordion:
+                            loras_for_this_node = []
+                            for lora_idx in range(MAX_LORAS_PER_NODE):
+                                with gr.Row():
+                                    enabled = gr.Checkbox(
+                                        label=f"Enable Lora {lora_idx+1}",
+                                        value=True,
+                                        elem_id=f"power_lora_{node_idx}_{lora_idx}_enabled",
+                                        scale=1
+                                    )
+                                    lora_dropdown = gr.Dropdown(
+                                        choices=lora_list,
+                                        label=f"Lora {lora_idx+1}",
+                                        value="None",
+                                        elem_id=f"power_lora_{node_idx}_{lora_idx}_dropdown",
+                                        scale=3
+                                    )
+                                with gr.Row():
+                                    strength = gr.Slider(
+                                        minimum=-10.0,
+                                        maximum=10.0,
+                                        step=0.01,
+                                        value=1.0,
+                                        label="Model Strength",
+                                        elem_id=f"power_lora_{node_idx}_{lora_idx}_strength",
+                                        scale=1
+                                    )
+                                    strength_clip = gr.Slider(
+                                        minimum=-10.0,
+                                        maximum=10.0,
+                                        step=0.01,
+                                        value=1.0,
+                                        label="CLIP Strength",
+                                        elem_id=f"power_lora_{node_idx}_{lora_idx}_strength_clip",
+                                        scale=1
+                                    )
+                                loras_for_this_node.append({
+                                    "enabled": enabled,
+                                    "lora": lora_dropdown,
+                                    "strength": strength,
+                                    "strength_clip": strength_clip
+                                })
+                            power_lora_components.append(loras_for_this_node)
+                        power_lora_accordions.append(accordion)
+
+                    # Flatten power lora components for outputs: [accordion, enabled, lora, strength, strength_clip, ...]
+                    POWER_LORA_FLAT = []
+                    for node_idx in range(MAX_DYNAMIC_COMPONENTS):
+                        POWER_LORA_FLAT.append(power_lora_accordions[node_idx])  # Accordion
+                        for lora_idx in range(MAX_LORAS_PER_NODE):
+                            POWER_LORA_FLAT.append(power_lora_components[node_idx][lora_idx]["enabled"])
+                            POWER_LORA_FLAT.append(power_lora_components[node_idx][lora_idx]["lora"])
+                            POWER_LORA_FLAT.append(power_lora_components[node_idx][lora_idx]["strength"])
+                            POWER_LORA_FLAT.append(power_lora_components[node_idx][lora_idx]["strength_clip"])
+
+                    # Flatten power lora components for inputs (excludes accordions): [enabled, lora, strength, strength_clip, ...]
+                    POWER_LORA_INPUTS = []
+                    for node_idx in range(MAX_DYNAMIC_COMPONENTS):
+                        for lora_idx in range(MAX_LORAS_PER_NODE):
+                            POWER_LORA_INPUTS.append(power_lora_components[node_idx][lora_idx]["enabled"])
+                            POWER_LORA_INPUTS.append(power_lora_components[node_idx][lora_idx]["lora"])
+                            POWER_LORA_INPUTS.append(power_lora_components[node_idx][lora_idx]["strength"])
+                            POWER_LORA_INPUTS.append(power_lora_components[node_idx][lora_idx]["strength_clip"])
+
+                    # Extract just the lora dropdowns for model refresh
+                    POWER_LORA_DROPDOWNS = []
+                    for node_idx in range(MAX_DYNAMIC_COMPONENTS):
+                        for lora_idx in range(MAX_LORAS_PER_NODE):
+                            POWER_LORA_DROPDOWNS.append(power_lora_components[node_idx][lora_idx]["lora"])
+
                     with gr.Row() as float_int_row:
                         with gr.Column(scale=1):
                             float_inputs = []
@@ -3036,6 +3156,8 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
 
     # When JSON selection changes, update all related component visibility and defaults
     def update_ui_on_json_change(json_file):
+        lora_list = get_model_list("loras")  # Get current lora list for dropdown updates
+
         workflow_dir, workflow_name, workflow_path = resolve_workflow_components(json_file)
         if workflow_dir and workflow_name:
             defaults = get_workflow_defaults_and_visibility(
@@ -3129,6 +3251,46 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
                 updates.append(gr.update(visible=True, label=label, value=node_data.get("value", "None"), choices=lora_list))
             else:
                 updates.append(gr.update(visible=False, label=f"Lora {i+1}", value="None", choices=lora_list))
+
+        # Power Lora Loader updates
+        power_loras_data = defaults["dynamic_components"]["PowerLoraLoader"]
+        for node_idx in range(MAX_DYNAMIC_COMPONENTS):
+            if node_idx < len(power_loras_data):
+                node_data = power_loras_data[node_idx]
+                node_id = node_data.get("id")
+                node_title = node_data.get("title")
+
+                # If title is just the node ID or empty, use "Power Lora Loader" as the base name
+                if not node_title or node_title == node_id or node_title == str(node_id):
+                    label = f"Power Lora Loader (ID: {node_id})"
+                else:
+                    label = f"{node_title} (ID: {node_id})"
+
+                updates.append(gr.update(visible=True, label=label, open=True))  # Accordion
+
+                # Update each lora slot within this node
+                loras = node_data.get("loras", [])
+                for lora_idx in range(MAX_LORAS_PER_NODE):
+                    if lora_idx < len(loras):
+                        lora_data = loras[lora_idx]
+                        updates.append(gr.update(value=lora_data.get("on", True)))  # enabled checkbox
+                        updates.append(gr.update(value=lora_data.get("lora", "None"), choices=lora_list))  # dropdown
+                        updates.append(gr.update(value=lora_data.get("strength", 1.0)))  # model strength
+                        updates.append(gr.update(value=lora_data.get("strengthTwo", 1.0) if lora_data.get("strengthTwo") is not None else lora_data.get("strength", 1.0)))  # clip strength
+                    else:
+                        # Empty slot - set defaults
+                        updates.append(gr.update(value=False))  # enabled
+                        updates.append(gr.update(value="None", choices=lora_list))  # dropdown
+                        updates.append(gr.update(value=1.0))  # model strength
+                        updates.append(gr.update(value=1.0))  # clip strength
+            else:
+                # Node not found - hide accordion and set default values for all slots
+                updates.append(gr.update(visible=False, label=f"Power Lora Loader {node_idx+1}"))  # Accordion
+                for lora_idx in range(MAX_LORAS_PER_NODE):
+                    updates.append(gr.update(value=False))  # enabled
+                    updates.append(gr.update(value="None", choices=lora_list))  # dropdown
+                    updates.append(gr.update(value=1.0))  # model strength
+                    updates.append(gr.update(value=1.0))  # clip strength
 
         dynamic_int_nodes = defaults["dynamic_components"]["HuaIntNode"]
         for i in range(MAX_DYNAMIC_COMPONENTS):
@@ -3302,6 +3464,7 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
             output_video,
             *positive_prompt_texts,
             *lora_dropdowns,
+            *POWER_LORA_FLAT,
             *int_inputs,
             *float_inputs,
             *IMAGE_LOADER_ACCORDION_COMPONENTS,
@@ -3895,6 +4058,7 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
             hua_width,
             hua_height,
             *lora_dropdowns,
+            *POWER_LORA_INPUTS,
             hua_checkpoint_dropdown,
             hua_unet_dropdown,
             *float_inputs,
@@ -3926,10 +4090,11 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
     refresh_model_button.click(
         lambda: tuple(
             [gr.update(choices=get_model_list("loras")) for _ in range(MAX_DYNAMIC_COMPONENTS)] +
+            [gr.update(choices=get_model_list("loras")) for _ in POWER_LORA_DROPDOWNS] +
             [gr.update(choices=get_model_list("checkpoints")), gr.update(choices=get_model_list("unet"))]
         ),
         inputs=[],
-        outputs=[*lora_dropdowns, hua_checkpoint_dropdown, hua_unet_dropdown]
+        outputs=[*lora_dropdowns, *POWER_LORA_DROPDOWNS, hua_checkpoint_dropdown, hua_unet_dropdown]
     )
 
     # --- Initial load ---
@@ -3966,6 +4131,14 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
                 initial_updates.append(gr.update(visible=False, label="Prompt", value=""))
             for _ in range(MAX_DYNAMIC_COMPONENTS):
                 initial_updates.append(gr.update(visible=False, label="Lora", value="None"))
+            # Power Lora Loader initial updates
+            for _ in range(MAX_DYNAMIC_COMPONENTS):
+                initial_updates.append(gr.update(visible=False))  # Accordion
+                for _ in range(MAX_LORAS_PER_NODE):
+                    initial_updates.append(gr.update(value=False))  # enabled
+                    initial_updates.append(gr.update(value="None"))  # lora dropdown
+                    initial_updates.append(gr.update(value=1.0))  # strength
+                    initial_updates.append(gr.update(value=1.0))  # strength_clip
             for _ in range(MAX_DYNAMIC_COMPONENTS):
                 initial_updates.append(gr.update(visible=False, label="Integer", value=0))
             for _ in range(MAX_DYNAMIC_COMPONENTS):
@@ -4015,6 +4188,7 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
             output_video,
             *positive_prompt_texts,
             *lora_dropdowns,
+            *POWER_LORA_FLAT,
             *int_inputs,
             *float_inputs,
             *IMAGE_LOADER_ACCORDION_COMPONENTS,
