@@ -8,6 +8,7 @@ from PIL import Image, ImageSequence, ImageOps, ImageChops
 import re
 import io  # precise file I/O helpers
 import base64
+import os
 import gradio as gr
 import numpy as np
 import torch
@@ -253,189 +254,131 @@ body[data-hua-theme="light"] .log-display-container h4 {
 }
 """
 
+# Load Photopea JavaScript files
+PHOTOPEA_SCRIPTS_DIR = os.path.join(os.path.dirname(__file__), "kelnel_ui")
+
+def _load_js_file(filename):
+    filepath = os.path.join(PHOTOPEA_SCRIPTS_DIR, filename)
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception as e:
+        print(f"[Photopea] Warning: Could not load {filename}: {e}")
+        return f"console.error('[Photopea] Failed to load {filename}');"
+
+PHOTOPEA_UTILS_JS = _load_js_file("photopea_utils.js")
+PHOTOPEA_BINDINGS_JS = _load_js_file("photopea_bindings.js")
+
 PHOTOPEA_EMBED_HTML = """
 <div id="photopea-integration-wrapper" style="height:720px; border:1px solid var(--block-border-color,#444); border-radius:6px; overflow:hidden;">
-  <iframe id="photopea-iframe" src="https://www.photopea.com/" style="width:100%;height:100%;border:0;" allow="clipboard-read; clipboard-write" onload="if(window.onPhotopeaLoaded) window.onPhotopeaLoaded(this);"></iframe>
+  <iframe id="photopea-iframe" src="https://www.photopea.com/" style="width:100%;height:100%;border:0;" allow="clipboard-read; clipboard-write"></iframe>
 </div>
-<script>
-(function(){
-  var photopeaWindow = null;
-  var photopeaIframe = null;
+"""
 
-  // Called when iframe loads
-  window.onPhotopeaLoaded = function(iframe) {
-    console.log("[Photopea] iFrame loaded");
-    photopeaWindow = iframe.contentWindow;
-    photopeaIframe = iframe;
-  };
-
-  const importSelector = '#photopea-import-data textarea';
-  const dataSelector = '#hua-photopea-data-store textarea';
-
-  const getImportBox = () => {
-    const app = window.gradioApp ? window.gradioApp() : document;
-    return app ? app.querySelector(importSelector) : null;
-  };
-
-  const getDataSource = () => {
-    const app = window.gradioApp ? window.gradioApp() : document;
-    return app ? app.querySelector(dataSelector) : null;
-  };
-
-  // Helper to convert ArrayBuffer to base64
-  const arrayBufferToBase64 = (buffer) => {
-    let binary = '';
-    const bytes = new Uint8Array(buffer);
-    for (let i = 0; i < bytes.byteLength; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary);
-  };
-
-  // Posts a message and receives back a promise
-  async function postMessageToPhotopea(message) {
-    if (!photopeaWindow) {
-      console.warn("[Photopea] Window not ready");
-      return null;
+# Photopea functions as JavaScript string for button .js parameter
+PHOTOPEA_SEND_JS = """
+() => {
+    if (!window.photopeaWindow) {
+        const iframe = document.querySelector('#photopea-iframe');
+        if (iframe) window.photopeaWindow = iframe.contentWindow;
     }
 
-    return new Promise(function (resolve, reject) {
-      var responses = [];
-      var photopeaMessageHandle = function (response) {
-        responses.push(response.data);
-        // Photopea returns data first, then "done"
-        if (response.data == "done") {
-          window.removeEventListener("message", photopeaMessageHandle);
-          resolve(responses);
+    if (!window.photopeaWindow) { alert("Photopea not ready"); return; }
+
+    const container = document.querySelector('#hua-image-input');
+    if (!container) { alert("Upload field not found"); return; }
+
+    const sourceCanvas = container.querySelector('canvas');
+    if (!sourceCanvas) { alert("No image. Upload one first."); return; }
+
+    // Canvas is already the image - just export it as data URL
+    const dataUrl = sourceCanvas.toDataURL('image/png');
+
+    window.photopeaWindow.postMessage('app.open("' + dataUrl + '", null, true);', "*");
+    setTimeout(() => alert("Sent to Photopea!"), 500);
+}
+"""
+
+PHOTOPEA_EXPORT_JS = """
+() => {
+    if (!window.photopeaWindow) {
+        const iframe = document.querySelector('#photopea-iframe');
+        if (iframe) window.photopeaWindow = iframe.contentWindow;
+    }
+
+    if (!window.photopeaWindow) { alert("Photopea not ready"); return; }
+
+    // Step 1: Get canvas dimensions from Photopea
+    let dimensionResponses = [];
+    const dimensionHandler = (e) => {
+        dimensionResponses.push(e.data);
+        if (e.data === "done") {
+            window.removeEventListener("message", dimensionHandler);
+
+            // Parse dimensions (format: "width,height")
+            if (dimensionResponses && dimensionResponses[0]) {
+                const dims = String(dimensionResponses[0]).split(',');
+                if (dims.length === 2) {
+                    const width = parseInt(dims[0]);
+                    const height = parseInt(dims[1]);
+
+                    console.log('[Photopea Export] Canvas dimensions:', width, 'x', height);
+
+                    // Update Gradio width/height inputs
+                    const widthInput = document.querySelector('#hua_width_input input[type="number"]');
+                    const heightInput = document.querySelector('#hua_height_input input[type="number"]');
+
+                    if (widthInput && heightInput) {
+                        widthInput.value = width;
+                        heightInput.value = height;
+                        widthInput.dispatchEvent(new Event('input', {bubbles: true}));
+                        heightInput.dispatchEvent(new Event('input', {bubbles: true}));
+                        console.log('[Photopea Export] Updated width/height inputs to', width, 'x', height);
+                    } else {
+                        console.warn('[Photopea Export] Could not find width/height inputs');
+                    }
+                }
+            }
+
+            // Step 2: Now export the image
+            let responses = [];
+            const handler = (e) => {
+                responses.push(e.data);
+                if (e.data === "done") {
+                    window.removeEventListener("message", handler);
+
+                    if (!responses || !responses[0]) { alert("No data"); return; }
+                    const arrayBuffer = responses[0];
+                    const bytes = new Uint8Array(arrayBuffer);
+                    let binary = '';
+                    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+                    const blob = new Blob([new Uint8Array(atob(btoa(binary)).split('').map(c => c.charCodeAt(0)))], {type: 'image/png'});
+
+                    const container = document.querySelector('#hua-image-input');
+                    if (!container) { alert("Upload field not found"); return; }
+                    const fileInput = container.querySelector('input[type="file"]');
+                    if (!fileInput) { alert("File input not found"); return; }
+
+                    const file = new File([blob], "photopea_export.png", {type: "image/png"});
+                    const dt = new DataTransfer();
+                    dt.items.add(file);
+                    fileInput.files = dt.files;
+                    fileInput.dispatchEvent(new Event('change', {bubbles: true}));
+                    alert("Exported!");
+                }
+            };
+
+            window.addEventListener("message", handler);
+            setTimeout(() => { window.removeEventListener("message", handler); }, 10000);
+            window.photopeaWindow.postMessage('app.activeDocument.saveToOE("png");', "*");
         }
-      };
-      // Add listener for response
-      window.addEventListener("message", photopeaMessageHandle);
+    };
 
-      // Set timeout
-      setTimeout(() => {
-        window.removeEventListener("message", photopeaMessageHandle);
-        if (responses.length === 0) {
-          reject(new Error("Photopea timeout"));
-        }
-      }, 10000);
-
-      // Send message
-      photopeaWindow.postMessage(message, "*");
-    });
-  }
-
-  // Helper to open image in Photopea
-  function openImageInPhotopea(dataUrl, asNewDocument) {
-    if (!dataUrl) {
-      console.warn("[Photopea] No image data provided");
-      return;
-    }
-    if (!photopeaWindow) {
-      console.warn("[Photopea] Photopea not loaded yet");
-      return;
-    }
-
-    console.log("[Photopea] Opening image, length:", dataUrl.length);
-    const command = `app.open("${dataUrl}", null, ${asNewDocument === true});`;
-    postMessageToPhotopea(command)
-      .then(() => {
-        console.log("[Photopea] Image opened successfully");
-      })
-      .catch((err) => {
-        console.error("[Photopea] Failed to open image:", err);
-      });
-  }
-
-  // Helper to export from Photopea
-  function getImageFromPhotopea() {
-    if (!photopeaWindow) {
-      console.warn("[Photopea] Photopea not loaded yet");
-      return;
-    }
-
-    console.log("[Photopea] Requesting export");
-    const saveMessage = 'app.activeDocument.saveToOE("png");';
-
-    postMessageToPhotopea(saveMessage)
-      .then((resultArray) => {
-        if (!resultArray || !resultArray[0]) {
-          console.warn("[Photopea] No data returned");
-          return;
-        }
-
-        // Convert ArrayBuffer to base64
-        const base64Png = arrayBufferToBase64(resultArray[0]);
-        const dataUrl = `data:image/png;base64,${base64Png}`;
-
-        // Deliver to Gradio import box
-        const importBox = getImportBox();
-        if (importBox) {
-          const payload = JSON.stringify({
-            name: "photopea_export.png",
-            data: dataUrl,
-            timestamp: Date.now()
-          });
-          importBox.value = payload;
-          importBox.dispatchEvent(new Event('input', { bubbles: true }));
-          importBox.dispatchEvent(new Event('change', { bubbles: true }));
-          console.log("[Photopea] Export delivered to Gradio");
-        } else {
-          console.warn("[Photopea] Import box not found");
-        }
-      })
-      .catch((err) => {
-        console.error("[Photopea] Export failed:", err);
-      });
-  }
-
-  window.huaPhotopeaBridge = {
-    open: openImageInPhotopea,
-    getImage: getImageFromPhotopea
-  };
-
-  // Attach button handlers when buttons appear in DOM
-  const attachButtonHandlers = () => {
-    const app = window.gradioApp ? window.gradioApp() : document;
-    if (!app) { return; }
-
-    // "Send to Photopea" button handler
-    const sendButton = app.querySelector('#hua-photopea-send button');
-    if (sendButton && !sendButton.dataset.photopeaBound) {
-      sendButton.dataset.photopeaBound = "1";
-      sendButton.addEventListener("click", () => {
-        const dataInput = getDataSource();
-        const dataUrl = dataInput ? dataInput.value : null;
-        if (dataUrl) {
-          console.log("[Photopea] Send button clicked");
-          openImageInPhotopea(dataUrl, false);
-        } else {
-          console.warn("[Photopea] No data to send");
-        }
-      });
-      console.log("[Photopea] Attached send button handler");
-    }
-
-    // "Import from Photopea" button handler
-    const fetchButton = app.querySelector('#hua-photopea-fetch button');
-    if (fetchButton && !fetchButton.dataset.photopeaBound) {
-      fetchButton.dataset.photopeaBound = "1";
-      fetchButton.addEventListener("click", () => {
-        console.log("[Photopea] Fetch button clicked");
-        getImageFromPhotopea();
-      });
-      console.log("[Photopea] Attached fetch button handler");
-    }
-  };
-
-  // Watch for DOM changes to attach handlers
-  const observer = new MutationObserver(() => attachButtonHandlers());
-  observer.observe(document.body, { childList: true, subtree: true });
-  attachButtonHandlers();
-
-  console.log("[Photopea] Integration script loaded");
-})();
-</script>
+    // Start by getting dimensions
+    window.addEventListener("message", dimensionHandler);
+    setTimeout(() => { window.removeEventListener("message", dimensionHandler); }, 10000);
+    window.photopeaWindow.postMessage('app.activeDocument.width + "," + app.activeDocument.height;', "*");
+}
 """
 
 THEME_BOOTSTRAP_HTML = f"""
@@ -1854,16 +1797,121 @@ def generate_image(
 
     image_loader_nodes = workflow_info['dynamic_components'].get('ImageLoaders', [])
     loader_settings = _parse_image_loader_settings(image_loader_nodes, dynamic_image_loader_values or [])
+
+    # DEBUG: Show what image loader nodes were discovered
+    print(f"[{execution_id}] DEBUG ImageLoaders found: {[n.get('id') for n in image_loader_nodes]}")
+    print(f"[{execution_id}] DEBUG loader_settings: {loader_settings}")
+
     for idx, node_info in enumerate(image_loader_nodes):
         node_id = node_info.get('id')
         if node_id in prompt and idx < len(loader_settings):
             node_inputs = prompt[node_id].setdefault('inputs', {})
             config = loader_settings[idx]
+
+            # DEBUG: Show BEFORE state for ImageLoader configuration
+            print(f"[{execution_id}] DEBUG ImageLoader node {node_id} BEFORE dynamic config: resize={node_inputs.get('resize')}, width={node_inputs.get('width')}, height={node_inputs.get('height')}")
+
             node_inputs['resize'] = bool(config.get('resize', False))
             node_inputs['width'] = config.get('width')
             node_inputs['height'] = config.get('height')
             node_inputs['keep_proportion'] = bool(config.get('keep_proportion', False))
             node_inputs['divisible_by'] = config.get('divisible_by')
+
+            # DEBUG: Show AFTER state for ImageLoader configuration
+            print(f"[{execution_id}] DEBUG ImageLoader node {node_id} AFTER dynamic config: resize={node_inputs['resize']}, width={node_inputs['width']}, height={node_inputs['height']}")
+
+    # IMPORTANT FIX: Determine correct dimensions for EmptyLatentImage
+    # Priority: UI inputs (hua_width/hua_height) > loader_settings (workflow) > default (768x768)
+    print(f"[{execution_id}] DEBUG load_and_resize_keys: {load_and_resize_keys}")
+    print(f"[{execution_id}] DEBUG hua_width={hua_width}, hua_height={hua_height}")
+
+    # First, try to use UI dimensions (hua_width/hua_height)
+    target_width = None
+    target_height = None
+    try:
+        ui_width = int(hua_width)
+        ui_height = int(hua_height)
+        # Only use UI dimensions if they're not the default 512x512
+        # (which indicates user hasn't set custom dimensions)
+        if ui_width != 512 or ui_height != 512:
+            target_width = ui_width
+            target_height = ui_height
+            print(f"[{execution_id}] Using dimensions from UI (hua_width/hua_height): {target_width}x{target_height}")
+    except (ValueError, TypeError):
+        pass
+
+    # Fall back to loader_settings (from workflow/Photopea export)
+    if target_width is None or target_height is None:
+        if loader_settings and len(loader_settings) > 0:
+            first_setting = loader_settings[0]
+            if first_setting.get('resize') and first_setting.get('width') and first_setting.get('height'):
+                target_width = int(first_setting['width'])
+                target_height = int(first_setting['height'])
+                print(f"[{execution_id}] Using dimensions from loader_settings (workflow): {target_width}x{target_height}")
+
+    # Final fallback to default dimensions
+    if target_width is None or target_height is None:
+        target_width = 768
+        target_height = 768
+        print(f"[{execution_id}] Using default dimensions: {target_width}x{target_height}")
+
+    if load_and_resize_keys:
+        try:
+            for node_key in load_and_resize_keys:
+                if node_key in prompt:
+                    node_inputs = prompt[node_key].setdefault('inputs', {})
+                    # Debug: Show current state
+                    print(f"[{execution_id}] DEBUG LoadAndResizeImage node {node_key} BEFORE fix: resize={node_inputs.get('resize')}, width={node_inputs.get('width')}, height={node_inputs.get('height')}, keep_proportion={node_inputs.get('keep_proportion')}")
+
+                    # ALWAYS override to ensure correct dimensions
+                    node_inputs['resize'] = True
+                    node_inputs['width'] = target_width
+                    node_inputs['height'] = target_height
+                    # Disable keep_proportion to ensure exact dimensions
+                    node_inputs['keep_proportion'] = False
+
+                    print(f"[{execution_id}] DEBUG LoadAndResizeImage node {node_key} AFTER fix: resize={node_inputs['resize']}, width={node_inputs['width']}, height={node_inputs['height']}, keep_proportion={node_inputs['keep_proportion']}")
+                    print(f"[{execution_id}] Configured LoadAndResizeImage node {node_key} resize to {target_width}x{target_height}")
+        except (ValueError, TypeError) as exc:
+            print(f"[{execution_id}] Warning: unable to configure LoadAndResizeImage dimensions: {exc}")
+
+    # DEBUG: Dump final LoadAndResizeImage configuration before sending to queue
+    for node_key in load_and_resize_keys:
+        if node_key in prompt:
+            node_data = prompt[node_key]
+            print(f"[{execution_id}] DEBUG FINAL prompt node {node_key} class_type={node_data.get('class_type')}")
+            print(f"[{execution_id}] DEBUG FINAL prompt node {node_key} inputs={node_data.get('inputs')}")
+
+    # CRITICAL FIX: Override EmptyLatentImage dimensions using the same target dimensions
+    # This ensures EmptyLatentImage uses the correct dimensions from loader_settings
+    empty_latent_keys = find_all_keys_by_class_type(prompt, 'EmptyLatentImage')
+    if empty_latent_keys and target_width and target_height:
+        try:
+            for node_key in empty_latent_keys:
+                if node_key in prompt:
+                    node_inputs = prompt[node_key].setdefault('inputs', {})
+                    print(f"[{execution_id}] DEBUG EmptyLatentImage node {node_key} BEFORE: width={node_inputs.get('width')}, height={node_inputs.get('height')}, batch_size={node_inputs.get('batch_size')}")
+
+                    # Override with direct values from target dimensions, breaking any links
+                    node_inputs['width'] = target_width
+                    node_inputs['height'] = target_height
+                    # CRITICAL: Fix batch_size - it gets corrupted during workflow conversion
+                    node_inputs['batch_size'] = 1
+
+                    print(f"[{execution_id}] DEBUG EmptyLatentImage node {node_key} AFTER: width={node_inputs['width']}, height={node_inputs['height']}, batch_size={node_inputs['batch_size']}")
+                    print(f"[{execution_id}] Configured EmptyLatentImage node {node_key} to {target_width}x{target_height} batch_size=1 (breaking links)")
+        except (ValueError, TypeError) as exc:
+            print(f"[{execution_id}] Warning: unable to configure EmptyLatentImage dimensions: {exc}")
+
+    # DEBUG: Dump ALL node configurations to see what's being sent
+    print(f"[{execution_id}] ===== DUMPING COMPLETE PROMPT =====")
+    for node_key, node_data in prompt.items():
+        node_type = node_data.get('class_type', 'unknown')
+        # Only show nodes relevant to latent generation
+        if node_type in ['EmptyLatentImage', 'VAEEncode', 'SetLatentNoiseMask', 'LazySwitchKJ', 'LoadAndResizeImage', 'KSampler']:
+            print(f"[{execution_id}] Node {node_key} ({node_type}): {node_data.get('inputs', {})}")
+    print(f"[{execution_id}] ===== END PROMPT DUMP =====")
+
     try:
         prompt_id = start_queue(prompt, client_id=queue_client_id)
         if prompt_id is None:
@@ -2101,8 +2149,7 @@ def run_queued_tasks(inputimage1, input_video, *dynamic_args, queue_count=1, pro
 
     # Helper function to convert update dict to tuple matching outputs order
     # outputs=[queue_status_display, output_gallery, output_video, main_output_tabs_component,
-    #          live_preview_image, live_preview_status, selected_gallery_image_state,
-    #          photopea_image_data_state, photopea_data_bus, photopea_status]
+    #          live_preview_image, live_preview_status, selected_gallery_image_state]
     def dict_to_tuple(update_dict):
         try:
             result = (
@@ -2112,15 +2159,12 @@ def run_queued_tasks(inputimage1, input_video, *dynamic_args, queue_count=1, pro
                 update_dict.get("tabs", gr.update()),
                 update_dict.get("preview_img", gr.update()),
                 update_dict.get("preview_status", gr.update()),
-                update_dict.get("selected_state", None),
-                update_dict.get("photopea_state", None),
-                update_dict.get("photopea_bus", gr.update()),
-                update_dict.get("photopea_status", gr.update())
+                update_dict.get("selected_state", None)
             )
             return result
         except Exception as e:
             log_message(f"[ERROR] dict_to_tuple failed: {e}")
-            return (gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), None, None, gr.update(), gr.update())
+            return (gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), None)
 
     unpacked_inputs = _split_run_inputs(dynamic_args)
     dynamic_positive_prompts_values = unpacked_inputs["positive_prompts"]
@@ -2190,8 +2234,7 @@ def run_queued_tasks(inputimage1, input_video, *dynamic_args, queue_count=1, pro
 
     # Prepare initial updates as tuple matching outputs order:
     # outputs=[queue_status_display, output_gallery, output_video, main_output_tabs_component,
-    #          live_preview_image, live_preview_status, selected_gallery_image_state,
-    #          photopea_image_data_state, photopea_data_bus, photopea_status]
+    #          live_preview_image, live_preview_status, selected_gallery_image_state]
     with results_lock:
         initial_gallery = accumulated_image_results[:]
         initial_video = last_video_result
@@ -2203,10 +2246,7 @@ def run_queued_tasks(inputimage1, input_video, *dynamic_args, queue_count=1, pro
         gr.Tabs(selected="tab_generate_result"),  # main_output_tabs_component
         gr.update(),  # live_preview_image (no change)
         gr.update(),  # live_preview_status (no change)
-        None,  # selected_gallery_image_state (no change)
-        None,  # photopea_image_data_state (no change)
-        gr.update(),  # photopea_data_bus (no change)
-        gr.update()  # photopea_status (no change)
+        None  # selected_gallery_image_state (no change)
     )
 
     # Check if worker is already active - if so, skip starting a new one
@@ -2349,11 +2389,7 @@ def run_queued_tasks(inputimage1, input_video, *dynamic_args, queue_count=1, pro
                             if final_preview is not None:
                                 update_dict["preview_img"] = gr.update(value=final_preview)
                                 update_dict["preview_status"] = gr.update(value=f"Final image ready • {os.path.basename(latest_display_path)}")
-                                encoded_preview = _encode_pil_to_data_url(final_preview)
                                 update_dict["selected_state"] = latest_display_path
-                                update_dict["photopea_state"] = encoded_preview
-                                update_dict["photopea_bus"] = gr.update(value=encoded_preview or "")
-                                update_dict["photopea_status"] = gr.update(value="Latest result synced. Open Photopea to edit.")
                     else:
                         last_video_result = _ensure_absolute_path(new_paths[0])
                         accumulated_image_results = []
@@ -2475,9 +2511,8 @@ def clear_history():
 # Combine imported HACKER_CSS with monitor CSS
 combined_css = "\n".join([HACKER_CSS, monitor_css, UI_THEME_CSS])
 
-with gr.Blocks(css=combined_css) as demo:
+with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
     selected_gallery_image_state = gr.State(value=None)
-    photopea_image_data_state = gr.State(value=None)
     theme_bootstrap = gr.HTML(THEME_BOOTSTRAP_HTML, visible=False)
 
     with gr.Tabs(elem_id="hua-main-tabs"):
@@ -2525,8 +2560,6 @@ with gr.Blocks(css=combined_css) as demo:
                             if GRADIO_IMAGE_SUPPORTS_SOURCES:
                                 fallback_kwargs["sources"] = ["upload", "clipboard"]
                             input_image = gr.Image(**fallback_kwargs)
-                        upload_to_photopea_button = gr.Button("🎨 Send to Photopea", variant="secondary", size="sm")
-                        upload_photopea_js_trigger = gr.HTML("", visible=False)
 
                     with gr.Accordion("Upload Video", open=False, visible=False) as video_accordion:
                         video_kwargs = {
@@ -2764,8 +2797,6 @@ with gr.Blocks(css=combined_css) as demo:
                                     )
                                     with gr.Row():
                                         send_to_upload_button = gr.Button("📤 Send to Upload", size="sm", variant="secondary")
-                                        send_to_photopea_button = gr.Button("🎨 Send to Photopea", size="sm", variant="secondary")
-                                    photopea_js_trigger = gr.HTML("", visible=False)
                                     video_output_kwargs = {
                                         "label": "Video Results",
                                         "height": 720,
@@ -2799,14 +2830,11 @@ with gr.Blocks(css=combined_css) as demo:
                             load_output_button = gr.Button("Load Output Images")
         with gr.TabItem("Photopea Editor", id="tab_photopea_editor"):
             with gr.Column():
-                gr.Markdown("### Photopea Editor")
-                photopea_status = gr.Markdown("Load or select an image, then send it to Photopea for detailed edits.", elem_id="photopea-status")
+                gr.Markdown("### Photopea Editor\nEdit images in Photopea and transfer them to/from the Upload field.")
                 with gr.Row():
-                    load_photopea_button = gr.Button("Send to Photopea", variant="secondary", elem_id="hua-photopea-send")
-                    photopea_fetch_button = gr.Button("Import from Photopea", variant="secondary", elem_id="hua-photopea-fetch")
+                    photopea_send_upload_btn = gr.Button("📤 Send Upload Image → Photopea", variant="secondary")
+                    photopea_import_btn = gr.Button("📥 Export Photopea → Upload", variant="primary")
                 photopea_html_panel = gr.HTML(PHOTOPEA_EMBED_HTML, elem_id="photopea-embed", elem_classes=["hua-photopea-html"])
-                photopea_data_bus = gr.Textbox(value="", visible=False, interactive=False, elem_id="hua-photopea-data-store")
-                photopea_import_box = gr.Textbox(visible=False, elem_id="photopea-import-data")
         with gr.TabItem("Settings", id="tab_settings"):
             with gr.Column():
                 with gr.Accordion("Live Logs (ComfyUI)", open=False, elem_classes="log-display-container"):
@@ -3238,8 +3266,7 @@ with gr.Blocks(css=combined_css) as demo:
             *KSAMPLER_COMPONENTS_FLAT,
             *MASK_ACCORDION_COMPONENTS,
             *MASK_COMPONENTS_FLAT,
-            mask_generator_notice,
-            photopea_data_bus
+            mask_generator_notice
         ]
     )
 
@@ -3284,14 +3311,13 @@ with gr.Blocks(css=combined_css) as demo:
             *KSAMPLER_COMPONENTS_FLAT,
             *MASK_ACCORDION_COMPONENTS,
             *MASK_COMPONENTS_FLAT,
-            mask_generator_notice,
-            photopea_data_bus
+            mask_generator_notice
         ]
     )
 
     def handle_gallery_select(evt: gr.SelectData | None = None):
         if evt is None:
-            return gr.update(), None, None, ""
+            return gr.update(), None
 
         selected = getattr(evt, "value", None)
         candidate_path = None
@@ -3324,85 +3350,9 @@ with gr.Blocks(css=combined_css) as demo:
         except Exception:
             pil_for_component = pil_img
 
-        data_url = _encode_pil_to_data_url(pil_for_component)
         log_message(f"[GALLERY_SELECT] Forwarded '{candidate_path}' to image input.")
-        return gr.update(value=pil_for_component), candidate_path, data_url, (data_url or "")
+        return gr.update(value=pil_for_component), candidate_path
 
-    def sync_photopea_state(image_payload):
-        base_img, _ = _coerce_uploaded_image_to_pil(image_payload, "photopea-sync", return_mask=True)
-        if base_img is None:
-            return None, ""
-        try:
-            rgba = base_img.convert("RGBA")
-        except Exception:
-            rgba = base_img
-        data_url = _encode_pil_to_data_url(rgba)
-        return data_url, data_url or ""
-
-    def notify_photopea_load(data_url):
-        if not data_url:
-            return gr.update(value="Please select or edit an image before sending it to Photopea.")
-        return gr.update(value="Image sent to Photopea. Switch to the editor above to start editing.")
-
-    def notify_photopea_request():
-        return gr.update(value="Waiting for Photopea to return the edited image...")
-
-    def ingest_photopea_payload(payload_str):
-        print(f"[PHOTOPEA] Received payload (length: {len(payload_str) if payload_str else 0})")
-        if not payload_str:
-            return gr.update(), None, "", gr.update(value=""), gr.update(value="Photopea did not return any data."), None
-
-        raw_data = payload_str
-        export_name = "photopea.png"
-        try:
-            parsed = json.loads(payload_str)
-            if isinstance(parsed, dict):
-                print(f"[PHOTOPEA] Parsed JSON payload with keys: {parsed.keys()}")
-                raw_data = parsed.get("data") or raw_data
-                export_name = parsed.get("name") or export_name
-                print(f"[PHOTOPEA] Export name: {export_name}, data length: {len(raw_data) if raw_data else 0}")
-        except json.JSONDecodeError as e:
-            print(f"[PHOTOPEA] Failed to parse as JSON, using raw data: {e}")
-            pass
-
-        if not raw_data:
-            print("[PHOTOPEA] Error: Empty data received")
-            return gr.update(), None, "", gr.update(value=""), gr.update(value="Received empty data from Photopea."), None
-
-        try:
-            # Handle data URL format (data:image/png;base64,...)
-            if raw_data.startswith("data:"):
-                print("[PHOTOPEA] Detected data URL format, extracting base64...")
-                raw_data = raw_data.split(",", 1)[1] if "," in raw_data else raw_data
-
-            binary = base64.b64decode(raw_data)
-            print(f"[PHOTOPEA] Decoded {len(binary)} bytes of image data")
-            with Image.open(io.BytesIO(binary)) as pil_img:
-                converted = pil_img.convert("RGBA")
-            print(f"[PHOTOPEA] Successfully loaded image: {converted.width}x{converted.height}")
-            data_url = _encode_pil_to_data_url(converted)
-            status_msg = f"Imported '{export_name}' from Photopea ({converted.width}x{converted.height})."
-            print(f"[PHOTOPEA] {status_msg}")
-            return (
-                gr.update(value=converted),
-                data_url,
-                data_url or "",
-                gr.update(value=""),
-                gr.update(value=status_msg),
-                "photopea_import",
-            )
-        except Exception as exc:
-            print(f"[PHOTOPEA] Error importing from Photopea: {exc}")
-            import traceback
-            traceback.print_exc()
-            return (
-                gr.update(),
-                None,
-                "",
-                gr.update(value=""),
-                gr.update(value=f"Failed to import from Photopea: {exc}"),
-                None,
-            )
 
     def send_latest_to_upload():
         """Send latest gallery image to upload input."""
@@ -3429,87 +3379,6 @@ with gr.Blocks(css=combined_css) as demo:
             log_message(f"[FORWARD] Error loading latest image: {exc}")
             return gr.update()
 
-    def send_selected_to_photopea(photopea_data):
-        """Send selected gallery image to Photopea."""
-        if not photopea_data:
-            return gr.update(value="Please select an image from the gallery first."), gr.update(), gr.update()
-        log_message(f"[FORWARD] Sending selected image to Photopea (data length: {len(photopea_data) if photopea_data else 0}).")
-
-        # Trigger JavaScript to open in Photopea
-        js_trigger = """<script>
-        console.log("[FORWARD-JS] Script trigger executed");
-        (function() {
-            setTimeout(function() {
-                console.log("[FORWARD-JS] Timeout fired");
-                const dataInput = (window.gradioApp ? window.gradioApp() : document).querySelector('#hua-photopea-data-store textarea');
-                console.log("[FORWARD-JS] Data input element:", dataInput);
-                if (!dataInput) {
-                    console.error("[FORWARD] Could not find #hua-photopea-data-store textarea");
-                    alert("Error: Photopea data store not found");
-                    return;
-                }
-                const dataUrl = dataInput.value;
-                console.log("[FORWARD-JS] Data URL length:", dataUrl ? dataUrl.length : 0);
-                if (!dataUrl) {
-                    console.warn("[FORWARD] No data in photopea data store");
-                    alert("No image data available. Please upload or generate an image first.");
-                    return;
-                }
-
-                console.log("[FORWARD-JS] Checking for huaPhotopeaBridge:", window.huaPhotopeaBridge);
-                if (window.huaPhotopeaBridge && window.huaPhotopeaBridge.open) {
-                    console.log("[FORWARD] Calling huaPhotopeaBridge.open");
-                    window.huaPhotopeaBridge.open(dataUrl, false);
-                    console.log("[FORWARD] Called huaPhotopeaBridge.open");
-                } else {
-                    console.error("[FORWARD] Photopea bridge not available. window.huaPhotopeaBridge =", window.huaPhotopeaBridge);
-                    alert("Error: Photopea not loaded. Please switch to the Photopea tab first.");
-                }
-            }, 200);
-        })();
-        </script>"""
-        return gr.update(value="Image sent to Photopea. Switch to the Photopea tab to edit."), gr.update(value=js_trigger), gr.update(value=photopea_data)
-
-    def send_upload_to_photopea(photopea_data):
-        """Send current upload image to Photopea."""
-        if not photopea_data:
-            return gr.update(value="Please upload an image first."), gr.update(), gr.update()
-        log_message(f"[FORWARD] Sending upload image to Photopea (data length: {len(photopea_data) if photopea_data else 0}).")
-
-        # Trigger JavaScript to open in Photopea
-        js_trigger = """<script>
-        console.log("[FORWARD-JS UPLOAD] Script trigger executed");
-        (function() {
-            setTimeout(function() {
-                console.log("[FORWARD-JS UPLOAD] Timeout fired");
-                const dataInput = (window.gradioApp ? window.gradioApp() : document).querySelector('#hua-photopea-data-store textarea');
-                console.log("[FORWARD-JS UPLOAD] Data input element:", dataInput);
-                if (!dataInput) {
-                    console.error("[FORWARD UPLOAD] Could not find #hua-photopea-data-store textarea");
-                    alert("Error: Photopea data store not found");
-                    return;
-                }
-                const dataUrl = dataInput.value;
-                console.log("[FORWARD-JS UPLOAD] Data URL length:", dataUrl ? dataUrl.length : 0);
-                if (!dataUrl) {
-                    console.warn("[FORWARD UPLOAD] No data in photopea data store");
-                    alert("No image data available. Please upload an image first.");
-                    return;
-                }
-
-                console.log("[FORWARD-JS UPLOAD] Checking for huaPhotopeaBridge:", window.huaPhotopeaBridge);
-                if (window.huaPhotopeaBridge && window.huaPhotopeaBridge.open) {
-                    console.log("[FORWARD UPLOAD] Calling huaPhotopeaBridge.open");
-                    window.huaPhotopeaBridge.open(dataUrl, false);
-                    console.log("[FORWARD UPLOAD] Called huaPhotopeaBridge.open");
-                } else {
-                    console.error("[FORWARD UPLOAD] Photopea bridge not available. window.huaPhotopeaBridge =", window.huaPhotopeaBridge);
-                    alert("Error: Photopea not loaded. Please switch to the Photopea tab first.");
-                }
-            }, 200);
-        })();
-        </script>"""
-        return gr.update(value="Image sent to Photopea. Switch to the Photopea tab to edit."), gr.update(value=js_trigger), gr.update(value=photopea_data)
 
     def _format_bytes_from_kb(kilobytes: float | int | None) -> str:
         try:
@@ -3881,13 +3750,13 @@ with gr.Blocks(css=combined_css) as demo:
     output_gallery.select(
         fn=handle_gallery_select,
         inputs=[],
-        outputs=[input_image, selected_gallery_image_state, photopea_image_data_state, photopea_data_bus]
+        outputs=[input_image, selected_gallery_image_state]
     )
 
     output_preview_gallery.select(
         fn=handle_gallery_select,
         inputs=[],
-        outputs=[input_image, selected_gallery_image_state, photopea_image_data_state, photopea_data_bus]
+        outputs=[input_image, selected_gallery_image_state]
     )
 
     # Image forwarding buttons
@@ -3897,111 +3766,9 @@ with gr.Blocks(css=combined_css) as demo:
         outputs=[input_image]
     )
 
-    send_to_photopea_button.click(
-        fn=lambda data: (
-            gr.update(value="Image sent to Photopea!" if data else "No image data available"),
-            gr.update(value=data if data else "")
-        ),
-        inputs=[photopea_image_data_state],
-        outputs=[photopea_status, photopea_data_bus]
-    ).then(
-        fn=None,
-        inputs=None,
-        outputs=None,
-        js="""
-        () => {
-            console.log("[PHOTOPEA-GALLERY] Send to Photopea triggered");
-            setTimeout(() => {
-                const dataInput = (window.gradioApp ? window.gradioApp() : document).querySelector('#hua-photopea-data-store textarea');
-                if (!dataInput || !dataInput.value) {
-                    console.error("[PHOTOPEA-GALLERY] No data in store");
-                    alert("No image data found. Please generate or upload an image first.");
-                    return;
-                }
-                const dataUrl = dataInput.value;
-                console.log("[PHOTOPEA-GALLERY] Data URL length:", dataUrl.length);
-
-                if (window.huaPhotopeaBridge && window.huaPhotopeaBridge.open) {
-                    console.log("[PHOTOPEA-GALLERY] Opening in Photopea");
-                    window.huaPhotopeaBridge.open(dataUrl, false);
-                    alert("Image opened in Photopea! Switch to the Photopea tab to edit.");
-                } else {
-                    console.error("[PHOTOPEA-GALLERY] Bridge not available");
-                    alert("Photopea not ready. Please go to the Photopea tab first to initialize it.");
-                }
-            }, 200);
-        }
-        """
-    )
-
-    upload_to_photopea_button.click(
-        fn=lambda data: (
-            gr.update(value="Image sent to Photopea!" if data else "No image data available"),
-            gr.update(value=data if data else "")
-        ),
-        inputs=[photopea_image_data_state],
-        outputs=[photopea_status, photopea_data_bus]
-    ).then(
-        fn=None,
-        inputs=None,
-        outputs=None,
-        js="""
-        () => {
-            console.log("[PHOTOPEA-UPLOAD] Send to Photopea triggered");
-            setTimeout(() => {
-                const dataInput = (window.gradioApp ? window.gradioApp() : document).querySelector('#hua-photopea-data-store textarea');
-                if (!dataInput || !dataInput.value) {
-                    console.error("[PHOTOPEA-UPLOAD] No data in store");
-                    alert("No image data found. Please upload an image first.");
-                    return;
-                }
-                const dataUrl = dataInput.value;
-                console.log("[PHOTOPEA-UPLOAD] Data URL length:", dataUrl.length);
-
-                if (window.huaPhotopeaBridge && window.huaPhotopeaBridge.open) {
-                    console.log("[PHOTOPEA-UPLOAD] Opening in Photopea");
-                    window.huaPhotopeaBridge.open(dataUrl, false);
-                    alert("Image opened in Photopea! Switch to the Photopea tab to edit.");
-                } else {
-                    console.error("[PHOTOPEA-UPLOAD] Bridge not available");
-                    alert("Photopea not ready. Please go to the Photopea tab first to initialize it.");
-                }
-            }, 200);
-        }
-        """
-    )
-
-    photopea_sync_events = [getattr(input_image, "change", None), getattr(input_image, "upload", None)]
-    if hasattr(input_image, "edit"):
-        photopea_sync_events.append(getattr(input_image, "edit"))
-    for event_binding in photopea_sync_events:
-        if callable(event_binding):
-            event_binding(
-                fn=sync_photopea_state,
-                inputs=input_image,
-                outputs=[photopea_image_data_state, photopea_data_bus]
-            )
-
-    # Photopea tab buttons use automatic MutationObserver handlers from PHOTOPEA_EMBED_HTML
-    # These handlers are attached to elem_id="hua-photopea-send" and elem_id="hua-photopea-fetch"
-    # We only add status updates here
-    load_photopea_button.click(
-        fn=lambda data: gr.update(value="Image sent to Photopea editor!" if data else "No image data available. Generate or upload an image first."),
-        inputs=[photopea_data_bus],
-        outputs=[photopea_status]
-    )
-
-    photopea_fetch_button.click(
-        fn=lambda: gr.update(value="Exporting from Photopea..."),
-        inputs=[],
-        outputs=[photopea_status]
-    )
-
-    photopea_import_box.change(
-        fn=ingest_photopea_payload,
-        inputs=photopea_import_box,
-        outputs=[input_image, photopea_image_data_state, photopea_data_bus, photopea_import_box, photopea_status, selected_gallery_image_state]
-    )
+    # Photopea integration
+    photopea_send_upload_btn.click(fn=None, inputs=None, outputs=None, js=PHOTOPEA_SEND_JS)
+    photopea_import_btn.click(fn=None, inputs=None, outputs=None, js=PHOTOPEA_EXPORT_JS)
 
     civitai_save_key_button.click(
         fn=civitai_save_api_key,
@@ -4102,10 +3869,7 @@ with gr.Blocks(css=combined_css) as demo:
             main_output_tabs_component,
             live_preview_image,
             live_preview_status,
-            selected_gallery_image_state,
-            photopea_image_data_state,
-            photopea_data_bus,
-            photopea_status
+            selected_gallery_image_state
         ]
     )
     
@@ -4241,7 +4005,6 @@ with gr.Blocks(css=combined_css) as demo:
     # demo.load(fn=comfyui_previewer.start_worker, inputs=[], outputs=[], show_progress="hidden")
     # Starting after Gradio launch is more reliable
     # Alternatively call from on_load_setup
-
 
     # --- Gradio launch helper ---
 def luanch_gradio(demo_instance):  # receive demo instance
