@@ -692,6 +692,7 @@ def get_workflow_defaults_and_visibility(json_file, output_dir_path, current_res
             "cfg": _to_float(inputs.get("cfg", 8.0), 8.0),
             "sampler_name": inputs.get("sampler_name", ""),
             "scheduler": inputs.get("scheduler", ""),
+            "denoise": _to_float(inputs.get("denoise", 1.0), 1.0),
             "add_noise": inputs.get("add_noise", "enable"),
             "start_at_step": _to_int(inputs.get("start_at_step", 0), 0),
             "end_at_step": _to_int(inputs.get("end_at_step", 0), 0),

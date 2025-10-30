@@ -31,6 +31,8 @@ from .kelnel_ui.ui_def import ( # workflow helpers
     find_closest_preset,
     get_output_images,
     find_all_nodes_by_class_type,
+    CHECKPOINT_NODE_CLASSES,
+    UNET_NODE_CLASSES,
     # fuck, # Removed as it's deprecated and its logic is integrated elsewhere
     get_workflow_defaults_and_visibility,
     load_prompt_from_file,
@@ -52,6 +54,7 @@ print(f"Plugin start: max dynamic components loaded from settings: {MAX_DYNAMIC_
 
 # --- UI configuration limits ---
 MAX_KSAMPLER_CONTROLS = 4
+KSAMPLER_FIELD_COUNT = 10  # steps, cfg, sampler, scheduler, denoise, start, end, add_noise, return_leftover, seed
 MAX_MASK_GENERATORS = 2
 MAX_IMAGE_LOADERS = 6
 MASK_FIELD_COUNT = 7  # face, background, hair, body, clothes, confidence, refine
@@ -657,18 +660,59 @@ def _register_event_with_optional_js(register_fn, *, fn, inputs, outputs, js_cod
     return register_fn(**kwargs)
 
 # Helper to locate node by class_type
+def _normalize_class_type_query(class_type):
+    if isinstance(class_type, str):
+        return {class_type}
+    try:
+        return {ctype for ctype in class_type if ctype}
+    except TypeError:
+        return {class_type} if class_type else set()
+
+
+def _sanitize_load_and_resize_inputs(node_inputs):
+    """Ensure LoadAndResizeImage inputs don't send nulls to ComfyUI validation."""
+    if not isinstance(node_inputs, dict):
+        return
+    int_defaults = {
+        "divisible_by": 2,
+        "repeat": 1,
+    }
+    for field, default in int_defaults.items():
+        value = node_inputs.get(field)
+        if value in (None, "", "None"):
+            node_inputs[field] = default
+        else:
+            try:
+                node_inputs[field] = int(value)
+            except (ValueError, TypeError):
+                node_inputs[field] = default
+
+    if node_inputs.get("mask_channel") in (None, "", "None"):
+        node_inputs["mask_channel"] = "alpha"
+    if node_inputs.get("background_color") in (None, "None"):
+        node_inputs["background_color"] = ""
+    if node_inputs.get("upload") in (None, "", "None"):
+        node_inputs.pop("upload", None)
+
+
 def find_key_by_class_type(prompt, class_type):
+    target_types = _normalize_class_type_query(class_type)
+    if not target_types:
+        return None
     for key, value in prompt.items():
-        # direct class_type check
-        if isinstance(value, dict) and value.get("class_type") == class_type:
+        if isinstance(value, dict) and value.get("class_type") in target_types:
             return key
     return None
 
+
 def find_all_keys_by_class_type(prompt, class_type):
     """Find ALL nodes matching class_type, not just the first one."""
+    target_types = _normalize_class_type_query(class_type)
+    if not target_types:
+        return []
     matches = []
     for key, value in prompt.items():
-        if isinstance(value, dict) and value.get("class_type") == class_type:
+        if isinstance(value, dict) and value.get("class_type") in target_types:
             matches.append(key)
     return matches
 
@@ -1444,23 +1488,35 @@ def _parse_ksampler_settings(workflow_info, flat_values):
             return default
 
     for idx in range(MAX_KSAMPLER_CONTROLS):
-        base = idx * 9
-        fields = list(flat_values[base:base + 9])
-        while len(fields) < 9:
+        base = idx * KSAMPLER_FIELD_COUNT
+        fields = list(flat_values[base:base + KSAMPLER_FIELD_COUNT])
+        while len(fields) < KSAMPLER_FIELD_COUNT:
             fields.append(None)
 
-        steps_val, cfg_val, sampler_val, scheduler_val, start_step_val, end_step_val, add_noise_val, return_leftover_val, noise_seed_val = fields[:9]
+        (
+            steps_val,
+            cfg_val,
+            sampler_val,
+            scheduler_val,
+            denoise_val,
+            start_step_val,
+            end_step_val,
+            add_noise_val,
+            return_leftover_val,
+            noise_seed_val,
+        ) = fields[:KSAMPLER_FIELD_COUNT]
         source_node_data = dynamic_data[idx] if idx < len(dynamic_data) else {}
 
         settings.append({
-            "steps": _coerce_int(steps_val, 20),
-            "cfg": _coerce_float(cfg_val, 7.0),
-            "sampler_name": sampler_val if isinstance(sampler_val, str) else (sampler_val or ""),
-            "scheduler": scheduler_val if isinstance(scheduler_val, str) else (scheduler_val or ""),
-            "start_at_step": _coerce_int(start_step_val, 0),
-            "end_at_step": _coerce_int(end_step_val, 0),
-            "add_noise": add_noise_val or "enable",
-            "return_with_leftover_noise": return_leftover_val or "disable",
+            "steps": _coerce_int(steps_val, source_node_data.get("steps", 20)),
+            "cfg": _coerce_float(cfg_val, source_node_data.get("cfg", 7.0)),
+            "sampler_name": sampler_val if isinstance(sampler_val, str) else (sampler_val or source_node_data.get("sampler_name", "")),
+            "scheduler": scheduler_val if isinstance(scheduler_val, str) else (scheduler_val or source_node_data.get("scheduler", "")),
+            "denoise": _coerce_float(denoise_val, source_node_data.get("denoise", 1.0)),
+            "start_at_step": _coerce_int(start_step_val, source_node_data.get("start_at_step", 0)),
+            "end_at_step": _coerce_int(end_step_val, source_node_data.get("end_at_step", 0)),
+            "add_noise": add_noise_val or source_node_data.get("add_noise", "enable"),
+            "return_with_leftover_noise": return_leftover_val or source_node_data.get("return_with_leftover_noise", "disable"),
             "seed_value": noise_seed_val,
             "seed_field": source_node_data.get("seed_field", "noise_seed"),
         })
@@ -1632,8 +1688,8 @@ def generate_image(
     seed_key = find_key_by_class_type(prompt, 'Hua_gradio_Seed')
     text_bad_key = find_key_by_class_type(prompt, 'GradioTextBad')
     resolution_key = find_key_by_class_type(prompt, 'Hua_gradio_resolution')
-    checkpoint_key = find_key_by_class_type(prompt, 'Hua_CheckpointLoaderSimple')
-    unet_key = find_key_by_class_type(prompt, 'Hua_UNETLoader')
+    checkpoint_keys = find_all_keys_by_class_type(prompt, CHECKPOINT_NODE_CLASSES)
+    unet_keys = find_all_keys_by_class_type(prompt, UNET_NODE_CLASSES)
     hua_output_key = find_key_by_class_type(prompt, 'Hua_Output')
     hua_video_output_key = find_key_by_class_type(prompt, 'Hua_Video_Output')
 
@@ -1646,17 +1702,68 @@ def generate_image(
         if base_img is not None:
             try:
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                inputfilename = f"gradio_input_{timestamp}_{random.randint(100, 999)}.png"
-                save_path = os.path.join(INPUT_DIR, inputfilename)
-                base_img.convert('RGBA').save(save_path)
 
-                # Set the image parameter on ALL image input nodes
-                for node_key in all_image_input_keys:
-                    prompt[node_key].setdefault('inputs', {})['image'] = inputfilename
-                    node_type = prompt[node_key].get('class_type', 'unknown')
-                    print(f"[{execution_id}] Updated node {node_key} ({node_type}) with input image")
+                # For LoadAndResizeImage nodes, we need to composite the mask into the alpha channel
+                # because LoadAndResizeImage extracts the mask FROM the alpha channel
+                has_load_and_resize = any(prompt[key].get('class_type') == 'LoadAndResizeImage' for key in all_image_input_keys if key in prompt)
 
-                print(f"[{execution_id}] Saved input image to {save_path} (updated {len(all_image_input_keys)} nodes)")
+                if has_load_and_resize and mask_img is not None:
+                    # Create composited image with mask in alpha channel for LoadAndResizeImage
+                    inputfilename_masked = f"gradio_input_{timestamp}_{random.randint(100, 999)}_masked.png"
+                    save_path_masked = os.path.join(INPUT_DIR, inputfilename_masked)
+
+                    # Composite mask into base image alpha channel
+                    composited_img = base_img.convert('RGBA')
+                    mask_l = mask_img.convert('L')
+                    if mask_l.size != composited_img.size:
+                        mask_l = mask_l.resize(composited_img.size, Image.NEAREST)
+                        print(f"[{execution_id}] Resized mask to match input image {composited_img.size}")
+
+                    # INVERT the mask: user paints areas they WANT to change
+                    # But SetLatentNoiseMask uses white=preserve, black=change
+                    # So we invert: painted (white) -> black, unpainted (black) -> white
+                    mask_inverted = mask_l.point(lambda px: 255 - px)
+
+                    # Set the inverted mask as the alpha channel
+                    composited_img.putalpha(mask_inverted)
+                    composited_img.save(save_path_masked)
+
+                    # Count painted pixels for verification
+                    painted = sum(1 for px in mask_l.getdata() if px > 8)
+                    inverted_painted = sum(1 for px in mask_inverted.getdata() if px < 247)
+                    print(f"[{execution_id}] Inverted and composited mask into alpha channel: painted_pixels={painted}/{mask_l.size[0]*mask_l.size[1]} (inverted_to={inverted_painted})")
+                    print(f"[{execution_id}] Saved masked image to {save_path_masked}")
+
+                    # Use the masked image for LoadAndResizeImage nodes
+                    for node_key in load_and_resize_keys:
+                        if node_key in prompt:
+                            prompt[node_key].setdefault('inputs', {})['image'] = inputfilename_masked
+                            print(f"[{execution_id}] Updated LoadAndResizeImage node {node_key} with masked image")
+
+                    # Save regular image for non-LoadAndResizeImage nodes
+                    regular_nodes = [k for k in all_image_input_keys if k not in load_and_resize_keys]
+                    if regular_nodes:
+                        inputfilename = f"gradio_input_{timestamp}_{random.randint(100, 999)}.png"
+                        save_path = os.path.join(INPUT_DIR, inputfilename)
+                        base_img.convert('RGBA').save(save_path)
+
+                        for node_key in regular_nodes:
+                            prompt[node_key].setdefault('inputs', {})['image'] = inputfilename
+                            node_type = prompt[node_key].get('class_type', 'unknown')
+                            print(f"[{execution_id}] Updated node {node_key} ({node_type}) with input image")
+                else:
+                    # No mask or no LoadAndResizeImage nodes - use regular behavior
+                    inputfilename = f"gradio_input_{timestamp}_{random.randint(100, 999)}.png"
+                    save_path = os.path.join(INPUT_DIR, inputfilename)
+                    base_img.convert('RGBA').save(save_path)
+
+                    # Set the image parameter on ALL image input nodes
+                    for node_key in all_image_input_keys:
+                        prompt[node_key].setdefault('inputs', {})['image'] = inputfilename
+                        node_type = prompt[node_key].get('class_type', 'unknown')
+                        print(f"[{execution_id}] Updated node {node_key} ({node_type}) with input image")
+
+                    print(f"[{execution_id}] Saved input image to {save_path} (updated {len(all_image_input_keys)} nodes)")
             except Exception as exc:
                 print(f"[{execution_id}] Failed to save input image: {exc}")
         if mask_img is not None:
@@ -1671,8 +1778,12 @@ def generate_image(
                         print(f"[{execution_id}] Resized mask to match input image {base_img.size}.")
                     except Exception as resize_exc:
                         print(f"[{execution_id}] Warning: failed to resize mask: {resize_exc}")
-                alpha_channel = ImageOps.invert(mask_l)
-                alpha_channel.save(saved_mask_path)
+                mask_alpha = mask_l.point(lambda px: 255 if px and px > 8 else 0)
+                painted = sum(1 for px in mask_alpha.getdata() if px)
+                print(f"[{execution_id}] Mask alpha stats min/max={mask_alpha.getextrema()} painted_pixels={painted}/{mask_alpha.size[0]*mask_alpha.size[1]}")
+                mask_rgba = Image.new("RGBA", mask_alpha.size, (0, 0, 0, 0))
+                mask_rgba.putalpha(mask_alpha)
+                mask_rgba.save(saved_mask_path)
                 print(f"[{execution_id}] Saved mask to {saved_mask_path}")
             except Exception as mask_exc:
                 print(f"[{execution_id}] Warning: unable to save mask payload: {mask_exc}")
@@ -1766,10 +1877,19 @@ def generate_image(
         except (ValueError, TypeError) as exc:
             print(f"[{execution_id}] Warning: unable to update resolution values: {exc}")
 
-    if checkpoint_key and hua_checkpoint != 'None':
-        prompt[checkpoint_key]['inputs']['ckpt_name'] = hua_checkpoint
-    if unet_key and hua_unet != 'None':
-        prompt[unet_key]['inputs']['unet_name'] = hua_unet
+    if checkpoint_keys and hua_checkpoint != 'None':
+        for checkpoint_key in checkpoint_keys:
+            prompt[checkpoint_key].setdefault('inputs', {})['ckpt_name'] = hua_checkpoint
+            print(f"[{execution_id}] Updated checkpoint node {checkpoint_key} to {hua_checkpoint}")
+    elif hua_checkpoint and hua_checkpoint != 'None':
+        print(f"[{execution_id}] Warning: checkpoint node not found in workflow; selection {hua_checkpoint} ignored.")
+
+    if unet_keys and hua_unet != 'None':
+        for unet_key in unet_keys:
+            prompt[unet_key].setdefault('inputs', {})['unet_name'] = hua_unet
+            print(f"[{execution_id}] Updated UNet node {unet_key} to {hua_unet}")
+    elif hua_unet and hua_unet != 'None':
+        print(f"[{execution_id}] Warning: UNet node not found in workflow; selection {hua_unet} ignored.")
 
     actual_lora_nodes = workflow_info['dynamic_components'].get('Hua_LoraLoaderModelOnly', [])
     for i, node_info in enumerate(actual_lora_nodes):
@@ -1851,6 +1971,7 @@ def generate_image(
                 node_inputs['cfg'] = settings['cfg']
                 node_inputs['sampler_name'] = settings['sampler_name']
                 node_inputs['scheduler'] = settings['scheduler']
+                node_inputs['denoise'] = settings['denoise']
                 node_inputs['start_at_step'] = settings['start_at_step']
                 node_inputs['end_at_step'] = settings['end_at_step']
                 node_inputs['add_noise'] = settings['add_noise']
@@ -1900,6 +2021,8 @@ def generate_image(
 
             # DEBUG: Show AFTER state for ImageLoader configuration
             print(f"[{execution_id}] DEBUG ImageLoader node {node_id} AFTER dynamic config: resize={node_inputs['resize']}, width={node_inputs['width']}, height={node_inputs['height']}")
+            if node_info.get('class_type') == 'LoadAndResizeImage':
+                _sanitize_load_and_resize_inputs(node_inputs)
 
     # IMPORTANT FIX: Determine correct dimensions for EmptyLatentImage
     # Priority: UI inputs (hua_width/hua_height) > loader_settings (workflow) > default (768x768)
@@ -1952,6 +2075,7 @@ def generate_image(
                     node_inputs['keep_proportion'] = False
 
                     print(f"[{execution_id}] DEBUG LoadAndResizeImage node {node_key} AFTER fix: resize={node_inputs['resize']}, width={node_inputs['width']}, height={node_inputs['height']}, keep_proportion={node_inputs['keep_proportion']}")
+                    _sanitize_load_and_resize_inputs(node_inputs)
                     print(f"[{execution_id}] Configured LoadAndResizeImage node {node_key} resize to {target_width}x{target_height}")
         except (ValueError, TypeError) as exc:
             print(f"[{execution_id}] Warning: unable to configure LoadAndResizeImage dimensions: {exc}")
@@ -2163,7 +2287,7 @@ def _split_run_inputs(raw_args):
     idx += 1
 
     advanced = list(args[idx:])
-    expected_ksampler = MAX_KSAMPLER_CONTROLS * 9
+    expected_ksampler = MAX_KSAMPLER_CONTROLS * KSAMPLER_FIELD_COUNT
     expected_mask = MAX_MASK_GENERATORS * MASK_FIELD_COUNT
     expected_advanced = expected_ksampler + expected_mask
     if len(advanced) < expected_advanced:
@@ -2883,6 +3007,7 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
                                 ks_cfg = gr.Slider(label="CFG", minimum=0.0, maximum=30.0, step=0.1, value=7.0, visible=True)
                                 ks_sampler = gr.Dropdown(choices=SAMPLER_NAME_CHOICES, allow_custom_value=True, label="Sampler", value="euler", visible=True)
                                 ks_scheduler = gr.Dropdown(choices=SCHEDULER_CHOICES, allow_custom_value=True, label="Scheduler", value="simple", visible=True)
+                                ks_denoise = gr.Slider(label="Denoise", minimum=0.0, maximum=1.0, step=0.01, value=1.0, visible=True)
                                 with gr.Row():
                                     ks_start = gr.Slider(label="Start Step", minimum=0, maximum=10000, step=1, value=0, visible=True)
                                     ks_end = gr.Slider(label="End Step", minimum=0, maximum=10000, step=1, value=0, visible=True)
@@ -2895,6 +3020,7 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
                                 "cfg": ks_cfg,
                                 "sampler": ks_sampler,
                                 "scheduler": ks_scheduler,
+                                "denoise": ks_denoise,
                                 "start": ks_start,
                                 "end": ks_end,
                                 "add_noise": ks_add_noise,
@@ -2907,6 +3033,7 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
                                 ks_cfg,
                                 ks_sampler,
                                 ks_scheduler,
+                                ks_denoise,
                                 ks_start,
                                 ks_end,
                                 ks_add_noise,
@@ -3379,6 +3506,7 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
                     gr.update(visible=True, value=cfg_value),
                     gr.update(visible=True, value=node_data.get("sampler_name", "")),
                     gr.update(visible=True, value=node_data.get("scheduler", "")),
+                    gr.update(visible=True, value=node_data.get("denoise", 1.0)),
                     gr.update(visible=True, value=node_data.get("start_at_step", 0)),
                     gr.update(visible=True, value=node_data.get("end_at_step", 0)),
                     gr.update(visible=True, value=node_data.get("add_noise", "enable")),
@@ -3392,6 +3520,7 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
                     gr.update(visible=False, value=7.0),
                     gr.update(visible=False, value=""),
                     gr.update(visible=False, value=""),
+                    gr.update(visible=False, value=1.0),
                     gr.update(visible=False, value=0),
                     gr.update(visible=False, value=0),
                     gr.update(visible=False, value="enable"),
@@ -4154,7 +4283,7 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
                 ])
             for _ in range(MAX_KSAMPLER_CONTROLS):
                 initial_updates.append(gr.update(visible=False, open=False))
-            for _ in range(MAX_KSAMPLER_CONTROLS * 9):
+            for _ in range(MAX_KSAMPLER_CONTROLS * KSAMPLER_FIELD_COUNT):
                 initial_updates.append(gr.update(visible=False))
             for _ in range(MAX_MASK_GENERATORS):
                 initial_updates.append(gr.update(visible=False))
