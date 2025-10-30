@@ -3106,9 +3106,7 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
                                     with gr.Row():
                                         clear_queue_button = gr.Button("Clear Queue", elem_id="align-center")
                                         clear_history_button = gr.Button("Clear History")
-                                    sponsor_button = gr.Button("Sponsor Author")
                                     queue_count = gr.Number(label="Queue Count", value=1, minimum=1, step=1, precision=0)
-                                    sponsor_display = gr.Markdown(visible=False)
                         with gr.Tab("Preview All Outputs", id="tab_all_outputs_preview"):
                             output_preview_gallery = gr.Gallery(
                                 label="Output Images Preview",
