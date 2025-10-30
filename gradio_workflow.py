@@ -2844,17 +2844,6 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
                             flip_btn = gr.Button("Swap Width/Height")
 
                     with gr.Row():
-                        queue_status_display = gr.Markdown("In Queue: 0 | Processing: No")
-
-                    with gr.Row():
-                        run_button = gr.Button("Generate (enqueue)", variant="primary", elem_id="align-center")
-                        clear_queue_button = gr.Button("Clear Queue", elem_id="align-center")
-                        clear_history_button = gr.Button("Clear History")
-                        sponsor_button = gr.Button("Sponsor Author")
-                        queue_count = gr.Number(label="Queue Count", value=1, minimum=1, step=1, precision=0)
-                    sponsor_display = gr.Markdown(visible=False)
-
-                    with gr.Row():
                         with gr.Column(scale=1, visible=False) as seed_options_col:
                             seed_mode_dropdown = gr.Dropdown(
                                 choices=["Random", "Increment", "Decrement", "Fixed"],
@@ -3110,6 +3099,16 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
                                         interactive=False,
                                         lines=2
                                     )
+
+                                    # Queue controls moved below preview for convenient access
+                                    queue_status_display = gr.Markdown("In Queue: 0 | Processing: No")
+                                    run_button = gr.Button("Generate (enqueue)", variant="primary", elem_id="align-center")
+                                    with gr.Row():
+                                        clear_queue_button = gr.Button("Clear Queue", elem_id="align-center")
+                                        clear_history_button = gr.Button("Clear History")
+                                    sponsor_button = gr.Button("Sponsor Author")
+                                    queue_count = gr.Number(label="Queue Count", value=1, minimum=1, step=1, precision=0)
+                                    sponsor_display = gr.Markdown(visible=False)
                         with gr.Tab("Preview All Outputs", id="tab_all_outputs_preview"):
                             output_preview_gallery = gr.Gallery(
                                 label="Output Images Preview",
@@ -3393,7 +3392,7 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
                 else:
                     label = f"{node_title} (ID: {node_id})"
 
-                updates.append(gr.update(visible=True, label=label, open=True))  # Accordion
+                updates.append(gr.update(visible=True, label=label, open=False))  # Accordion - closed by default
 
                 # Update each lora slot within this node
                 loras = node_data.get("loras", [])
