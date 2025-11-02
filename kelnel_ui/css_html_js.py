@@ -84,17 +84,21 @@ button[data-tooltip*="badge" i] {
 }
 
 /* Dropdown z-index - FORGE APPROACH (High priority for dropdowns) */
-.gradio-dropdown ul.options {
+.gradio-dropdown ul.options,
+.gradio-dropdown .options,
+div[class*="dropdown"] ul.options,
+div[class*="dropdown"] .options {
     z-index: 3000 !important;
     min-width: fit-content !important;
     max-width: inherit !important;
     white-space: nowrap !important;
+    position: absolute !important;
 }
 
-/* Fix z-index layering - much lower values, let dropdowns win */
+/* Fix z-index layering - left pane above right pane so dropdowns can overlap */
 .hua-pane-left {
     position: relative !important;
-    z-index: 1 !important;
+    z-index: 2 !important;
 }
 
 .hua-pane-right {

@@ -52,6 +52,155 @@ MAX_LORAS_PER_NODE = 5  # Maximum loras per power lora loader node
 print(f"Plugin start: max dynamic components loaded from settings: {MAX_DYNAMIC_COMPONENTS} (via kelnel_ui.ui_def)")
 # --- End initialization ---
 
+# Workflow state persistence helpers
+WORKFLOW_STATE_FILENAME = "workflow_state_cache.json"
+WORKFLOW_STATE_PATH = os.path.join(os.path.dirname(__file__), WORKFLOW_STATE_FILENAME)
+WORKFLOW_STATE_LOCK = Lock()
+WORKFLOW_STATE_COMPONENTS = []
+WORKFLOW_STATE_INPUT_COMPONENTS = []
+WORKFLOW_STATE_RESTORE_COMPONENTS = []
+_WORKFLOW_STATE_MISSING = object()
+
+
+def _read_workflow_state_cache():
+    if not os.path.exists(WORKFLOW_STATE_PATH):
+        return {}
+    try:
+        with open(WORKFLOW_STATE_PATH, "r", encoding="utf-8") as cache_file:
+            data = json.load(cache_file)
+            if isinstance(data, dict):
+                return data
+    except Exception as exc:
+        print(f"Workflow state cache read failed: {exc}")
+    return {}
+
+
+def _write_workflow_state_cache(cache_data):
+    try:
+        with open(WORKFLOW_STATE_PATH, "w", encoding="utf-8") as cache_file:
+            json.dump(cache_data, cache_file, indent=2)
+    except Exception as exc:
+        print(f"Workflow state cache write failed: {exc}")
+
+
+def _make_json_safe(value):
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, dict):
+        return {str(key): _make_json_safe(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_make_json_safe(item) for item in value]
+    return str(value)
+
+
+def _extract_choice_value(choice):
+    if isinstance(choice, dict):
+        for key in ("value", "name", "label", "id"):
+            if key in choice and choice[key] is not None:
+                return choice[key]
+        return None
+    if isinstance(choice, (list, tuple)):
+        return choice[0] if choice else None
+    for attr in ("value", "name", "label", "id"):
+        if hasattr(choice, attr):
+            candidate = getattr(choice, attr)
+            if candidate is not None:
+                return candidate
+    return choice
+
+
+def _collect_choice_values(component):
+    choices = getattr(component, "choices", None)
+    if not choices:
+        return None
+    try:
+        candidate_choices = list(choices)
+    except TypeError:
+        return None
+    extracted = []
+    for item in candidate_choices:
+        extracted_value = _extract_choice_value(item)
+        extracted.append(extracted_value)
+    return extracted
+
+
+def _value_in_choices(value, choice_values):
+    if choice_values is None or not choice_values:
+        return True
+    for candidate in choice_values:
+        if candidate == value:
+            return True
+        if isinstance(candidate, str) and isinstance(value, str) and candidate.strip() == value.strip():
+            return True
+        try:
+            if str(candidate) == str(value):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _remember_workflow_state(workflow_label, state_payload):
+    workflow_key = workflow_label or "__default__"
+    with WORKFLOW_STATE_LOCK:
+        cache = _read_workflow_state_cache()
+        if state_payload:
+            cache[workflow_key] = state_payload
+        else:
+            cache.pop(workflow_key, None)
+        _write_workflow_state_cache(cache)
+
+
+def get_saved_workflow_state(workflow_label):
+    workflow_key = workflow_label or "__default__"
+    with WORKFLOW_STATE_LOCK:
+        cache = _read_workflow_state_cache()
+        saved = cache.get(workflow_key)
+        return saved if isinstance(saved, dict) else None
+
+
+def remember_workflow_state_event(*values):
+    if not WORKFLOW_STATE_COMPONENTS:
+        return None
+
+    state_payload = {}
+    workflow_label = None
+
+    for (name, _component, store_flag, _restore_flag), value in zip(WORKFLOW_STATE_COMPONENTS, values):
+        if name == "workflow_label":
+            workflow_label = value
+        if not store_flag:
+            continue
+        state_payload[name] = _make_json_safe(value)
+
+    _remember_workflow_state(workflow_label, state_payload)
+    return None
+
+
+def restore_workflow_state_event(workflow_label):
+    if not WORKFLOW_STATE_RESTORE_COMPONENTS:
+        return tuple()
+
+    saved_state = get_saved_workflow_state(workflow_label)
+    if not saved_state:
+        return tuple(gr.update() for _ in WORKFLOW_STATE_RESTORE_COMPONENTS)
+
+    updates = []
+    for name, component in WORKFLOW_STATE_RESTORE_COMPONENTS:
+        saved_value = saved_state.get(name, _WORKFLOW_STATE_MISSING)
+        if saved_value is _WORKFLOW_STATE_MISSING:
+            updates.append(gr.update())
+            continue
+
+        choice_values = _collect_choice_values(component)
+        if not _value_in_choices(saved_value, choice_values):
+            print(f"Workflow restore skipped '{name}': '{saved_value}' not present in choices.")
+            updates.append(gr.update())
+            continue
+
+        updates.append(gr.update(value=saved_value))
+    return tuple(updates)
+
 # --- UI configuration limits ---
 MAX_KSAMPLER_CONTROLS = 4
 KSAMPLER_FIELD_COUNT = 10  # steps, cfg, sampler, scheduler, denoise, start, end, add_noise, return_leftover, seed
@@ -208,6 +357,16 @@ body[data-hua-theme] .gradio-container {
 
 .hua-pane .gradio-column {
     gap: calc(var(--hua-gap) * 0.6) !important;
+}
+
+.hua-pane-left {
+    position: relative;
+    z-index: 2;
+}
+
+.hua-pane-right {
+    position: relative;
+    z-index: 1;
 }
 
 #hua-image-input {
@@ -2819,6 +2978,12 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
                                     positive_prompt_texts.append(
                                         gr.Textbox(label=f"Prompt {i+1}", visible=False, elem_id=f"dynamic_positive_prompt_{i+1}")
                                     )
+                                restore_positive_prompt_button = gr.Button(
+                                    "Restore Saved Prompt",
+                                    variant="secondary",
+                                    size="sm",
+                                    elem_id="restore_positive_prompt_button"
+                                )
                         with gr.Column(scale=2):
                             with gr.Accordion("Negative Prompts", open=False) as negative_prompt_accordion:
                                 prompt_negative = gr.Textbox(label="Primary Negative Prompt", elem_id="prompt_negative")
@@ -3568,6 +3733,73 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
         return tuple(updates)
 
 
+    temp_state_components = []
+    temp_state_components.append(("input_image", input_image, False, False))
+    temp_state_components.append(("input_video", input_video, False, False))
+    for idx, component in enumerate(positive_prompt_texts):
+        temp_state_components.append((f"positive_prompt_{idx+1}", component, True, True))
+    temp_state_components.append(("prompt_negative", prompt_negative, True, True))
+    for idx, component in enumerate(negative_prompt_extras):
+        temp_state_components.append((f"negative_prompt_extra_{idx+1}", component, True, True))
+    temp_state_components.append(("workflow_label", json_dropdown, True, False))
+    temp_state_components.append(("hua_width", hua_width, True, True))
+    temp_state_components.append(("hua_height", hua_height, True, True))
+    for idx, component in enumerate(lora_dropdowns):
+        temp_state_components.append((f"lora_{idx+1}", component, True, True))
+    for node_idx in range(MAX_DYNAMIC_COMPONENTS):
+        for lora_idx in range(MAX_LORAS_PER_NODE):
+            power_entry = power_lora_components[node_idx][lora_idx]
+            base_name = f"power_lora_{node_idx+1}_{lora_idx+1}"
+            temp_state_components.append((f"{base_name}_enabled", power_entry["enabled"], True, True))
+            temp_state_components.append((f"{base_name}_model", power_entry["lora"], True, True))
+            temp_state_components.append((f"{base_name}_strength", power_entry["strength"], True, True))
+            temp_state_components.append((f"{base_name}_strength_clip", power_entry["strength_clip"], True, True))
+    temp_state_components.append(("hua_checkpoint", hua_checkpoint_dropdown, True, True))
+    temp_state_components.append(("hua_unet", hua_unet_dropdown, True, True))
+    for idx, component in enumerate(float_inputs):
+        temp_state_components.append((f"float_input_{idx+1}", component, True, True))
+    for idx, component in enumerate(int_inputs):
+        temp_state_components.append((f"int_input_{idx+1}", component, True, True))
+    for loader_idx in range(MAX_IMAGE_LOADERS):
+        base = f"image_loader_{loader_idx+1}"
+        offset = loader_idx * IMAGE_LOADER_FIELD_COUNT
+        temp_state_components.append((f"{base}_resize", IMAGE_LOADER_COMPONENTS_FLAT[offset], True, True))
+        temp_state_components.append((f"{base}_width", IMAGE_LOADER_COMPONENTS_FLAT[offset + 1], True, True))
+        temp_state_components.append((f"{base}_height", IMAGE_LOADER_COMPONENTS_FLAT[offset + 2], True, True))
+        temp_state_components.append((f"{base}_keep_proportion", IMAGE_LOADER_COMPONENTS_FLAT[offset + 3], True, True))
+        temp_state_components.append((f"{base}_divisible_by", IMAGE_LOADER_COMPONENTS_FLAT[offset + 4], True, True))
+    temp_state_components.append(("seed_mode", seed_mode_dropdown, True, True))
+    temp_state_components.append(("fixed_seed_value", fixed_seed_input, True, True))
+    temp_state_components.append(("queue_count", queue_count, True, True))
+    for ks_idx in range(MAX_KSAMPLER_CONTROLS):
+        offset = ks_idx * KSAMPLER_FIELD_COUNT
+        base = f"ksampler_{ks_idx+1}"
+        temp_state_components.append((f"{base}_steps", KSAMPLER_COMPONENTS_FLAT[offset], True, True))
+        temp_state_components.append((f"{base}_cfg", KSAMPLER_COMPONENTS_FLAT[offset + 1], True, True))
+        temp_state_components.append((f"{base}_sampler", KSAMPLER_COMPONENTS_FLAT[offset + 2], True, True))
+        temp_state_components.append((f"{base}_scheduler", KSAMPLER_COMPONENTS_FLAT[offset + 3], True, True))
+        temp_state_components.append((f"{base}_denoise", KSAMPLER_COMPONENTS_FLAT[offset + 4], True, True))
+        temp_state_components.append((f"{base}_start", KSAMPLER_COMPONENTS_FLAT[offset + 5], True, True))
+        temp_state_components.append((f"{base}_end", KSAMPLER_COMPONENTS_FLAT[offset + 6], True, True))
+        temp_state_components.append((f"{base}_add_noise", KSAMPLER_COMPONENTS_FLAT[offset + 7], True, True))
+        temp_state_components.append((f"{base}_return_leftover", KSAMPLER_COMPONENTS_FLAT[offset + 8], True, True))
+        temp_state_components.append((f"{base}_noise_seed", KSAMPLER_COMPONENTS_FLAT[offset + 9], True, True))
+    for mask_idx in range(MAX_MASK_GENERATORS):
+        offset = mask_idx * MASK_FIELD_COUNT
+        base = f"mask_generator_{mask_idx+1}"
+        temp_state_components.append((f"{base}_face", MASK_COMPONENTS_FLAT[offset], True, True))
+        temp_state_components.append((f"{base}_background", MASK_COMPONENTS_FLAT[offset + 1], True, True))
+        temp_state_components.append((f"{base}_hair", MASK_COMPONENTS_FLAT[offset + 2], True, True))
+        temp_state_components.append((f"{base}_body", MASK_COMPONENTS_FLAT[offset + 3], True, True))
+        temp_state_components.append((f"{base}_clothes", MASK_COMPONENTS_FLAT[offset + 4], True, True))
+        temp_state_components.append((f"{base}_confidence", MASK_COMPONENTS_FLAT[offset + 5], True, True))
+        temp_state_components.append((f"{base}_refine", MASK_COMPONENTS_FLAT[offset + 6], True, True))
+
+    WORKFLOW_STATE_COMPONENTS = temp_state_components
+    WORKFLOW_STATE_INPUT_COMPONENTS = [component for _, component, _, _ in WORKFLOW_STATE_COMPONENTS]
+    WORKFLOW_STATE_RESTORE_COMPONENTS = [
+        (name, component) for name, component, _store_flag, restore_flag in WORKFLOW_STATE_COMPONENTS if restore_flag
+    ]
 
     json_dropdown.change(
         fn=update_ui_on_json_change,
@@ -3647,6 +3879,15 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
             mask_generator_notice
         ]
     )
+
+    if restore_positive_prompt_button and WORKFLOW_STATE_RESTORE_COMPONENTS:
+        restore_outputs = [component for _name, component in WORKFLOW_STATE_RESTORE_COMPONENTS]
+        restore_positive_prompt_button.click(
+            fn=restore_workflow_state_event,
+            inputs=[json_dropdown],
+            outputs=restore_outputs,
+            queue=False
+        )
 
     def handle_gallery_select(evt: gr.SelectData | None = None):
         if evt is None:
@@ -4172,30 +4413,17 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
     )
 
     # --- Run button wiring ---
+    if WORKFLOW_STATE_INPUT_COMPONENTS:
+        run_button.click(
+            fn=remember_workflow_state_event,
+            inputs=WORKFLOW_STATE_INPUT_COMPONENTS,
+            outputs=[],
+            queue=False
+        )
+
     run_button.click(
         fn=run_queued_tasks,
-        inputs=[
-            input_image,
-            input_video,
-            *positive_prompt_texts,
-            prompt_negative,
-            *negative_prompt_extras,
-            json_dropdown,
-            hua_width,
-            hua_height,
-            *lora_dropdowns,
-            *POWER_LORA_INPUTS,
-            hua_checkpoint_dropdown,
-            hua_unet_dropdown,
-            *float_inputs,
-            *int_inputs,
-            *IMAGE_LOADER_COMPONENTS_FLAT,
-            seed_mode_dropdown,
-            fixed_seed_input,
-            queue_count,
-            *KSAMPLER_COMPONENTS_FLAT,
-            *MASK_COMPONENTS_FLAT
-        ],
+        inputs=WORKFLOW_STATE_INPUT_COMPONENTS,
         outputs=[
             queue_status_display,
             output_gallery,
@@ -4349,7 +4577,8 @@ with gr.Blocks(css=combined_css, analytics_enabled=False) as demo:
     # demo.load(fn=comfyui_previewer.start_worker, inputs=[], outputs=[], show_progress="hidden")
     # Starting after Gradio launch is more reliable
     # Alternatively call from on_load_setup
-
+# Ensure Gradio queue is enabled so stop_event exists for streamed responses
+demo.queue(status_update_rate=1.0)
     # --- Gradio launch helper ---
 def luanch_gradio(demo_instance):  # receive demo instance
     # Start worker before launching Gradio
