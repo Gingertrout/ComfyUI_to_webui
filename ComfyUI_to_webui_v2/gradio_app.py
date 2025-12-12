@@ -172,22 +172,22 @@ class ComfyUIGradioApp:
 
         return "\n".join(lines)
 
-    def generate_ui_from_workflow(self, workflow_file) -> str:
+    def generate_ui_from_workflow(self, workflow_file: str) -> str:
         """
         Gradio callback: Generate UI when workflow file is uploaded
 
         Args:
-            workflow_file: Gradio File component value
+            workflow_file: File path string (Gradio 4.x type="filepath")
 
         Returns:
             Markdown string with workflow info
         """
-        if workflow_file is None:
+        if not workflow_file:
             return ""
 
         try:
             # Load workflow (auto-converts from workflow format to API format)
-            self.current_workflow = load_workflow_from_file(workflow_file.name)
+            self.current_workflow = load_workflow_from_file(workflow_file)
 
             # Generate UI metadata
             self.current_ui = self.ui_generator.generate_ui_for_workflow(
@@ -259,7 +259,7 @@ class ComfyUIGradioApp:
                     workflow_file = gr.File(
                         label="Upload Workflow JSON",
                         file_types=[".json"],
-                        type="file"  # Gradio 3.x compatibility
+                        type="filepath"  # Gradio 4.x
                     )
 
                     gr.Markdown("""
