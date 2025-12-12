@@ -262,7 +262,8 @@ class ComfyUIGradioApp:
             retrieval_result = self.result_retriever.retrieve_results(
                 exec_result.prompt_id,
                 exec_result.client_id,
-                self.current_workflow
+                self.current_workflow,
+                timeout=30  # Reduced timeout for debugging
             )
 
             print(f"[GradioApp] Retrieval result: success={retrieval_result.success}")

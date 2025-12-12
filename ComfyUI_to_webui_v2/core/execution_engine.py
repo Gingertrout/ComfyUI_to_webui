@@ -81,15 +81,21 @@ class ExecutionEngine:
 
             print(f"[ExecutionEngine] Prompt has {len(prompt)} nodes")
 
+            # Debug: Print a sample node to verify structure
+            if prompt:
+                first_node_id = list(prompt.keys())[0]
+                print(f"[ExecutionEngine] Sample node {first_node_id}: {prompt[first_node_id]}")
+
             # Submit to ComfyUI
             print(f"[ExecutionEngine] Submitting to ComfyUI...")
             response = self.client.submit_prompt(prompt, client_id)
 
-            print(f"[ExecutionEngine] Response received: prompt_id={response.prompt_id}")
+            print(f"[ExecutionEngine] Response received: prompt_id={response.prompt_id}, number={response.number}")
+            print(f"[ExecutionEngine] Node errors: {response.node_errors}")
 
             # Check for node errors
             if response.node_errors:
-                print(f"[ExecutionEngine] Node errors detected: {response.node_errors}")
+                print(f"[ExecutionEngine] VALIDATION FAILED - Node errors detected: {response.node_errors}")
                 return ExecutionResult(
                     success=False,
                     prompt_id=response.prompt_id,
