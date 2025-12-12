@@ -25,6 +25,8 @@ from typing import Optional, Dict, Any
 
 from .core.comfyui_client import ComfyUIClient
 from .core.ui_generator import UIGenerator, GeneratedUI
+from .core.execution_engine import ExecutionEngine
+from .core.result_retriever import ResultRetriever
 from .utils.workflow_utils import load_workflow_from_file
 from .config import (
     COMFYUI_BASE_URL,
@@ -44,6 +46,9 @@ class ComfyUIGradioApp:
         """Initialize the application"""
         self.client = ComfyUIClient(COMFYUI_BASE_URL)
         self.ui_generator = UIGenerator(self.client)
+        self.execution_engine = ExecutionEngine(self.client)
+        self.result_retriever = ResultRetriever(self.client)
+
         self.current_workflow: Optional[Dict[str, Any]] = None
         self.current_ui: Optional[GeneratedUI] = None
 
@@ -215,6 +220,63 @@ class ComfyUIGradioApp:
         except Exception as e:
             return f"### ❌ Error Loading Workflow\n\n```\n{str(e)}\n```"
 
+    def execute_current_workflow(self) -> tuple[str, list]:
+        """
+        Execute the currently loaded workflow
+
+        Returns:
+            Tuple of (status_message, result_images)
+        """
+        if not self.current_workflow:
+            return "❌ No workflow loaded. Please select a workflow first.", []
+
+        try:
+            # Execute workflow
+            status_msg = "🚀 **Submitting workflow to ComfyUI...**"
+            exec_result = self.execution_engine.execute_workflow(
+                self.current_workflow,
+                self.current_ui
+            )
+
+            if not exec_result.success:
+                error_msg = exec_result.error or "Unknown error"
+                if exec_result.node_errors:
+                    error_details = "\n".join(
+                        f"- Node {nid}: {err}"
+                        for nid, err in exec_result.node_errors.items()
+                    )
+                    return f"❌ **Execution Failed**\n\n{error_msg}\n\n**Node Errors:**\n{error_details}", []
+                return f"❌ **Execution Failed**\n\n{error_msg}", []
+
+            # Wait for results
+            status_msg = f"⏳ **Executing workflow...**\n\nPrompt ID: `{exec_result.prompt_id}`"
+
+            retrieval_result = self.result_retriever.retrieve_results(
+                exec_result.prompt_id,
+                exec_result.client_id,
+                self.current_workflow
+            )
+
+            if not retrieval_result.success:
+                return f"❌ **Result Retrieval Failed**\n\n{retrieval_result.error}", []
+
+            # Success!
+            num_images = len(retrieval_result.images)
+            num_videos = len(retrieval_result.videos)
+
+            status_msg = f"✅ **Generation Complete!**\n\n"
+            status_msg += f"- **Images**: {num_images}\n"
+            status_msg += f"- **Videos**: {num_videos}\n"
+            status_msg += f"- **Prompt ID**: `{exec_result.prompt_id}`"
+
+            # Return images for gallery
+            all_results = retrieval_result.images + retrieval_result.videos
+
+            return status_msg, all_results
+
+        except Exception as e:
+            return f"❌ **Unexpected Error**\n\n```\n{str(e)}\n```", []
+
     def create_interface(self) -> gr.Blocks:
         """
         Create the main Gradio interface
@@ -232,17 +294,21 @@ class ComfyUIGradioApp:
             {PROJECT_DESCRIPTION}
 
             **Version:** {VERSION}
-            **Phase 1 MVP:** Dynamic UI Generation
+            **Phase 2:** Dynamic UI Generation + Workflow Execution
 
             ---
 
             ## Instructions
-            1. Upload a ComfyUI workflow JSON file (API format)
-            2. The UI will dynamically generate input controls based on the workflow
-            3. All editable parameters will appear grouped by node type
+            1. **Select workflow** from dropdown or upload JSON file
+            2. **Review** the detected parameters in the analysis section
+            3. **Click Generate** to execute the workflow
+            4. **View results** in the gallery below
 
-            **Note:** Phase 1 only demonstrates dynamic UI generation.
-            Execution, preview, and other features coming in future phases!
+            **Phase 2 Features:**
+            - ✅ Dynamic UI generation (any workflow)
+            - ✅ Workflow execution via ComfyUI API
+            - ✅ Result retrieval from SaveImage nodes
+            - ✅ Image/video gallery display
             """)
 
             # Workflow selection
@@ -293,6 +359,35 @@ class ComfyUIGradioApp:
                         label="Workflow Details"
                     )
 
+            # Execution section
+            with gr.Row():
+                with gr.Column(scale=1):
+                    gr.Markdown("### 3. Generate")
+
+                    generate_btn = gr.Button(
+                        "🚀 Generate",
+                        variant="primary",
+                        size="lg"
+                    )
+
+                    execution_status = gr.Markdown(
+                        value="",
+                        label="Status"
+                    )
+
+            # Results section
+            with gr.Row():
+                with gr.Column(scale=1):
+                    gr.Markdown("### 4. Results")
+
+                    result_gallery = gr.Gallery(
+                        label="Generated Images/Videos",
+                        show_label=False,
+                        columns=3,
+                        object_fit="contain",
+                        height="auto"
+                    )
+
             # Info section
             with gr.Row():
                 gr.Markdown(f"""
@@ -340,6 +435,13 @@ class ComfyUIGradioApp:
                 fn=self.generate_ui_from_workflow,
                 inputs=[workflow_file],
                 outputs=[dynamic_ui_container]
+            )
+
+            # Generate button
+            generate_btn.click(
+                fn=self.execute_current_workflow,
+                inputs=[],
+                outputs=[execution_status, result_gallery]
             )
 
         return app
