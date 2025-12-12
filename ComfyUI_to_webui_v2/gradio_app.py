@@ -86,7 +86,7 @@ class ComfyUIGradioApp:
 
     # Note: load_workflow_from_file is now imported from utils.workflow_utils
 
-    def generate_ui_from_workflow_path(self, workflow_path: str) -> gr.Column:
+    def generate_ui_from_workflow_path(self, workflow_path: str) -> str:
         """
         Generate UI from workflow file path (used by dropdown)
 
@@ -94,31 +94,85 @@ class ComfyUIGradioApp:
             workflow_path: Full path to workflow JSON file
 
         Returns:
-            Gradio Column with dynamically generated components
+            Markdown string with workflow info and editable parameters
         """
         if not workflow_path or workflow_path == "None":
-            return gr.Column(visible=False)
+            return ""
 
         try:
             # Load workflow
             self.current_workflow = load_workflow_from_file(workflow_path)
 
-            # Generate UI
+            # Generate UI metadata
             self.current_ui = self.ui_generator.generate_ui_for_workflow(
                 self.current_workflow
             )
 
-            # Build grouped layout
-            layout = self.ui_generator.build_grouped_layout(self.current_ui)
-
-            return layout
+            # Build markdown representation
+            return self._build_workflow_summary_markdown()
 
         except Exception as e:
-            with gr.Column() as error_layout:
-                gr.Markdown(f"### Error Loading Workflow\n\n```\n{str(e)}\n```")
-            return error_layout
+            return f"### ❌ Error Loading Workflow\n\n```\n{str(e)}\n```"
 
-    def generate_ui_from_workflow(self, workflow_file) -> gr.Column:
+    def _build_workflow_summary_markdown(self) -> str:
+        """Build markdown summary of workflow and editable parameters"""
+        if not self.current_ui:
+            return ""
+
+        lines = ["## ✅ Workflow Loaded Successfully\n"]
+
+        # Summary stats
+        total_components = len(self.current_ui.components)
+        categories = len(self.current_ui.grouped_components)
+
+        lines.append(f"**Total Editable Parameters:** {total_components}  ")
+        lines.append(f"**Component Groups:** {categories}\n")
+
+        # Group by category
+        for category, components in sorted(self.current_ui.grouped_components.items()):
+            # Pretty category names
+            category_names = {
+                "sampler": "🎨 Samplers",
+                "lora_loader": "🎯 LoRA Loaders",
+                "checkpoint_loader": "📦 Checkpoint Loaders",
+                "unet_loader": "🧠 UNET Loaders",
+                "image_input": "🖼️ Image Inputs",
+                "video_input": "🎬 Video Inputs",
+                "output": "💾 Output Nodes",
+                "other": "⚙️ Other Parameters"
+            }
+            category_title = category_names.get(category, category.replace("_", " ").title())
+
+            lines.append(f"\n### {category_title} ({len(components)})\n")
+
+            # Group by node
+            from collections import defaultdict
+            nodes = defaultdict(list)
+            for comp in components:
+                nodes[comp.node_id].append(comp)
+
+            for node_id, node_components in nodes.items():
+                # Get node title from first component
+                node_title = node_components[0].component.label.split(" › ")[0] if node_components[0].component.label else node_id
+
+                lines.append(f"**{node_title}** (Node ID: `{node_id}`)")
+
+                for comp in node_components:
+                    input_name = comp.input_name
+                    value = comp.current_value
+                    comp_type = type(comp.component).__name__
+
+                    lines.append(f"- **{input_name}**: `{value}` ({comp_type})")
+
+                lines.append("")
+
+        lines.append("\n---\n")
+        lines.append("**Note:** Phase 1 demonstrates dynamic UI generation. ")
+        lines.append("In Phase 2, these parameters will be editable with actual Gradio components!")
+
+        return "\n".join(lines)
+
+    def generate_ui_from_workflow(self, workflow_file) -> str:
         """
         Gradio callback: Generate UI when workflow file is uploaded
 
@@ -126,29 +180,25 @@ class ComfyUIGradioApp:
             workflow_file: Gradio File component value
 
         Returns:
-            Gradio Column with dynamically generated components
+            Markdown string with workflow info
         """
         if workflow_file is None:
-            return gr.Column(visible=False)
+            return ""
 
         try:
             # Load workflow (auto-converts from workflow format to API format)
             self.current_workflow = load_workflow_from_file(workflow_file.name)
 
-            # Generate UI
+            # Generate UI metadata
             self.current_ui = self.ui_generator.generate_ui_for_workflow(
                 self.current_workflow
             )
 
-            # Build grouped layout
-            layout = self.ui_generator.build_grouped_layout(self.current_ui)
-
-            return layout
+            # Build markdown representation
+            return self._build_workflow_summary_markdown()
 
         except Exception as e:
-            with gr.Column() as error_layout:
-                gr.Markdown(f"### Error Loading Workflow\n\n```\n{str(e)}\n```")
-            return error_layout
+            return f"### ❌ Error Loading Workflow\n\n```\n{str(e)}\n```"
 
     def create_interface(self) -> gr.Blocks:
         """
@@ -220,10 +270,13 @@ class ComfyUIGradioApp:
             # Dynamic UI container
             with gr.Row():
                 with gr.Column(scale=1):
-                    gr.Markdown("### 2. Generated Parameters")
+                    gr.Markdown("### 2. Workflow Analysis")
 
                     # This will be populated dynamically
-                    dynamic_ui_container = gr.Column(visible=False)
+                    dynamic_ui_container = gr.Markdown(
+                        value="",
+                        label="Workflow Details"
+                    )
 
             # Info section
             with gr.Row():
@@ -257,7 +310,7 @@ class ComfyUIGradioApp:
             # Dropdown selection
             def on_dropdown_change(workflow_name):
                 if workflow_name == "None" or not workflow_name:
-                    return gr.Column(visible=False)
+                    return ""
                 workflow_path = self.available_workflows.get(workflow_name)
                 return self.generate_ui_from_workflow_path(workflow_path)
 
