@@ -152,8 +152,15 @@ class ComfyUIGradioApp:
                 nodes[comp.node_id].append(comp)
 
             for node_id, node_components in nodes.items():
-                # Get node title from first component
-                node_title = node_components[0].component.label.split(" › ")[0] if node_components[0].component.label else node_id
+                # Get node title from first component (safely)
+                try:
+                    label = getattr(node_components[0].component, 'label', None)
+                    if label and " › " in str(label):
+                        node_title = str(label).split(" › ")[0]
+                    else:
+                        node_title = node_id
+                except:
+                    node_title = node_id
 
                 lines.append(f"**{node_title}** (Node ID: `{node_id}`)")
 
@@ -162,7 +169,15 @@ class ComfyUIGradioApp:
                     value = comp.current_value
                     comp_type = type(comp.component).__name__
 
-                    lines.append(f"- **{input_name}**: `{value}` ({comp_type})")
+                    # Format value nicely
+                    if isinstance(value, (int, float)):
+                        value_str = str(value)
+                    elif isinstance(value, str) and len(value) > 50:
+                        value_str = value[:50] + "..."
+                    else:
+                        value_str = str(value)
+
+                    lines.append(f"- **{input_name}**: `{value_str}` ({comp_type})")
 
                 lines.append("")
 
