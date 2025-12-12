@@ -25,6 +25,7 @@ from typing import Optional, Dict, Any
 
 from .core.comfyui_client import ComfyUIClient
 from .core.ui_generator import UIGenerator, GeneratedUI
+from .utils.workflow_utils import load_workflow_from_file
 from .config import (
     COMFYUI_BASE_URL,
     GRADIO_PORTS,
@@ -46,31 +47,7 @@ class ComfyUIGradioApp:
         self.current_workflow: Optional[Dict[str, Any]] = None
         self.current_ui: Optional[GeneratedUI] = None
 
-    def load_workflow_from_file(self, file_path: str) -> Dict[str, Any]:
-        """
-        Load workflow JSON from file
-
-        Args:
-            file_path: Path to workflow JSON file
-
-        Returns:
-            Workflow dictionary
-        """
-        with open(file_path, 'r', encoding='utf-8') as f:
-            workflow = json.load(f)
-
-        # Handle both workflow format and API format
-        # Workflow format has "nodes" and "links", API format is direct dict
-        if "nodes" in workflow:
-            # This is workflow format - needs conversion
-            # For Phase 1, we'll raise an error and ask for API format
-            raise ValueError(
-                "Workflow format detected. Please convert to API format first. "
-                "You can do this in ComfyUI by enabling 'Dev mode' and using "
-                "'Save (API Format)' instead of regular 'Save'."
-            )
-
-        return workflow
+    # Note: load_workflow_from_file is now imported from utils.workflow_utils
 
     def generate_ui_from_workflow(self, workflow_file) -> gr.Column:
         """
@@ -86,8 +63,8 @@ class ComfyUIGradioApp:
             return gr.Column(visible=False)
 
         try:
-            # Load workflow
-            self.current_workflow = self.load_workflow_from_file(workflow_file.name)
+            # Load workflow (auto-converts from workflow format to API format)
+            self.current_workflow = load_workflow_from_file(workflow_file.name)
 
             # Generate UI
             self.current_ui = self.ui_generator.generate_ui_for_workflow(
