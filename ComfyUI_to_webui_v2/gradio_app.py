@@ -227,16 +227,23 @@ class ComfyUIGradioApp:
         Returns:
             Tuple of (status_message, result_images)
         """
+        print("[GradioApp] Execute button clicked")
+
         if not self.current_workflow:
+            print("[GradioApp] No workflow loaded!")
             return "❌ No workflow loaded. Please select a workflow first.", []
 
         try:
+            print(f"[GradioApp] Executing workflow with {len(self.current_workflow)} nodes")
+
             # Execute workflow
             status_msg = "🚀 **Submitting workflow to ComfyUI...**"
             exec_result = self.execution_engine.execute_workflow(
                 self.current_workflow,
                 self.current_ui
             )
+
+            print(f"[GradioApp] Execution result: success={exec_result.success}, prompt_id={exec_result.prompt_id}")
 
             if not exec_result.success:
                 error_msg = exec_result.error or "Unknown error"
@@ -250,12 +257,15 @@ class ComfyUIGradioApp:
 
             # Wait for results
             status_msg = f"⏳ **Executing workflow...**\n\nPrompt ID: `{exec_result.prompt_id}`"
+            print(f"[GradioApp] Waiting for results...")
 
             retrieval_result = self.result_retriever.retrieve_results(
                 exec_result.prompt_id,
                 exec_result.client_id,
                 self.current_workflow
             )
+
+            print(f"[GradioApp] Retrieval result: success={retrieval_result.success}")
 
             if not retrieval_result.success:
                 return f"❌ **Result Retrieval Failed**\n\n{retrieval_result.error}", []

@@ -70,6 +70,8 @@ class ExecutionEngine:
         client_id = str(uuid.uuid4())
 
         try:
+            print(f"[ExecutionEngine] Building prompt for client_id: {client_id}")
+
             # Build execution prompt
             prompt = self._build_execution_prompt(
                 workflow,
@@ -77,11 +79,17 @@ class ExecutionEngine:
                 user_values
             )
 
+            print(f"[ExecutionEngine] Prompt has {len(prompt)} nodes")
+
             # Submit to ComfyUI
+            print(f"[ExecutionEngine] Submitting to ComfyUI...")
             response = self.client.submit_prompt(prompt, client_id)
+
+            print(f"[ExecutionEngine] Response received: prompt_id={response.prompt_id}")
 
             # Check for node errors
             if response.node_errors:
+                print(f"[ExecutionEngine] Node errors detected: {response.node_errors}")
                 return ExecutionResult(
                     success=False,
                     prompt_id=response.prompt_id,
@@ -97,6 +105,9 @@ class ExecutionEngine:
             )
 
         except Exception as e:
+            print(f"[ExecutionEngine] Exception: {e}")
+            import traceback
+            traceback.print_exc()
             return ExecutionResult(
                 success=False,
                 prompt_id="",
