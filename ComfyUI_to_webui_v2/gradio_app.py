@@ -118,7 +118,7 @@ class ComfyUIGradioApp:
                     workflow_file = gr.File(
                         label="Workflow JSON (API Format)",
                         file_types=[".json"],
-                        type="filepath"
+                        type="file"  # Gradio 3.x compatibility
                     )
 
                     load_btn = gr.Button("Load Workflow", variant="primary")
