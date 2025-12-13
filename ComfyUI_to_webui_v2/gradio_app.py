@@ -887,6 +887,35 @@ class ComfyUIGradioApp:
 
         return preview_image, status_text
 
+    def send_gallery_to_input(self, gallery_data):
+        """
+        Send selected gallery image to input field for iterative editing
+
+        Args:
+            gallery_data: Gallery selection data from Gradio
+
+        Returns:
+            Image to populate the input field
+        """
+        from PIL import Image
+
+        if not gallery_data:
+            return None
+
+        # Gallery data can be a list of images or a single selected image
+        # If it's a list, take the first one (most recent)
+        if isinstance(gallery_data, list) and len(gallery_data) > 0:
+            # Get the first image path
+            image_path = gallery_data[0] if isinstance(gallery_data[0], str) else gallery_data[0].get('name')
+            if image_path:
+                try:
+                    return Image.open(image_path)
+                except Exception as e:
+                    print(f"[GradioApp] Error loading image: {e}")
+                    return None
+
+        return None
+
     def create_interface(self) -> gr.Blocks:
         """
         Create the main Gradio interface
@@ -1145,6 +1174,13 @@ class ComfyUIGradioApp:
                                 height="auto"
                             )
 
+                            # Button to send result back to input for iterative editing
+                            send_to_input_btn = gr.Button(
+                                "📤 Send Selected to Input",
+                                variant="secondary",
+                                size="sm"
+                            )
+
             # Info section
             with gr.Row():
                 gr.Markdown(f"""
@@ -1233,6 +1269,13 @@ class ComfyUIGradioApp:
                 inputs=[],
                 outputs=[],
                 js=PHOTOPEA_EXPORT_JS
+            )
+
+            # Send gallery result to input for iterative editing
+            send_to_input_btn.click(
+                fn=self.send_gallery_to_input,
+                inputs=[result_gallery],
+                outputs=[image_upload]
             )
 
         return app
