@@ -900,19 +900,39 @@ class ComfyUIGradioApp:
         from PIL import Image
 
         if not gallery_data:
+            print("[GradioApp] No gallery data provided")
             return None
 
-        # Gallery data can be a list of images or a single selected image
-        # If it's a list, take the first one (most recent)
-        if isinstance(gallery_data, list) and len(gallery_data) > 0:
-            # Get the first image path
-            image_path = gallery_data[0] if isinstance(gallery_data[0], str) else gallery_data[0].get('name')
-            if image_path:
-                try:
-                    return Image.open(image_path)
-                except Exception as e:
-                    print(f"[GradioApp] Error loading image: {e}")
+        print(f"[GradioApp] Gallery data type: {type(gallery_data)}")
+        print(f"[GradioApp] Gallery data: {gallery_data}")
+
+        # Handle different Gradio gallery data formats
+        try:
+            # Gallery data is typically a list of file paths or tuples
+            if isinstance(gallery_data, list) and len(gallery_data) > 0:
+                first_item = gallery_data[0]
+
+                # Handle tuple format: (image_path, caption)
+                if isinstance(first_item, tuple):
+                    image_path = first_item[0]
+                # Handle dict format: {'name': path, ...}
+                elif isinstance(first_item, dict):
+                    image_path = first_item.get('name') or first_item.get('path')
+                # Handle string format: direct path
+                elif isinstance(first_item, str):
+                    image_path = first_item
+                else:
+                    print(f"[GradioApp] Unknown gallery item type: {type(first_item)}")
                     return None
+
+                if image_path:
+                    print(f"[GradioApp] Loading image from: {image_path}")
+                    return Image.open(image_path)
+
+        except Exception as e:
+            print(f"[GradioApp] Error loading image: {e}")
+            import traceback
+            traceback.print_exc()
 
         return None
 
