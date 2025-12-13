@@ -2,17 +2,26 @@
 ComfyUI_to_webui V2 - Main Gradio Application
 
 This is the entry point for the dynamic Gradio interface.
-It demonstrates Phase 1 functionality: dynamic UI generation from workflow JSON.
+Currently implementing Phase 3 features.
 
-Phase 1 Features:
+Completed Features:
+Phase 1:
 - Load workflow JSON (file upload or selector)
 - Parse workflow and extract editable inputs
 - Dynamically generate Gradio components from /object_info schemas
 - Display organized UI grouped by node type
 
+Phase 2:
+- Workflow execution and result retrieval
+- Model loaders (checkpoint, LoRA, VAE)
+- LoRA strength control
+- Result gallery
+
+Phase 3 (Current):
+- WebSocket live preview
+- Real-time progress monitoring
+
 Future Phases:
-- Phase 2: Workflow execution and result retrieval
-- Phase 3: WebSocket preview, Photopea, monitoring
 - Phase 4: UI polish and grouping enhancements
 - Phase 5: Civitai browser, batch processing
 """
@@ -28,6 +37,7 @@ from .core.ui_generator import UIGenerator, GeneratedUI
 from .core.execution_engine import ExecutionEngine
 from .core.result_retriever import ResultRetriever
 from .utils.workflow_utils import load_workflow_from_file
+from ..kelnel_ui.k_Preview import ComfyUIPreviewer
 from .config import (
     COMFYUI_BASE_URL,
     GRADIO_PORTS,
@@ -48,6 +58,15 @@ class ComfyUIGradioApp:
         self.ui_generator = UIGenerator(self.client)
         self.execution_engine = ExecutionEngine(self.client)
         self.result_retriever = ResultRetriever(self.client)
+
+        # Initialize live preview (Phase 3)
+        self.previewer = ComfyUIPreviewer(
+            server_address="127.0.0.1:8188",
+            client_id_suffix="v2_workflow",
+            min_yield_interval=0.1
+        )
+        # Start the preview worker thread
+        self.previewer.start_worker()
 
         self.current_workflow: Optional[Dict[str, Any]] = None
         self.current_ui: Optional[GeneratedUI] = None
@@ -853,13 +872,30 @@ class ComfyUIGradioApp:
                 with gr.Column(scale=1):
                     gr.Markdown("### 4. Results")
 
-                    result_gallery = gr.Gallery(
-                        label="Generated Images/Videos",
-                        show_label=False,
-                        columns=3,
-                        object_fit="contain",
-                        height="auto"
-                    )
+                    # Tabbed interface for Live Preview and Final Results
+                    with gr.Tabs():
+                        with gr.Tab("🔴 Live Preview"):
+                            live_preview_image = gr.Image(
+                                label="Live Preview",
+                                type="pil",
+                                interactive=False,
+                                height=512
+                            )
+                            live_preview_status = gr.Textbox(
+                                label="Preview Status",
+                                value="Waiting for generation...",
+                                interactive=False,
+                                max_lines=1
+                            )
+
+                        with gr.Tab("✅ Final Results"):
+                            result_gallery = gr.Gallery(
+                                label="Generated Images/Videos",
+                                show_label=False,
+                                columns=3,
+                                object_fit="contain",
+                                height="auto"
+                            )
 
             # Info section
             with gr.Row():
@@ -867,8 +903,12 @@ class ComfyUIGradioApp:
                 ---
                 ### About This Demo
 
-                This is a **Phase 1 MVP** demonstrating the core innovation of V2:
-                **schema-driven dynamic UI generation** that works with ANY workflow.
+                This is **ComfyUI_to_webui V2** - now in **Phase 3**!
+
+                **Completed Features:**
+                - ✅ **Phase 1:** Schema-driven dynamic UI generation
+                - ✅ **Phase 2:** Workflow execution, result retrieval, model loaders
+                - ✅ **Phase 3:** WebSocket live preview (active now!)
 
                 **What's Different from V1:**
                 - ❌ No hardcoded node types (Hua_Output, GradioTextOk, etc.)
@@ -877,11 +917,10 @@ class ComfyUIGradioApp:
                 - ✅ Works with ANY ComfyUI workflow
                 - ✅ Unlimited dynamic components
                 - ✅ Auto-detects node types via /object_info API
+                - ✅ Live preview during generation
 
                 **Coming in Future Phases:**
-                - Phase 2: Workflow execution, result retrieval
-                - Phase 3: WebSocket preview, Photopea, monitoring
-                - Phase 4: Component grouping, model scanner
+                - Phase 4: UI polish, component grouping, model scanner
                 - Phase 5: Civitai browser, batch processing
 
                 **Development Info:**
@@ -915,6 +954,14 @@ class ComfyUIGradioApp:
                 fn=self.execute_current_workflow,
                 inputs=[positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae],
                 outputs=[execution_status, result_gallery]
+            )
+
+            # Live preview stream - starts when app loads
+            app.load(
+                fn=self.previewer.get_update_generator(),
+                inputs=None,
+                outputs=[live_preview_image, live_preview_status],
+                show_progress=False
             )
 
         return app
