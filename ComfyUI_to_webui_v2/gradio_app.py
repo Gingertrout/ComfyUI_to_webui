@@ -692,6 +692,25 @@ class ComfyUIGradioApp:
         except Exception as e:
             return f"❌ **Unexpected Error**\n\n```\n{str(e)}\n```", []
 
+    def interrupt_generation(self) -> str:
+        """
+        Interrupt/stop the current generation
+
+        Returns:
+            Status message
+        """
+        try:
+            print("[GradioApp] Interrupt requested by user")
+            success = self.client.interrupt()
+
+            if success:
+                return "⏹️ **Generation Interrupted**\n\nThe current generation has been stopped."
+            else:
+                return "⚠️ **Interrupt Failed**\n\nCould not interrupt the generation."
+
+        except Exception as e:
+            return f"❌ **Interrupt Error**\n\n```\n{str(e)}\n```"
+
     def create_interface(self) -> gr.Blocks:
         """
         Create the main Gradio interface
@@ -867,11 +886,17 @@ class ComfyUIGradioApp:
                 with gr.Column(scale=1):
                     gr.Markdown("### 3. Generate")
 
-                    generate_btn = gr.Button(
-                        "🚀 Generate",
-                        variant="primary",
-                        size="lg"
-                    )
+                    with gr.Row():
+                        generate_btn = gr.Button(
+                            "🚀 Generate",
+                            variant="primary",
+                            scale=3
+                        )
+                        stop_btn = gr.Button(
+                            "⏹️ Stop",
+                            variant="stop",
+                            scale=1
+                        )
 
                     execution_status = gr.Markdown(
                         value="",
@@ -970,9 +995,16 @@ class ComfyUIGradioApp:
             # Live preview stream - starts when app loads
             app.load(
                 fn=self.previewer.get_update_generator(),
-                inputs=None,
+                inputs=[],
                 outputs=[live_preview_image, live_preview_status],
-                show_progress=False
+                show_progress="hidden"
+            )
+
+            # Stop button - interrupts current generation
+            stop_btn.click(
+                fn=self.interrupt_generation,
+                inputs=[],
+                outputs=[execution_status]
             )
 
         return app
