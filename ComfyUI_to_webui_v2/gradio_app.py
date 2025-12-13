@@ -639,12 +639,14 @@ class ComfyUIGradioApp:
             print(f"[GradioApp] User parameters: {user_values}")
 
             # Execute workflow with user values and discovered loaders
+            # IMPORTANT: Use previewer's client_id so we receive preview images via WebSocket
             status_msg = "🚀 **Submitting workflow to ComfyUI...**"
             exec_result = self.execution_engine.execute_workflow(
                 self.current_workflow,
                 self.current_ui,
                 user_values,
-                self.current_loaders  # Pass discovered loaders for targeted injection
+                self.current_loaders,  # Pass discovered loaders for targeted injection
+                client_id=self.previewer.client_id  # Use previewer's client_id for preview images
             )
 
             print(f"[GradioApp] Execution result: success={exec_result.success}, prompt_id={exec_result.prompt_id}")

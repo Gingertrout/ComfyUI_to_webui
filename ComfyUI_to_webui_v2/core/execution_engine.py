@@ -55,7 +55,8 @@ class ExecutionEngine:
         workflow: Dict[str, Any],
         generated_ui: Optional[GeneratedUI] = None,
         user_values: Optional[Dict[str, Any]] = None,
-        discovered_loaders: Optional[Dict[str, Dict[str, Any]]] = None
+        discovered_loaders: Optional[Dict[str, Dict[str, Any]]] = None,
+        client_id: Optional[str] = None
     ) -> ExecutionResult:
         """
         Execute a workflow with optional user-provided values
@@ -65,12 +66,14 @@ class ExecutionEngine:
             generated_ui: Generated UI structure (contains current values)
             user_values: User-provided values (from interactive UI)
             discovered_loaders: Map of discovered loader nodes (category -> loader info)
+            client_id: Optional client ID (for WebSocket preview integration)
 
         Returns:
             ExecutionResult with prompt_id and status
         """
-        # Generate unique client ID
-        client_id = str(uuid.uuid4())
+        # Use provided client_id or generate a unique one
+        if client_id is None:
+            client_id = str(uuid.uuid4())
 
         try:
             print(f"[ExecutionEngine] Building prompt for client_id: {client_id}")
