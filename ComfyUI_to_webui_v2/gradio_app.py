@@ -711,6 +711,43 @@ class ComfyUIGradioApp:
         except Exception as e:
             return f"❌ **Interrupt Error**\n\n```\n{str(e)}\n```"
 
+    def get_preview_update(self):
+        """
+        Get the latest preview image and status (non-generator version for polling)
+
+        Returns:
+            Tuple of (image, status_text)
+        """
+        import time
+
+        # Get current preview image from the previewer
+        preview_image = self.previewer.latest_preview_image
+
+        # Build status message
+        with self.previewer.active_prompt_lock:
+            current_node = self.previewer.active_prompt_info.get("current_executing_node")
+            progress_value = self.previewer.active_prompt_info.get("progress_value")
+            progress_max = self.previewer.active_prompt_info.get("progress_max")
+
+        status_parts = []
+
+        if preview_image:
+            status_parts.append(f"Last update: {time.strftime('%H:%M:%S')}")
+        else:
+            status_parts.append("Waiting for preview...")
+
+        if current_node:
+            status_parts.append(f"Node: {current_node}")
+
+        if progress_value is not None and progress_max is not None:
+            status_parts.append(f"Progress: {progress_value}/{progress_max}")
+
+        status_parts.append(f"Connection: {self.previewer.ws_connection_status}")
+
+        status_text = " | ".join(status_parts)
+
+        return preview_image, status_text
+
     def create_interface(self) -> gr.Blocks:
         """
         Create the main Gradio interface
@@ -992,12 +1029,13 @@ class ComfyUIGradioApp:
                 outputs=[execution_status, result_gallery]
             )
 
-            # Live preview stream - starts when app loads
-            app.load(
-                fn=self.previewer.get_update_generator(),
+            # Live preview polling - updates every 200ms
+            # Using polling instead of generator for better Gradio 4.x compatibility
+            preview_event = app.load(
+                fn=self.get_preview_update,
                 inputs=[],
                 outputs=[live_preview_image, live_preview_status],
-                show_progress="hidden"
+                every=0.2  # Poll every 200ms
             )
 
             # Stop button - interrupts current generation
