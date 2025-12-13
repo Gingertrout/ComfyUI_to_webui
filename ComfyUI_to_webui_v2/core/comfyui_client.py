@@ -101,6 +101,37 @@ class ComfyUIClient:
                     continue
                 raise
 
+    def get_available_models(self, node_type: str, param_name: str) -> List[str]:
+        """
+        Get list of available models for a specific node type
+
+        Args:
+            node_type: Node class type (e.g., "CheckpointLoaderSimple")
+            param_name: Parameter name (e.g., "ckpt_name", "lora_name")
+
+        Returns:
+            List of available model names
+        """
+        object_info = self.get_object_info()
+
+        if node_type not in object_info:
+            return []
+
+        node_schema = object_info[node_type]
+        required_inputs = node_schema.get("input", {}).get("required", {})
+
+        if param_name not in required_inputs:
+            return []
+
+        param_schema = required_inputs[param_name]
+
+        # ComfyUI returns models as: [[list, of, models], {metadata}]
+        if isinstance(param_schema, list) and len(param_schema) > 0:
+            if isinstance(param_schema[0], list):
+                return param_schema[0]
+
+        return []
+
     def get_object_info(self, force_refresh: bool = False) -> Dict[str, Any]:
         """
         Query /object_info endpoint to get schemas for all node types
@@ -165,14 +196,25 @@ class ComfyUIClient:
             "client_id": client_id
         }
 
-        response = self._make_request("POST", ComfyUIEndpoints.PROMPT, json_data=payload)
-        data = response.json()
+        try:
+            response = self._make_request("POST", ComfyUIEndpoints.PROMPT, json_data=payload)
+            data = response.json()
 
-        return PromptResponse(
-            prompt_id=data.get("prompt_id", ""),
-            number=data.get("number", 0),
-            node_errors=data.get("node_errors", {})
-        )
+            return PromptResponse(
+                prompt_id=data.get("prompt_id", ""),
+                number=data.get("number", 0),
+                node_errors=data.get("node_errors", {})
+            )
+        except requests.exceptions.HTTPError as e:
+            # Try to extract error details from response
+            try:
+                error_data = e.response.json()
+                print(f"[ComfyUIClient] Prompt submission failed: {error_data}")
+                # Re-raise with more context
+                raise Exception(f"ComfyUI rejected prompt: {error_data}") from e
+            except:
+                # If we can't parse the error, re-raise the original
+                raise
 
     def get_history(self, client_id: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -263,16 +305,41 @@ class ComfyUIClient:
         deadline = time.time() + timeout
         poll_interval = self.timeout_config.history_poll_interval
 
+        print(f"[ComfyUIClient] Polling history for prompt_id={prompt_id}, timeout={timeout}s")
+        poll_count = 0
+
         while time.time() < deadline:
             try:
-                history = self.get_history(client_id)
-                if prompt_id in history:
-                    return history[prompt_id]
-            except requests.RequestException:
+                poll_count += 1
+
+                # Try both filtered (by client_id) and unfiltered history
+                history_filtered = self.get_history(client_id)
+                history_all = self.get_history(None)
+
+                if poll_count == 1 or poll_count % 10 == 0:
+                    print(f"[ComfyUIClient] Poll #{poll_count}:")
+                    print(f"  - Filtered history ({client_id}): {len(history_filtered)} entries")
+                    print(f"  - Full history: {len(history_all)} entries")
+                    if history_all:
+                        print(f"  - Full history keys (last 5): {list(history_all.keys())[-5:]}")
+
+                # Check filtered history first
+                if prompt_id in history_filtered:
+                    print(f"[ComfyUIClient] Found prompt_id in filtered history after {poll_count} polls")
+                    return history_filtered[prompt_id]
+
+                # Check full history as fallback
+                if prompt_id in history_all:
+                    print(f"[ComfyUIClient] Found prompt_id in full history after {poll_count} polls")
+                    return history_all[prompt_id]
+
+            except requests.RequestException as e:
+                print(f"[ComfyUIClient] Request error during poll #{poll_count}: {e}")
                 pass  # Ignore errors, keep polling
 
             time.sleep(poll_interval)
 
+        print(f"[ComfyUIClient] Timeout after {poll_count} polls - prompt_id not found in history")
         return None
 
     def poll_queue_until_done(

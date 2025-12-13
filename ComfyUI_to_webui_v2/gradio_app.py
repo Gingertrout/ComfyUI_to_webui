@@ -51,6 +51,7 @@ class ComfyUIGradioApp:
 
         self.current_workflow: Optional[Dict[str, Any]] = None
         self.current_ui: Optional[GeneratedUI] = None
+        self.current_loaders: Dict[str, Dict[str, Any]] = {}  # Track discovered loaders
 
         # Scan for available workflows in ComfyUI workflows directory
         self.workflows_dir = self._find_workflows_directory()
@@ -91,7 +92,278 @@ class ComfyUIGradioApp:
 
     # Note: load_workflow_from_file is now imported from utils.workflow_utils
 
-    def generate_ui_from_workflow_path(self, workflow_path: str) -> str:
+    def discover_loaders_in_workflow(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Dynamically discover all loader nodes in the current workflow
+
+        Returns:
+            Dictionary mapping loader categories to loader info:
+            {
+                "checkpoint": {"node_id": "3", "class_type": "CheckpointLoaderSimple", "param": "ckpt_name"},
+                "unet": {"node_id": "5", "class_type": "UNETLoader", "param": "unet_name"},
+                ...
+            }
+        """
+        if not self.current_workflow:
+            return {}
+
+        loaders = {}
+
+        # DEBUG: Print all nodes to understand structure
+        print("[GradioApp] === ALL NODES IN WORKFLOW ===")
+        for node_id, node_data in self.current_workflow.items():
+            class_type = node_data.get("class_type", "")
+            inputs = node_data.get("inputs", {})
+            print(f"  Node {node_id}: {class_type}")
+
+            # Show all top-level keys for lora nodes
+            if "lora" in class_type.lower():
+                print(f"    [DEBUG] All keys in node: {list(node_data.keys())}")
+                if "_meta" in node_data:
+                    print(f"    [DEBUG] _meta: {node_data['_meta']}")
+                if "widgets_values" in node_data:
+                    print(f"    [DEBUG] widgets_values: {node_data['widgets_values']}")
+
+            for param, value in inputs.items():
+                # Print all parameters, not just strings
+                if isinstance(value, str):
+                    display_value = value[:50] if len(str(value)) > 50 else value
+                    print(f"    - {param}: \"{display_value}\" (str)")
+                elif isinstance(value, (int, float, bool)):
+                    print(f"    - {param}: {value} ({type(value).__name__})")
+                elif isinstance(value, list):
+                    # Links are lists like [node_id, output_index]
+                    print(f"    - {param}: {value} (link)")
+                else:
+                    print(f"    - {param}: {type(value).__name__}")
+        print("[GradioApp] === END ALL NODES ===")
+
+        # Common loader node patterns
+        LOADER_PATTERNS = {
+            "checkpoint": [
+                ("CheckpointLoaderSimple", "ckpt_name"),
+                ("CheckpointLoader", "ckpt_name"),
+            ],
+            "unet": [
+                ("UNETLoader", "unet_name"),
+                ("UnetLoader", "unet_name"),
+            ],
+            "lora": [
+                ("LoraLoader", "lora_name"),
+                ("LoraLoaderModelOnly", "lora_name"),
+                ("PowerLoraLoader", "lora_name"),
+                ("LoraLoaderStacked", "lora_name"),
+            ],
+            "vae": [
+                ("VAELoader", "vae_name"),
+            ],
+            "clip": [
+                ("CLIPLoader", "clip_name"),
+                ("DualCLIPLoader", "clip_name1"),
+            ]
+        }
+
+        for node_id, node_data in self.current_workflow.items():
+            class_type = node_data.get("class_type", "")
+            inputs = node_data.get("inputs", {})
+
+            # Check against known patterns
+            for category, patterns in LOADER_PATTERNS.items():
+                for pattern_type, param_name in patterns:
+                    if class_type == pattern_type and param_name in inputs:
+                        loaders[category] = {
+                            "node_id": node_id,
+                            "class_type": class_type,
+                            "param": param_name,
+                            "current_value": inputs[param_name]
+                        }
+                        break
+
+            # DYNAMIC DISCOVERY: Catch any loader we missed
+            # Look for nodes with "Lora" or "LoRA" in name that have model parameters
+            if "lora" not in loaders and ("lora" in class_type.lower() or "LoRA" in class_type):
+                # Power Lora Loader (rgthree) uses dynamic inputs like lora_01, lora_02, etc.
+                # Look for any parameter that looks like a LoRA
+                lora_param = None
+                lora_value = None
+
+                for param_name, param_value in inputs.items():
+                    # Look for parameters that are strings ending in .safetensors
+                    if isinstance(param_value, str) and param_value.endswith(".safetensors"):
+                        lora_param = param_name
+                        lora_value = param_value
+                        print(f"[GradioApp] Found LoRA parameter in {class_type}: {param_name} = {param_value}")
+                        break
+                    # Also look for parameters that start with "lora" (like lora_01, lora_name, etc.)
+                    elif isinstance(param_value, str) and "lora" in param_name.lower():
+                        lora_param = param_name
+                        lora_value = param_value
+                        print(f"[GradioApp] Found LoRA-like parameter in {class_type}: {param_name} = {param_value}")
+                        break
+
+                # Even if no LoRA is loaded, mark the node as a LoRA loader
+                # This handles Power Lora Loader nodes that exist but have no LoRAs selected
+                if lora_param or "Power Lora Loader" in class_type:
+                    print(f"[GradioApp] Found LoRA loader: {class_type} (node {node_id})")
+                    loaders["lora"] = {
+                        "node_id": node_id,
+                        "class_type": class_type,
+                        "param": lora_param or "lora_01",  # Default param name for Power Lora Loader
+                        "current_value": lora_value or ""
+                    }
+                elif lora_param:
+                    print(f"[GradioApp] Found unknown LoRA loader: {class_type} with param {lora_param}")
+                    loaders["lora"] = {
+                        "node_id": node_id,
+                        "class_type": class_type,
+                        "param": lora_param,
+                        "current_value": lora_value
+                    }
+
+        print(f"[GradioApp] Discovered loaders: {list(loaders.keys())}")
+        for category, info in loaders.items():
+            print(f"[GradioApp]   - {category}: {info['class_type']} (node {info['node_id']}, param: {info['param']})")
+        return loaders
+
+    def extract_defaults_from_workflow(self) -> Dict[str, Any]:
+        """
+        Extract default values from the current workflow
+
+        Returns:
+            Dictionary with default values for UI fields
+        """
+        if not self.current_workflow:
+            return {}
+
+        defaults = {
+            "positive_prompt": "",
+            "negative_prompt": "",
+            "seed": -1,
+            "steps": 20,
+            "cfg": 7.0,
+            "denoise": 1.0,
+            "checkpoint": None,
+            "lora": "None",
+            "vae": "None"
+        }
+
+        for node_id, node_data in self.current_workflow.items():
+            class_type = node_data.get("class_type", "")
+            inputs = node_data.get("inputs", {})
+
+            # Extract prompts from CLIPTextEncode nodes
+            if class_type == "CLIPTextEncode":
+                text = inputs.get("text", "")
+                node_title = node_data.get("_meta", {}).get("title", "").lower()
+
+                # Guess if this is positive or negative
+                is_negative = (
+                    "negative" in node_title or
+                    any(word in text.lower() for word in ["bad", "ugly", "worst", "low quality", "watermark", "3d", "cg"])
+                )
+
+                if is_negative:
+                    defaults["negative_prompt"] = text
+                else:
+                    defaults["positive_prompt"] = text
+
+            # Extract sampling parameters from KSampler nodes
+            if class_type in {"KSampler", "KSamplerAdvanced", "SamplerCustom"}:
+                if "steps" in inputs:
+                    defaults["steps"] = int(inputs["steps"])
+                if "cfg" in inputs:
+                    defaults["cfg"] = float(inputs["cfg"])
+                if "denoise" in inputs:
+                    defaults["denoise"] = float(inputs["denoise"])
+                # Don't extract seed - keep it at -1 for randomization
+
+            # Extract model selections from discovered loaders
+            # (Deprecated - now using self.current_loaders directly)
+
+        # Override with discovered loader values
+        for category, loader_info in self.current_loaders.items():
+            if category in defaults:
+                defaults[category] = loader_info["current_value"]
+
+        return defaults
+
+    def _get_model_choices_for_loader(self, *categories) -> tuple[list, str]:
+        """
+        Get model choices and current value for discovered loader categories
+
+        Args:
+            *categories: Loader categories to check (e.g., "checkpoint", "unet")
+
+        Returns:
+            Tuple of (choices_list, current_value)
+        """
+        # Check which category exists in current loaders
+        for category in categories:
+            if category in self.current_loaders:
+                loader_info = self.current_loaders[category]
+                class_type = loader_info["class_type"]
+                param = loader_info["param"]
+                current_value = loader_info["current_value"]
+
+                # Get available models from ComfyUI
+                try:
+                    print(f"[GradioApp] Getting models for {category}: {class_type}.{param}")
+                    models = self.client.get_available_models(class_type, param)
+
+                    # Fallback for LoRA loaders: If we get 0 models, try standard LoRA loader types
+                    if category == "lora" and len(models) == 0:
+                        print(f"[GradioApp]   No models found for {class_type}, trying fallback LoRA loaders...")
+                        fallback_loaders = [
+                            ("LoraLoader", "lora_name"),
+                            ("LoraLoaderModelOnly", "lora_name"),
+                        ]
+                        for fallback_type, fallback_param in fallback_loaders:
+                            try:
+                                models = self.client.get_available_models(fallback_type, fallback_param)
+                                if len(models) > 0:
+                                    print(f"[GradioApp]   ✓ Found {len(models)} LoRA models using {fallback_type}")
+                                    # Update param to use for injection
+                                    loader_info["fallback_type"] = fallback_type
+                                    loader_info["fallback_param"] = fallback_param
+                                    break
+                            except:
+                                continue
+                    else:
+                        print(f"[GradioApp]   Found {len(models)} models")
+
+                    # Add "None" option for optional loaders
+                    if category in ["lora", "vae", "clip"]:
+                        choices = ["None"] + models
+                        value = current_value if current_value else "None"
+                    else:
+                        choices = models
+                        value = current_value if current_value in models else (models[0] if models else None)
+
+                    print(f"[GradioApp]   Returning choices: {len(choices)} items, value: {value}")
+                    return choices, value
+                except Exception as e:
+                    print(f"[GradioApp] ERROR getting models for {class_type}: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+        # No loader found for this category
+        print(f"[GradioApp] No loader found for category: {categories}")
+        return ["None"], "None"
+
+    def _get_loader_label(self, *categories) -> str:
+        """Get appropriate label for discovered loader"""
+        for category in categories:
+            if category in self.current_loaders:
+                class_type = self.current_loaders[category]["class_type"]
+                if "UNET" in class_type or "Unet" in class_type:
+                    return "UNET Model"
+                elif "Checkpoint" in class_type:
+                    return "Checkpoint Model"
+                elif "CLIP" in class_type:
+                    return "CLIP Model"
+        return "Model"
+
+    def generate_ui_from_workflow_path(self, workflow_path: str) -> tuple:
         """
         Generate UI from workflow file path (used by dropdown)
 
@@ -99,25 +371,55 @@ class ComfyUIGradioApp:
             workflow_path: Full path to workflow JSON file
 
         Returns:
-            Markdown string with workflow info and editable parameters
+            Tuple of (markdown_summary, positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, vae)
         """
         if not workflow_path or workflow_path == "None":
-            return ""
+            return ("", "", "", -1, 20, 7.0, 1.0, None, "None", "None")
 
         try:
             # Load workflow
             self.current_workflow = load_workflow_from_file(workflow_path)
+
+            # Discover loaders dynamically
+            self.current_loaders = self.discover_loaders_in_workflow()
 
             # Generate UI metadata
             self.current_ui = self.ui_generator.generate_ui_for_workflow(
                 self.current_workflow
             )
 
+            # Extract defaults
+            defaults = self.extract_defaults_from_workflow()
+
             # Build markdown representation
-            return self._build_workflow_summary_markdown()
+            summary = self._build_workflow_summary_markdown()
+
+            # Get available models for discovered loaders
+            checkpoint_choices, checkpoint_value = self._get_model_choices_for_loader("checkpoint", "unet")
+            lora_choices, lora_value = self._get_model_choices_for_loader("lora")
+            vae_choices, vae_value = self._get_model_choices_for_loader("vae")
+
+            return (
+                summary,
+                defaults["positive_prompt"],
+                defaults["negative_prompt"],
+                defaults["seed"],
+                defaults["steps"],
+                defaults["cfg"],
+                defaults["denoise"],
+                gr.update(choices=checkpoint_choices, value=checkpoint_value, label=self._get_loader_label("checkpoint", "unet")),
+                gr.update(choices=lora_choices, value=lora_value),
+                gr.update(choices=vae_choices, value=vae_value)
+            )
 
         except Exception as e:
-            return f"### ❌ Error Loading Workflow\n\n```\n{str(e)}\n```"
+            return (
+                f"### ❌ Error Loading Workflow\n\n```\n{str(e)}\n```",
+                "", "", -1, 20, 7.0, 1.0,
+                gr.update(choices=[], value=None),
+                gr.update(choices=["None"], value="None"),
+                gr.update(choices=["None"], value="None")
+            )
 
     def _build_workflow_summary_markdown(self) -> str:
         """Build markdown summary of workflow and editable parameters"""
@@ -192,7 +494,7 @@ class ComfyUIGradioApp:
 
         return "\n".join(lines)
 
-    def generate_ui_from_workflow(self, workflow_file: str) -> str:
+    def generate_ui_from_workflow(self, workflow_file: str) -> tuple:
         """
         Gradio callback: Generate UI when workflow file is uploaded
 
@@ -200,10 +502,10 @@ class ComfyUIGradioApp:
             workflow_file: File path string (Gradio 4.x type="filepath")
 
         Returns:
-            Markdown string with workflow info
+            Tuple of (markdown_summary, positive_prompt, negative_prompt, seed, steps, cfg, denoise)
         """
         if not workflow_file:
-            return ""
+            return ("", "", "", -1, 20, 7.0, 1.0)
 
         try:
             # Load workflow (auto-converts from workflow format to API format)
@@ -214,15 +516,64 @@ class ComfyUIGradioApp:
                 self.current_workflow
             )
 
+            # Extract defaults
+            defaults = self.extract_defaults_from_workflow()
+
             # Build markdown representation
-            return self._build_workflow_summary_markdown()
+            summary = self._build_workflow_summary_markdown()
+
+            # Get available models for discovered loaders
+            checkpoint_choices, checkpoint_value = self._get_model_choices_for_loader("checkpoint", "unet")
+            lora_choices, lora_value = self._get_model_choices_for_loader("lora")
+            vae_choices, vae_value = self._get_model_choices_for_loader("vae")
+
+            return (
+                summary,
+                defaults["positive_prompt"],
+                defaults["negative_prompt"],
+                defaults["seed"],
+                defaults["steps"],
+                defaults["cfg"],
+                defaults["denoise"],
+                gr.update(choices=checkpoint_choices, value=checkpoint_value, label=self._get_loader_label("checkpoint", "unet")),
+                gr.update(choices=lora_choices, value=lora_value),
+                gr.update(choices=vae_choices, value=vae_value)
+            )
 
         except Exception as e:
-            return f"### ❌ Error Loading Workflow\n\n```\n{str(e)}\n```"
+            return (
+                f"### ❌ Error Loading Workflow\n\n```\n{str(e)}\n```",
+                "", "", -1, 20, 7.0, 1.0,
+                gr.update(choices=[], value=None),
+                gr.update(choices=["None"], value="None"),
+                gr.update(choices=["None"], value="None")
+            )
 
-    def execute_current_workflow(self) -> tuple[str, list]:
+    def execute_current_workflow(
+        self,
+        positive_prompt: str,
+        negative_prompt: str,
+        seed: float,
+        steps: float,
+        cfg: float,
+        denoise: float,
+        checkpoint: str,
+        lora: str,
+        vae: str
+    ) -> tuple[str, list]:
         """
-        Execute the currently loaded workflow
+        Execute the currently loaded workflow with user-provided parameters
+
+        Args:
+            positive_prompt: Positive prompt text
+            negative_prompt: Negative prompt text
+            seed: Random seed (-1 for random)
+            steps: Number of sampling steps
+            cfg: CFG scale value
+            denoise: Denoise strength
+            checkpoint: Checkpoint model name
+            lora: LoRA model name
+            vae: VAE model name
 
         Returns:
             Tuple of (status_message, result_images)
@@ -234,13 +585,29 @@ class ComfyUIGradioApp:
             return "❌ No workflow loaded. Please select a workflow first.", []
 
         try:
-            print(f"[GradioApp] Executing workflow with {len(self.current_workflow)} nodes")
+            # Build user values dict
+            user_values = {
+                "positive_prompt": positive_prompt,
+                "negative_prompt": negative_prompt,
+                "seed": int(seed) if seed >= 0 else None,  # None means randomize
+                "steps": int(steps),
+                "cfg": float(cfg),
+                "denoise": float(denoise),
+                "checkpoint": checkpoint if checkpoint else None,
+                "lora": lora if lora and lora != "None" else None,
+                "vae": vae if vae and vae != "None" else None
+            }
 
-            # Execute workflow
+            print(f"[GradioApp] Executing workflow with {len(self.current_workflow)} nodes")
+            print(f"[GradioApp] User parameters: {user_values}")
+
+            # Execute workflow with user values and discovered loaders
             status_msg = "🚀 **Submitting workflow to ComfyUI...**"
             exec_result = self.execution_engine.execute_workflow(
                 self.current_workflow,
-                self.current_ui
+                self.current_ui,
+                user_values,
+                self.current_loaders  # Pass discovered loaders for targeted injection
             )
 
             print(f"[GradioApp] Execution result: success={exec_result.success}, prompt_id={exec_result.prompt_id}")
@@ -359,16 +726,95 @@ class ComfyUIGradioApp:
                     Both ComfyUI workflow JSON and API JSON formats are supported.
                     """)
 
-            # Dynamic UI container
+            # Editable Parameters Section
             with gr.Row():
                 with gr.Column(scale=1):
-                    gr.Markdown("### 2. Workflow Analysis")
+                    gr.Markdown("### 2. Edit Parameters")
 
-                    # This will be populated dynamically
-                    dynamic_ui_container = gr.Markdown(
-                        value="",
-                        label="Workflow Details"
-                    )
+                    # Common editable parameters
+                    with gr.Accordion("📝 Prompts", open=True):
+                        positive_prompt = gr.Textbox(
+                            label="Positive Prompt",
+                            placeholder="Enter positive prompt...",
+                            lines=3,
+                            value=""
+                        )
+                        negative_prompt = gr.Textbox(
+                            label="Negative Prompt",
+                            placeholder="Enter negative prompt...",
+                            lines=2,
+                            value=""
+                        )
+
+                    with gr.Accordion("🎨 Models (Dynamic)", open=True):
+                        gr.Markdown("""
+                        **Note:** Model dropdowns populate dynamically based on the loaded workflow.
+                        Different workflows may use different model loaders (Checkpoint, UNET, CLIP, etc.).
+                        """)
+
+                        # These will be populated dynamically when workflow loads
+                        # For now, create generic dropdowns that will be updated
+                        checkpoint = gr.Dropdown(
+                            label="Checkpoint / UNET",
+                            choices=[],
+                            value=None,
+                            allow_custom_value=True,
+                            interactive=True,
+                            visible=True
+                        )
+                        lora = gr.Dropdown(
+                            label="LoRA (Optional)",
+                            choices=["None"],
+                            value="None",
+                            allow_custom_value=True,
+                            interactive=True,
+                            visible=True
+                        )
+                        vae = gr.Dropdown(
+                            label="VAE (Optional)",
+                            choices=["None"],
+                            value="None",
+                            allow_custom_value=True,
+                            interactive=True,
+                            visible=True
+                        )
+
+                    with gr.Accordion("🎲 Sampling Parameters", open=True):
+                        with gr.Row():
+                            seed = gr.Number(
+                                label="Seed (-1 for random)",
+                                value=-1,
+                                precision=0
+                            )
+                            steps = gr.Slider(
+                                label="Steps",
+                                minimum=1,
+                                maximum=150,
+                                value=20,
+                                step=1
+                            )
+                        with gr.Row():
+                            cfg = gr.Slider(
+                                label="CFG Scale",
+                                minimum=1.0,
+                                maximum=30.0,
+                                value=7.0,
+                                step=0.5
+                            )
+                            denoise = gr.Slider(
+                                label="Denoise",
+                                minimum=0.0,
+                                maximum=1.0,
+                                value=1.0,
+                                step=0.05
+                            )
+
+                    # Workflow summary (read-only info)
+                    with gr.Accordion("ℹ️ Workflow Details", open=False):
+                        dynamic_ui_container = gr.Markdown(
+                            value="",
+                            label="Workflow Analysis"
+                        )
 
             # Execution section
             with gr.Row():
@@ -428,30 +874,30 @@ class ComfyUIGradioApp:
                 """)
 
             # Wire up event handlers
-            # Dropdown selection
+            # Dropdown selection - populate defaults when workflow is selected
             def on_dropdown_change(workflow_name):
                 if workflow_name == "None" or not workflow_name:
-                    return ""
+                    return ("", "", "", -1, 20, 7.0, 1.0, None, "None", "None")
                 workflow_path = self.available_workflows.get(workflow_name)
                 return self.generate_ui_from_workflow_path(workflow_path)
 
             workflow_dropdown.change(
                 fn=on_dropdown_change,
                 inputs=[workflow_dropdown],
-                outputs=[dynamic_ui_container]
+                outputs=[dynamic_ui_container, positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, vae]
             )
 
-            # File upload
+            # File upload - populate defaults when workflow is uploaded
             workflow_file.change(
                 fn=self.generate_ui_from_workflow,
                 inputs=[workflow_file],
-                outputs=[dynamic_ui_container]
+                outputs=[dynamic_ui_container, positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, vae]
             )
 
-            # Generate button
+            # Generate button - pass editable parameters including models
             generate_btn.click(
                 fn=self.execute_current_workflow,
-                inputs=[],
+                inputs=[positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, vae],
                 outputs=[execution_status, result_gallery]
             )
 

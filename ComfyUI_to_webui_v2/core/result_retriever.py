@@ -92,6 +92,23 @@ class ResultRetriever:
             RetrievalResult with file paths
         """
         try:
+            print(f"[ResultRetriever] Waiting for prompt_id={prompt_id}, client_id={client_id}, timeout={timeout}s")
+
+            # Check if workflow has output nodes
+            has_output_nodes = any(
+                node.get("class_type") in OUTPUT_NODE_TYPES
+                for node in workflow.values()
+                if isinstance(node, dict)
+            )
+            print(f"[ResultRetriever] Workflow has output nodes: {has_output_nodes}")
+            if has_output_nodes:
+                output_node_types = [
+                    node.get("class_type")
+                    for node in workflow.values()
+                    if isinstance(node, dict) and node.get("class_type") in OUTPUT_NODE_TYPES
+                ]
+                print(f"[ResultRetriever] Output node types found: {output_node_types}")
+
             # Wait for completion
             history_entry = self.client.wait_for_prompt_completion(
                 prompt_id,
@@ -99,7 +116,10 @@ class ResultRetriever:
                 timeout
             )
 
+            print(f"[ResultRetriever] History entry received: {history_entry is not None}")
+
             if not history_entry:
+                print(f"[ResultRetriever] ERROR: Timed out after {timeout}s")
                 return RetrievalResult(
                     success=False,
                     error=f"Execution timed out after {timeout}s"
@@ -107,18 +127,28 @@ class ResultRetriever:
 
             # Check for errors
             status = history_entry.get("status", {})
+            print(f"[ResultRetriever] Status: {status}")
+
             if status.get("status_str") == "error":
                 messages = status.get("messages", [])
                 error_msg = "; ".join(str(msg) for msg in messages)
+                print(f"[ResultRetriever] ERROR: Execution failed: {error_msg}")
                 return RetrievalResult(
                     success=False,
                     error=f"Execution failed: {error_msg}"
                 )
 
             # Extract outputs from history
+            print(f"[ResultRetriever] Extracting outputs from history...")
+            print(f"[ResultRetriever] History entry keys: {list(history_entry.keys())}")
+            print(f"[ResultRetriever] Outputs in history: {history_entry.get('outputs', {})}")
+
             images, videos = self._extract_outputs_from_history(history_entry)
 
+            print(f"[ResultRetriever] Extracted from history: {len(images)} images, {len(videos)} videos")
+
             if images or videos:
+                print(f"[ResultRetriever] SUCCESS: Found outputs in history")
                 return RetrievalResult(
                     success=True,
                     images=images,
@@ -126,15 +156,22 @@ class ResultRetriever:
                 )
 
             # Fallback: scan output directory
+            print(f"[ResultRetriever] No outputs in history, trying filesystem scan...")
+            print(f"[ResultRetriever] Output directory: {self._output_dir}")
+
             images, videos = self._fallback_scan_outputs(workflow)
 
+            print(f"[ResultRetriever] Extracted from filesystem: {len(images)} images, {len(videos)} videos")
+
             if images or videos:
+                print(f"[ResultRetriever] SUCCESS: Found outputs via filesystem scan")
                 return RetrievalResult(
                     success=True,
                     images=images,
                     videos=videos
                 )
 
+            print(f"[ResultRetriever] ERROR: No outputs found in history or filesystem")
             return RetrievalResult(
                 success=False,
                 error="No outputs found in history or filesystem"
