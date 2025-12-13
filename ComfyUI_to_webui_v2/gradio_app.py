@@ -57,6 +57,143 @@ from .config import (
     PROJECT_DESCRIPTION
 )
 
+# Photopea Integration Constants
+PHOTOPEA_EMBED_HTML = """
+<div id="photopea-integration-wrapper" style="height:720px; border:1px solid var(--block-border-color,#444); border-radius:6px; overflow:hidden;">
+  <iframe id="photopea-iframe" src="https://www.photopea.com/" style="width:100%;height:100%;border:0;" allow="clipboard-read; clipboard-write"></iframe>
+</div>
+"""
+
+PHOTOPEA_SEND_JS = """
+() => {
+    if (!window.photopeaWindow) {
+        const iframe = document.querySelector('#photopea-iframe');
+        if (iframe) window.photopeaWindow = iframe.contentWindow;
+    }
+
+    if (!window.photopeaWindow) {
+        alert("Photopea not ready");
+        return;
+    }
+
+    const container = document.querySelector('#image-upload');
+    if (!container) {
+        alert("Upload field not found");
+        return;
+    }
+
+    const sourceCanvas = container.querySelector('canvas');
+    if (!sourceCanvas) {
+        alert("No image. Upload one first.");
+        return;
+    }
+
+    const dataUrl = sourceCanvas.toDataURL('image/png');
+    window.photopeaWindow.postMessage('app.open("' + dataUrl + '", null, true);', "*");
+
+    // Success feedback
+    setTimeout(() => {
+        const buttons = document.querySelectorAll('button');
+        for (let btn of buttons) {
+            if (btn.textContent.includes('Send to Photopea')) {
+                btn.style.background = '#10b981';
+                setTimeout(() => btn.style.background = '', 1500);
+                break;
+            }
+        }
+    }, 100);
+}
+"""
+
+PHOTOPEA_EXPORT_JS = """
+() => {
+    if (!window.photopeaWindow) {
+        const iframe = document.querySelector('#photopea-iframe');
+        if (iframe) window.photopeaWindow = iframe.contentWindow;
+    }
+
+    if (!window.photopeaWindow) {
+        alert("Photopea not ready");
+        return;
+    }
+
+    // Get dimensions and export image
+    let dimensionResponses = [];
+    const dimensionHandler = (e) => {
+        dimensionResponses.push(e.data);
+        if (e.data === "done") {
+            window.removeEventListener("message", dimensionHandler);
+
+            // Parse dimensions
+            if (dimensionResponses && dimensionResponses[0]) {
+                const dims = String(dimensionResponses[0]).split(',');
+                if (dims.length === 2) {
+                    const width = parseInt(dims[0]);
+                    const height = parseInt(dims[1]);
+                    console.log('[Photopea Export] Canvas dimensions:', width, 'x', height);
+                }
+            }
+
+            // Export image
+            let responses = [];
+            const handler = (e) => {
+                responses.push(e.data);
+                if (e.data === "done") {
+                    window.removeEventListener("message", handler);
+
+                    if (!responses || !responses[0]) {
+                        alert("No data");
+                        return;
+                    }
+                    const arrayBuffer = responses[0];
+                    const bytes = new Uint8Array(arrayBuffer);
+                    let binary = '';
+                    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+                    const blob = new Blob([new Uint8Array(atob(btoa(binary)).split('').map(c => c.charCodeAt(0)))], {type: 'image/png'});
+
+                    const container = document.querySelector('#image-upload');
+                    if (!container) {
+                        alert("Upload field not found");
+                        return;
+                    }
+                    const fileInput = container.querySelector('input[type="file"]');
+                    if (!fileInput) {
+                        alert("File input not found");
+                        return;
+                    }
+
+                    const file = new File([blob], "photopea_export.png", {type: "image/png"});
+                    const dt = new DataTransfer();
+                    dt.items.add(file);
+                    fileInput.files = dt.files;
+                    fileInput.dispatchEvent(new Event('change', {bubbles: true}));
+
+                    // Success feedback
+                    setTimeout(() => {
+                        const buttons = document.querySelectorAll('button');
+                        for (let btn of buttons) {
+                            if (btn.textContent.includes('Export from Photopea')) {
+                                btn.style.background = '#10b981';
+                                setTimeout(() => btn.style.background = '', 1500);
+                                break;
+                            }
+                        }
+                    }, 100);
+                }
+            };
+
+            window.addEventListener("message", handler);
+            setTimeout(() => { window.removeEventListener("message", handler); }, 10000);
+            window.photopeaWindow.postMessage('app.activeDocument.saveToOE("png");', "*");
+        }
+    };
+
+    window.addEventListener("message", dimensionHandler);
+    setTimeout(() => { window.removeEventListener("message", dimensionHandler); }, 10000);
+    window.photopeaWindow.postMessage('app.activeDocument.width + "," + app.activeDocument.height;', "*");
+}
+"""
+
 
 class ComfyUIGradioApp:
     """
@@ -827,6 +964,15 @@ class ComfyUIGradioApp:
                     gr.Markdown("### 2. Edit Parameters")
 
                     # Common editable parameters
+                    with gr.Accordion("🖼️ Image Input (Optional)", open=False):
+                        gr.Markdown("Upload an image for img2img, inpainting, or editing in Photopea")
+                        image_upload = gr.Image(
+                            label="Input Image",
+                            type="pil",
+                            sources=["upload", "clipboard"],
+                            elem_id="image-upload"
+                        )
+
                     with gr.Accordion("📝 Prompts", open=True):
                         positive_prompt = gr.Textbox(
                             label="Positive Prompt",
@@ -911,6 +1057,33 @@ class ComfyUIGradioApp:
                                 maximum=1.0,
                                 value=1.0,
                                 step=0.05
+                            )
+
+                    # Photopea Integration (Phase 3)
+                    with gr.Accordion("🎨 Photopea Editor", open=False):
+                        gr.Markdown("""
+                        **Photopea** is a free online image editor for masking, inpainting, and image editing.
+                        - Upload an image first
+                        - Click **Send to Photopea** to edit it
+                        - Make your edits in Photopea
+                        - Click **Export from Photopea** to use the edited image
+                        """)
+
+                        # Photopea iframe
+                        photopea_panel = gr.HTML(
+                            PHOTOPEA_EMBED_HTML,
+                            elem_id="photopea-embed"
+                        )
+
+                        # Photopea control buttons
+                        with gr.Row():
+                            photopea_send_btn = gr.Button(
+                                "📤 Send to Photopea",
+                                variant="secondary"
+                            )
+                            photopea_export_btn = gr.Button(
+                                "📥 Export from Photopea",
+                                variant="primary"
                             )
 
                     # Workflow summary (read-only info)
@@ -1045,6 +1218,21 @@ class ComfyUIGradioApp:
                 fn=self.interrupt_generation,
                 inputs=[],
                 outputs=[execution_status]
+            )
+
+            # Photopea buttons - image editing integration
+            photopea_send_btn.click(
+                None,
+                inputs=[],
+                outputs=[],
+                js=PHOTOPEA_SEND_JS
+            )
+
+            photopea_export_btn.click(
+                None,
+                inputs=[],
+                outputs=[],
+                js=PHOTOPEA_EXPORT_JS
             )
 
         return app
