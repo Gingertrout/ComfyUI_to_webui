@@ -399,24 +399,30 @@ class ExecutionEngine:
                             else:
                                 lora_filename = user_values[value_key]
 
+                            # Get strength from user values (default to 1.0 if not provided)
+                            lora_strength = user_values.get("lora_strength", 1.0)
+
                             # Add it back in the proper format
                             uppercase_param = target_param.upper()  # e.g., lora_01 -> LORA_01
                             inputs[uppercase_param] = {
                                 'on': True,
                                 'lora': lora_filename,
-                                'strength': 1.0,
+                                'strength': float(lora_strength),
                                 'strengthTwo': None  # Optional: separate clip strength
                             }
                             print(f"[ExecutionEngine]   Formatted for rgthree: {uppercase_param} = {inputs[uppercase_param]}")
 
                         # Standard LoRA loaders use strength_model and strength_clip
                         else:
+                            # Get strength from user values (default to 1.0 if not provided)
+                            lora_strength = user_values.get("lora_strength", 1.0)
+
                             if "strength_model" not in inputs:
-                                inputs["strength_model"] = 1.0
-                                print(f"[ExecutionEngine]   Added strength_model = 1.0")
+                                inputs["strength_model"] = float(lora_strength)
+                                print(f"[ExecutionEngine]   Added strength_model = {lora_strength}")
                             if "strength_clip" not in inputs:
-                                inputs["strength_clip"] = 1.0
-                                print(f"[ExecutionEngine]   Added strength_clip = 1.0")
+                                inputs["strength_clip"] = float(lora_strength)
+                                print(f"[ExecutionEngine]   Added strength_clip = {lora_strength}")
         else:
             # Fallback: Old blanket injection (if loaders not discovered)
             for node_id, node_data in prompt.items():

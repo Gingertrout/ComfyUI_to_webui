@@ -371,10 +371,10 @@ class ComfyUIGradioApp:
             workflow_path: Full path to workflow JSON file
 
         Returns:
-            Tuple of (markdown_summary, positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, vae)
+            Tuple of (markdown_summary, positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae)
         """
         if not workflow_path or workflow_path == "None":
-            return ("", "", "", -1, 20, 7.0, 1.0, None, "None", "None")
+            return ("", "", "", -1, 20, 7.0, 1.0, None, "None", 1.0, "None")
 
         try:
             # Load workflow
@@ -409,6 +409,7 @@ class ComfyUIGradioApp:
                 defaults["denoise"],
                 gr.update(choices=checkpoint_choices, value=checkpoint_value, label=self._get_loader_label("checkpoint", "unet")),
                 gr.update(choices=lora_choices, value=lora_value),
+                1.0,  # lora_strength default
                 gr.update(choices=vae_choices, value=vae_value)
             )
 
@@ -418,6 +419,7 @@ class ComfyUIGradioApp:
                 "", "", -1, 20, 7.0, 1.0,
                 gr.update(choices=[], value=None),
                 gr.update(choices=["None"], value="None"),
+                1.0,  # lora_strength default
                 gr.update(choices=["None"], value="None")
             )
 
@@ -502,10 +504,10 @@ class ComfyUIGradioApp:
             workflow_file: File path string (Gradio 4.x type="filepath")
 
         Returns:
-            Tuple of (markdown_summary, positive_prompt, negative_prompt, seed, steps, cfg, denoise)
+            Tuple of (markdown_summary, positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae)
         """
         if not workflow_file:
-            return ("", "", "", -1, 20, 7.0, 1.0)
+            return ("", "", "", -1, 20, 7.0, 1.0, None, "None", 1.0, "None")
 
         try:
             # Load workflow (auto-converts from workflow format to API format)
@@ -537,6 +539,7 @@ class ComfyUIGradioApp:
                 defaults["denoise"],
                 gr.update(choices=checkpoint_choices, value=checkpoint_value, label=self._get_loader_label("checkpoint", "unet")),
                 gr.update(choices=lora_choices, value=lora_value),
+                1.0,  # lora_strength default
                 gr.update(choices=vae_choices, value=vae_value)
             )
 
@@ -546,6 +549,7 @@ class ComfyUIGradioApp:
                 "", "", -1, 20, 7.0, 1.0,
                 gr.update(choices=[], value=None),
                 gr.update(choices=["None"], value="None"),
+                1.0,  # lora_strength default
                 gr.update(choices=["None"], value="None")
             )
 
@@ -559,6 +563,7 @@ class ComfyUIGradioApp:
         denoise: float,
         checkpoint: str,
         lora: str,
+        lora_strength: float,
         vae: str
     ) -> tuple[str, list]:
         """
@@ -573,6 +578,7 @@ class ComfyUIGradioApp:
             denoise: Denoise strength
             checkpoint: Checkpoint model name
             lora: LoRA model name
+            lora_strength: LoRA strength/weight (0.0 to 2.0)
             vae: VAE model name
 
         Returns:
@@ -595,6 +601,7 @@ class ComfyUIGradioApp:
                 "denoise": float(denoise),
                 "checkpoint": checkpoint if checkpoint else None,
                 "lora": lora if lora and lora != "None" else None,
+                "lora_strength": float(lora_strength),
                 "vae": vae if vae and vae != "None" else None
             }
 
@@ -770,6 +777,15 @@ class ComfyUIGradioApp:
                             interactive=True,
                             visible=True
                         )
+                        lora_strength = gr.Slider(
+                            label="LoRA Strength",
+                            minimum=0.0,
+                            maximum=2.0,
+                            value=1.0,
+                            step=0.05,
+                            interactive=True,
+                            visible=True
+                        )
                         vae = gr.Dropdown(
                             label="VAE (Optional)",
                             choices=["None"],
@@ -877,27 +893,27 @@ class ComfyUIGradioApp:
             # Dropdown selection - populate defaults when workflow is selected
             def on_dropdown_change(workflow_name):
                 if workflow_name == "None" or not workflow_name:
-                    return ("", "", "", -1, 20, 7.0, 1.0, None, "None", "None")
+                    return ("", "", "", -1, 20, 7.0, 1.0, None, "None", 1.0, "None")
                 workflow_path = self.available_workflows.get(workflow_name)
                 return self.generate_ui_from_workflow_path(workflow_path)
 
             workflow_dropdown.change(
                 fn=on_dropdown_change,
                 inputs=[workflow_dropdown],
-                outputs=[dynamic_ui_container, positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, vae]
+                outputs=[dynamic_ui_container, positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae]
             )
 
             # File upload - populate defaults when workflow is uploaded
             workflow_file.change(
                 fn=self.generate_ui_from_workflow,
                 inputs=[workflow_file],
-                outputs=[dynamic_ui_container, positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, vae]
+                outputs=[dynamic_ui_container, positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae]
             )
 
             # Generate button - pass editable parameters including models
             generate_btn.click(
                 fn=self.execute_current_workflow,
-                inputs=[positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, vae],
+                inputs=[positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae],
                 outputs=[execution_status, result_gallery]
             )
 
