@@ -2098,6 +2098,10 @@ class ComfyUIGradioApp:
                 outputs=[civitai_download_status]
             )
 
+        # Initialize queue to prevent Gradio 4.44.0 streaming bug
+        # This fixes: AttributeError: 'NoneType' object has no attribute 'wait'
+        app.queue()
+
         return app
 
     def launch(self, **kwargs):
