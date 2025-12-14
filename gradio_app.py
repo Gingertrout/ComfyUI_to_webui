@@ -2049,14 +2049,18 @@ class ComfyUIGradioApp:
                 outputs=[civitai_key_status]
             )
 
+            # Hidden state for pagination (fixed values for now)
+            civitai_page_state = gr.State(value=1)
+            civitai_per_page_state = gr.State(value=20)
+
             civitai_search_btn.click(
                 fn=civitai_browser.search_models,
                 inputs=[
                     civitai_query,
                     civitai_type,
                     civitai_sort,
-                    gr.Number(value=1),  # page
-                    gr.Number(value=20),  # per_page
+                    civitai_page_state,
+                    civitai_per_page_state,
                     civitai_nsfw,
                     civitai_api_key
                 ],
