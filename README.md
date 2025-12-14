@@ -1,14 +1,19 @@
-# ComfyUI_to_webui (English Fork)
+# ComfyUI_to_webui V2 (Refactored Architecture)
 
 > **🍴 This is a fork of [kungful/ComfyUI_to_webui](https://github.com/kungful/ComfyUI_to_webui)**
 > Original work by **hua (Kungfu)** - Thank you for creating this amazing project!
-> This fork includes stability fixes, English translation, and enhanced error handling.
+> This is V2 with a completely refactored architecture for better maintainability and modularity.
 > See [CREDITS.md](CREDITS.md) for full attribution.
+
+**📦 V2 Architecture:** This version features a modular design with separate core components (`core/`, `features/`, `ui/`, `utils/`) for easier development and testing. V1 code is preserved in the `v1-archive` branch for reference.
 
 Gradio front-end for pairing with ComfyUI workflows. The plugin exposes workflow inputs/outputs through a Gradio UI, manages queueing, dynamic components, and live previews, and can be run alongside ComfyUI without editing the core server.
 
-## 🎯 What's New in This Fork
-- **Fixed critical deadlock issues** with Gradio 4.44.0 streaming
+## 🎯 What's New in V2
+- **Modular Architecture** - Clean separation of concerns with `core/`, `features/`, `ui/`, and `utils/` modules
+- **Reduced Dependencies** - Moving away from reliance on custom Hua output nodes
+- **Improved Maintainability** - Easier to understand, test, and extend
+- **Fixed critical deadlock issues** with Gradio 4.44.0 streaming (from V1 fork improvements)
 - **Intelligent queue polling** for workflows without custom output nodes
 - **Enhanced Photopea integration** - automatic dimension detection and VRAM overflow prevention
   - Smart dimension priority: UI inputs → workflow settings → default (768x768)
@@ -17,7 +22,7 @@ Gradio front-end for pairing with ComfyUI workflows. The plugin exposes workflow
 - **Enhanced stability** - no more hanging or crashes
 - **Works with standard ComfyUI workflows** - no special nodes required
 - **Extensive English documentation** and code comments
-- See [DEADLOCK_FIX.md](DEADLOCK_FIX.md) for technical details
+- See [PHASE1_COMPLETE.md](PHASE1_COMPLETE.md) and [PHASE3_COMPLETE.md](PHASE3_COMPLETE.md) for development milestones
 
 ## Features
 - Dynamic creation of input controls for text prompts, LoRA selectors, numeric sliders, and other workflow nodes.
@@ -46,18 +51,21 @@ Gradio front-end for pairing with ComfyUI workflows. The plugin exposes workflow
 
 ## Usage
 1. Open the Gradio UI (default `http://127.0.0.1:7861`) launched alongside ComfyUI.
-2. Select or refresh exported workflows (`output/*.json`). They are created automatically after a successful run that includes the provided Hua output nodes.
+2. Select or refresh workflows from the dropdown. V2 works with standard ComfyUI workflow JSON files.
 3. Adjust prompts, resolutions, seeds, models, and other dynamically discovered components, then click **Generate** to enqueue requests.
 4. Monitor live progress, view logs, or load existing outputs from the tabs on the right-hand column.
-5. Use the **Photopea Editor** accordion on the left to push the current image to Photopea and pull edits back into the workflow.
+5. Use the **Photopea Editor** (if integrated) to push images to Photopea and pull edits back into the workflow.
 6. Browse and download new checkpoints, LoRAs, and embeddings from the **Civitai Browser** tab without leaving the UI.
 
-## Sample Workflows
-Example workflows demonstrating different configurations live under `Sample_preview`. They showcase:
-- Text-to-image and image-to-image flows
-- Batch storyboard generation
-- ControlNet and video pipelines
-- JSON export helpers and barcode utilities
+## V2 Architecture
+The codebase is organized into clear modules:
+- `core/` - ComfyUI client, execution engine, workflow analyzer, result retriever, UI generator
+- `features/` - Optional feature modules
+- `ui/` - UI component definitions
+- `utils/` - Utility functions and helpers
+- `static/` - Static assets (CSS, JS, images)
+- `gradio_app.py` - Main Gradio application
+- `config.py` - Configuration management
 
 ## Contributing
 Pull requests that improve reliability, add new localized strings, or modernize the UI code are welcome. Please keep documentation and comments in English and follow the existing formatting conventions.
@@ -68,5 +76,7 @@ See [CREDITS.md](CREDITS.md) for detailed attribution and [LICENSE](LICENSE) for
 
 **Original Project:** https://github.com/kungful/ComfyUI_to_webui (Chinese version with different features)
 
+**V1 Archive:** The original V1 codebase (with Hua custom nodes) is preserved in the `v1-archive` branch for reference.
+
 ---
-**Note:** This is my first open-source project! 🎉 Feedback and contributions welcome!
+**Note:** This is my first open-source project! 🎉 V2 is a work in progress - feedback and contributions welcome!

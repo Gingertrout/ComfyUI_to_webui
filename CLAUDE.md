@@ -2,7 +2,30 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project Overview
+---
+**⚠️ IMPORTANT: V1 vs V2 Documentation**
+
+This CLAUDE.md file primarily documents the **V1 architecture** (preserved in `v1-archive` branch). The current `v2-dynamic-rewrite` branch features a **refactored modular architecture** with different file organization:
+
+**V2 Structure:**
+- `gradio_app.py` - Main application (refactored from v1's gradio_workflow.py)
+- `core/` - Core functionality modules (comfyui_client, execution_engine, workflow_analyzer, result_retriever, ui_generator)
+- `features/` - Optional feature modules
+- `ui/` - UI component definitions
+- `utils/` - Utility functions and helpers
+- `static/` - Static assets
+- `config.py` - Configuration management
+
+**V2 Goals:**
+- Reduce dependency on custom Hua output nodes
+- Improve modularity and testability
+- Cleaner separation of concerns
+
+Much of the v1 documentation below (queue system, polling strategies, etc.) still applies conceptually but file locations and implementation details differ. See `PHASE1_COMPLETE.md` and `PHASE3_COMPLETE.md` for v2 development milestones.
+
+---
+
+## Project Overview (V1)
 
 ComfyUI_to_webui is a **Gradio-based web UI wrapper for ComfyUI workflows**. It runs as a ComfyUI custom node plugin that exposes workflow inputs/outputs through a Gradio interface (port 7861), managing queuing, dynamic component generation, and live previews without modifying ComfyUI core.
 
