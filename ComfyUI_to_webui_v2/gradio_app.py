@@ -286,6 +286,10 @@ class ComfyUIGradioApp:
         # Settings checkpoint file path
         self.settings_checkpoint_file = Path(__file__).parent / "last_successful_settings.json"
 
+        # Image history file path
+        self.image_history_file = Path(__file__).parent / "image_history.json"
+        self.image_history = self._load_image_history()
+
     def _find_workflows_directory(self) -> Optional[Path]:
         """Find the ComfyUI workflows directory"""
         # Try relative path from current location
@@ -843,7 +847,7 @@ class ComfyUIGradioApp:
         lora: str,
         lora_strength: float,
         vae: str
-    ) -> tuple[str, list, list]:
+    ) -> tuple[str, list, list, list]:
         """
         Execute the currently loaded workflow with user-provided parameters
 
@@ -862,13 +866,13 @@ class ComfyUIGradioApp:
             vae: VAE model name
 
         Returns:
-            Tuple of (status_message, result_images, state_data)
+            Tuple of (status_message, result_images, state_data, history_gallery)
         """
         print("[GradioApp] Execute button clicked")
 
         if not self.current_workflow:
             print("[GradioApp] No workflow loaded!")
-            return "❌ No workflow loaded. Please select a workflow first.", [], None
+            return "❌ No workflow loaded. Please select a workflow first.", [], None, self.image_history
 
         try:
             # Build user values dict
@@ -910,8 +914,8 @@ class ComfyUIGradioApp:
                         f"- Node {nid}: {err}"
                         for nid, err in exec_result.node_errors.items()
                     )
-                    return f"❌ **Execution Failed**\n\n{error_msg}\n\n**Node Errors:**\n{error_details}", [], None
-                return f"❌ **Execution Failed**\n\n{error_msg}", [], None
+                    return f"❌ **Execution Failed**\n\n{error_msg}\n\n**Node Errors:**\n{error_details}", [], None, self.image_history
+                return f"❌ **Execution Failed**\n\n{error_msg}", [], None, self.image_history
 
             # Wait for results
             status_msg = f"⏳ **Executing workflow...**\n\nPrompt ID: `{exec_result.prompt_id}`"
@@ -927,7 +931,7 @@ class ComfyUIGradioApp:
             print(f"[GradioApp] Retrieval result: success={retrieval_result.success}")
 
             if not retrieval_result.success:
-                return f"❌ **Result Retrieval Failed**\n\n{retrieval_result.error}", [], None
+                return f"❌ **Result Retrieval Failed**\n\n{retrieval_result.error}", [], None, self.image_history
 
             # Success!
             num_images = len(retrieval_result.images)
@@ -958,10 +962,13 @@ class ComfyUIGradioApp:
             # Return images for gallery and state
             all_results = retrieval_result.images + retrieval_result.videos
 
-            return status_msg, all_results, all_results
+            # Add to image history
+            self.add_to_image_history(all_results)
+
+            return status_msg, all_results, all_results, self.image_history
 
         except Exception as e:
-            return f"❌ **Unexpected Error**\n\n```\n{str(e)}\n```", [], None
+            return f"❌ **Unexpected Error**\n\n```\n{str(e)}\n```", [], None, self.image_history
 
     def interrupt_generation(self) -> str:
         """
@@ -1205,6 +1212,106 @@ class ComfyUIGradioApp:
         except Exception as e:
             print(f"[GradioApp] Failed to restore parameters: {e}")
             return ("", "", 512, 512, -1, 20, 7.0, 1.0, None, "None", 1.0, "None")
+
+    def _load_image_history(self) -> list:
+        """
+        Load image history from file
+
+        Returns:
+            List of image paths in history
+        """
+        import json
+
+        if not self.image_history_file.exists():
+            return []
+
+        try:
+            with open(self.image_history_file, 'r') as f:
+                history = json.load(f)
+            print(f"[GradioApp] ✓ Loaded {len(history)} images from history")
+            return history
+        except Exception as e:
+            print(f"[GradioApp] Failed to load image history: {e}")
+            return []
+
+    def _save_image_history(self):
+        """
+        Save image history to file
+        """
+        import json
+
+        try:
+            with open(self.image_history_file, 'w') as f:
+                json.dump(self.image_history, f, indent=2)
+            print(f"[GradioApp] ✓ Saved {len(self.image_history)} images to history")
+        except Exception as e:
+            print(f"[GradioApp] Failed to save image history: {e}")
+
+    def add_to_image_history(self, image_paths: list):
+        """
+        Add new images to history
+
+        Args:
+            image_paths: List of image file paths to add
+        """
+        if not image_paths:
+            return
+
+        # Add new images to the front of the history (most recent first)
+        for path in reversed(image_paths):
+            if path not in self.image_history:
+                self.image_history.insert(0, path)
+
+        # Limit history to 100 images
+        self.image_history = self.image_history[:100]
+
+        # Save to file
+        self._save_image_history()
+
+        print(f"[GradioApp] ✓ Added {len(image_paths)} images to history (total: {len(self.image_history)})")
+
+    def send_history_to_input(self, history_selection):
+        """
+        Send selected history image to input field
+
+        Args:
+            history_selection: Gallery selection event data
+
+        Returns:
+            Tuple of (image, width, height)
+        """
+        from PIL import Image
+
+        print(f"[GradioApp] History selection: {history_selection}")
+
+        if not history_selection:
+            print("[GradioApp] No history image selected")
+            return None, 512, 512
+
+        try:
+            # history_selection is the evt.value from gallery.select()
+            # It's a SelectData object with .value containing the selected image path
+            image_path = history_selection
+
+            if isinstance(image_path, dict):
+                image_path = image_path.get('image') or image_path.get('name') or image_path.get('path')
+
+            if not image_path or not isinstance(image_path, str):
+                print(f"[GradioApp] Invalid image path: {image_path}")
+                return None, 512, 512
+
+            print(f"[GradioApp] Loading history image: {image_path}")
+            pil_image = Image.open(image_path)
+            img_width, img_height = pil_image.size
+            print(f"[GradioApp] Auto-detected dimensions: {img_width}x{img_height}")
+
+            return pil_image, img_width, img_height
+
+        except Exception as e:
+            print(f"[GradioApp] Error loading history image: {e}")
+            import traceback
+            traceback.print_exc()
+            return None, 512, 512
 
     def process_photopea_export(self, base64_data: str):
         """
@@ -1538,6 +1645,7 @@ class ComfyUIGradioApp:
                             )
 
                         with gr.Tab("✅ Final Results"):
+                            gr.Markdown("### Current Generation")
                             result_gallery = gr.Gallery(
                                 label="Generated Images/Videos",
                                 show_label=False,
@@ -1555,6 +1663,36 @@ class ComfyUIGradioApp:
                                 variant="secondary",
                                 size="sm"
                             )
+
+                            gr.Markdown("---")
+                            gr.Markdown("### Image History")
+                            gr.Markdown("*Click an image to select it, then use the buttons below*")
+
+                            history_gallery = gr.Gallery(
+                                label="Image History (100 most recent)",
+                                show_label=True,
+                                columns=4,
+                                object_fit="contain",
+                                height="auto",
+                                value=self.image_history,
+                                elem_id="history-gallery"
+                            )
+
+                            # Hidden state to track selected history image
+                            selected_history_image = gr.State(value=None)
+
+                            # Buttons to send history selection
+                            with gr.Row():
+                                history_to_input_btn = gr.Button(
+                                    "📤 Send to Input",
+                                    variant="secondary",
+                                    size="sm"
+                                )
+                                history_to_photopea_btn = gr.Button(
+                                    "🎨 Send to Photopea",
+                                    variant="secondary",
+                                    size="sm"
+                                )
 
             # Info section
             with gr.Row():
@@ -1669,7 +1807,7 @@ class ComfyUIGradioApp:
             generate_btn.click(
                 fn=self.execute_current_workflow,
                 inputs=[positive_prompt, negative_prompt, width, height, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae],
-                outputs=[execution_status, result_gallery, selected_gallery_image]
+                outputs=[execution_status, result_gallery, selected_gallery_image, history_gallery]
             )
 
             # Live preview polling - polls every 200ms for preview updates
@@ -1715,6 +1853,94 @@ class ComfyUIGradioApp:
                 fn=self.send_gallery_to_input,
                 inputs=[result_gallery, selected_gallery_image],
                 outputs=[image_upload, width, height]
+            )
+
+            # History gallery - track selected image
+            def on_history_select(evt: gr.SelectData):
+                """Track selected history image"""
+                print(f"[GradioApp] History selected: index={evt.index}, value={evt.value}")
+                return evt.value
+
+            history_gallery.select(
+                fn=on_history_select,
+                inputs=[],
+                outputs=[selected_history_image]
+            )
+
+            # Send history to input
+            history_to_input_btn.click(
+                fn=self.send_history_to_input,
+                inputs=[selected_history_image],
+                outputs=[image_upload, width, height]
+            )
+
+            # Send history to Photopea - use JavaScript with dynamic image path
+            # We need a helper function to get the selected image and send it
+            def send_history_to_photopea_js(selected_image_path):
+                """Generate JavaScript to send history image to Photopea"""
+                return f"""
+                () => {{
+                    const showError = (message) => {{
+                        console.error('[History to Photopea]', message);
+                        const buttons = document.querySelectorAll('button');
+                        for (let btn of buttons) {{
+                            if (btn.textContent.includes('Send to Photopea')) {{
+                                btn.style.background = '#ef4444';
+                                setTimeout(() => btn.style.background = '', 2000);
+                                break;
+                            }}
+                        }}
+                    }};
+
+                    if (!window.photopeaWindow) {{
+                        const iframe = document.querySelector('#photopea-iframe');
+                        if (iframe) window.photopeaWindow = iframe.contentWindow;
+                    }}
+
+                    if (!window.photopeaWindow) {{
+                        showError("Photopea not ready. Make sure the Photopea accordion is open.");
+                        return;
+                    }}
+
+                    // Get the selected image from history gallery
+                    const historyGallery = document.querySelector('#history-gallery');
+                    if (!historyGallery) {{
+                        showError("History gallery not found");
+                        return;
+                    }}
+
+                    // Find the selected image (has aria-selected="true")
+                    const selectedImg = historyGallery.querySelector('[aria-selected="true"] img');
+                    if (!selectedImg || !selectedImg.src) {{
+                        showError("No history image selected. Click an image first.");
+                        return;
+                    }}
+
+                    console.log('[History to Photopea] Sending image:', selectedImg.src.substring(0, 100) + '...');
+
+                    // Send to Photopea
+                    window.photopeaWindow.postMessage('app.open("' + selectedImg.src + '", null, true);', "*");
+                    console.log('[History to Photopea] Image sent successfully');
+
+                    // Success feedback (green flash)
+                    setTimeout(() => {{
+                        const buttons = document.querySelectorAll('button');
+                        for (let btn of buttons) {{
+                            if (btn.textContent.includes('Send to Photopea')) {{
+                                btn.style.background = '#10b981';
+                                setTimeout(() => btn.style.background = '', 1500);
+                                break;
+                            }}
+                        }}
+                    }}, 100);
+                }}
+                """
+
+            history_to_photopea_btn.click(
+                fn=None,
+                inputs=[],
+                outputs=[],
+                js=send_history_to_photopea_js(None)
             )
 
         return app
