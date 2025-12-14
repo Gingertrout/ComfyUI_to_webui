@@ -7,6 +7,7 @@ This module is loaded by ComfyUI on startup and auto-launches the Gradio interfa
 import os
 import sys
 import threading
+import asyncio
 from pathlib import Path
 
 # Add parent directory to Python path for relative imports
@@ -39,9 +40,16 @@ NODE_DISPLAY_NAME_MAPPINGS = {}
 
 def auto_launch_gradio():
     """
-    Launch Gradio interface in a background thread
+    Launch Gradio interface in a background thread with proper async event loop
+
+    Gradio requires an async event loop to be running in the thread.
+    When launched from ComfyUI's plugin system, we need to create one.
     """
     try:
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
         from .gradio_app import ComfyUIGradioApp
 
         print("\n" + "=" * 70)
@@ -52,10 +60,12 @@ def auto_launch_gradio():
         print("")
 
         app = ComfyUIGradioApp()
-        app.launch(inbrowser=False)  # Don't auto-open browser
+        app.launch(inbrowser=False, prevent_thread_lock=False)
 
     except Exception as e:
         print(f"❌ Failed to launch Gradio interface: {e}")
+        import traceback
+        traceback.print_exc()
         print("  You can still launch manually:")
         print(f"    cd {PLUGIN_DIR}")
         print("    python gradio_app.py")
