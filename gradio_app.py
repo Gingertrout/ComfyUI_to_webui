@@ -1375,7 +1375,8 @@ class ComfyUIGradioApp:
         """
         with gr.Blocks(
             title=PROJECT_NAME,
-            theme=gr.themes.Default()
+            theme=gr.themes.Default(),
+            analytics_enabled=False
         ) as app:
             # Header
             gr.Markdown(f"""
@@ -2098,9 +2099,10 @@ class ComfyUIGradioApp:
                 outputs=[civitai_download_status]
             )
 
-        # Initialize queue to prevent Gradio 4.44.0 streaming bug
+        # Initialize queue with proper configuration to prevent Gradio 4.44.0 streaming bug
         # This fixes: AttributeError: 'NoneType' object has no attribute 'wait'
-        app.queue()
+        # Disable API to avoid queue errors, set concurrency limit
+        app.queue(api_open=False, default_concurrency_limit=20)
 
         return app
 
