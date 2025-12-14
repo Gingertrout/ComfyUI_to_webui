@@ -29,26 +29,49 @@ Future Phases:
 import gradio as gr
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-from .core.comfyui_client import ComfyUIClient
-from .core.ui_generator import UIGenerator, GeneratedUI
-from .core.execution_engine import ExecutionEngine
-from .core.result_retriever import ResultRetriever
-from .utils.workflow_utils import load_workflow_from_file
+# Disable Gradio analytics for offline/headless operation
+os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
-# Import features
-from .features.live_preview import ComfyUIPreviewer
-from .features import civitai_browser
-from .utils.settings import get_setting
-from .config import (
-    COMFYUI_BASE_URL,
-    GRADIO_PORTS,
-    VERSION,
-    PROJECT_NAME,
-    PROJECT_DESCRIPTION
-)
+# Handle both ComfyUI import and direct execution
+if __name__ == "__main__" and __package__ is None:
+    # Direct execution - add parent to path for imports
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from ComfyUI_to_webui.core.comfyui_client import ComfyUIClient
+    from ComfyUI_to_webui.core.ui_generator import UIGenerator, GeneratedUI
+    from ComfyUI_to_webui.core.execution_engine import ExecutionEngine
+    from ComfyUI_to_webui.core.result_retriever import ResultRetriever
+    from ComfyUI_to_webui.utils.workflow_utils import load_workflow_from_file
+    from ComfyUI_to_webui.features.live_preview import ComfyUIPreviewer
+    from ComfyUI_to_webui.features import civitai_browser
+    from ComfyUI_to_webui.utils.settings import get_setting
+    from ComfyUI_to_webui.config import (
+        COMFYUI_BASE_URL,
+        GRADIO_PORTS,
+        VERSION,
+        PROJECT_NAME,
+        PROJECT_DESCRIPTION
+    )
+else:
+    # ComfyUI import - use relative imports
+    from .core.comfyui_client import ComfyUIClient
+    from .core.ui_generator import UIGenerator, GeneratedUI
+    from .core.execution_engine import ExecutionEngine
+    from .core.result_retriever import ResultRetriever
+    from .utils.workflow_utils import load_workflow_from_file
+    from .features.live_preview import ComfyUIPreviewer
+    from .features import civitai_browser
+    from .utils.settings import get_setting
+    from .config import (
+        COMFYUI_BASE_URL,
+        GRADIO_PORTS,
+        VERSION,
+        PROJECT_NAME,
+        PROJECT_DESCRIPTION
+    )
 
 # Photopea Integration Constants
 PHOTOPEA_EMBED_HTML = """
@@ -2079,12 +2102,17 @@ class ComfyUIGradioApp:
 
     def launch(self, **kwargs):
         """
-        Launch the Gradio application
+        Launch the Gradio application in offline/headless mode
 
         Args:
             **kwargs: Additional arguments passed to gr.Blocks.launch()
         """
         app = self.create_interface()
+
+        # Ensure offline/headless mode - disable all external calls
+        kwargs.setdefault('share', False)
+        kwargs.setdefault('show_api', False)
+        kwargs.setdefault('quiet', False)
 
         # Try to find an available port
         server_port = kwargs.pop('server_port', None)
@@ -2094,10 +2122,11 @@ class ComfyUIGradioApp:
                     app.launch(
                         server_port=port,
                         server_name="127.0.0.1",
-                        share=False,
                         **kwargs
                     )
                     print(f"✅ Gradio server started on port {port}")
+                    print(f"   Access at: http://127.0.0.1:{port}")
+                    print(f"   Mode: Offline/Headless (no external calls)")
                     return
                 except OSError:
                     continue
@@ -2110,9 +2139,11 @@ class ComfyUIGradioApp:
             app.launch(
                 server_port=server_port,
                 server_name="127.0.0.1",
-                share=False,
                 **kwargs
             )
+            print(f"✅ Gradio server started on port {server_port}")
+            print(f"   Access at: http://127.0.0.1:{server_port}")
+            print(f"   Mode: Offline/Headless (no external calls)")
 
 
 def main():
