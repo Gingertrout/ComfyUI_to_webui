@@ -38,8 +38,10 @@ from .core.execution_engine import ExecutionEngine
 from .core.result_retriever import ResultRetriever
 from .utils.workflow_utils import load_workflow_from_file
 
-# Import live preview feature
+# Import features
 from .features.live_preview import ComfyUIPreviewer
+from .features import civitai_browser
+from .utils.settings import get_setting
 from .config import (
     COMFYUI_BASE_URL,
     GRADIO_PORTS,
@@ -1685,6 +1687,88 @@ class ComfyUIGradioApp:
                                     size="sm"
                                 )
 
+                        with gr.Tab("🌐 Civitai Browser"):
+                            gr.Markdown("### Browse & Download Models from Civitai")
+
+                            with gr.Row():
+                                civitai_api_key = gr.Textbox(
+                                    label="Civitai API Key (optional)",
+                                    value=get_setting("civitai_api_key", ""),
+                                    type="password",
+                                    placeholder="Paste API key or leave blank"
+                                )
+                                civitai_save_key_btn = gr.Button("Save Key", variant="secondary")
+
+                            civitai_key_status = gr.Markdown(visible=False)
+
+                            with gr.Row():
+                                civitai_query = gr.Textbox(
+                                    label="Search",
+                                    placeholder="Model name, tag, etc."
+                                )
+                                civitai_type = gr.Dropdown(
+                                    label="Model Type",
+                                    choices=["", "Checkpoint", "LORA", "LoCon", "TextualInversion", "VAE", "Controlnet"],
+                                    value=""
+                                )
+
+                            with gr.Row():
+                                civitai_sort = gr.Dropdown(
+                                    label="Sort By",
+                                    choices=["Highest Rated", "Most Downloaded", "Newest"],
+                                    value="Highest Rated"
+                                )
+                                civitai_nsfw = gr.Dropdown(
+                                    label="NSFW",
+                                    choices=["Hide", "Show", "Only"],
+                                    value="Hide"
+                                )
+                                civitai_search_btn = gr.Button("🔍 Search", variant="primary")
+
+                            civitai_search_status = gr.Markdown(visible=False)
+                            civitai_results_state = gr.State(value=[])
+
+                            civitai_results_dropdown = gr.Dropdown(
+                                label="Search Results",
+                                choices=[],
+                                value=None
+                            )
+
+                            civitai_model_details = gr.Markdown(visible=False)
+                            civitai_preview_gallery = gr.Gallery(
+                                label="Preview Images",
+                                visible=False,
+                                columns=3,
+                                height=300
+                            )
+
+                            with gr.Row():
+                                civitai_version_dropdown = gr.Dropdown(
+                                    label="Versions",
+                                    choices=[],
+                                    value=None,
+                                    visible=False
+                                )
+                                civitai_file_dropdown = gr.Dropdown(
+                                    label="Files",
+                                    choices=[],
+                                    value=None,
+                                    visible=False
+                                )
+
+                            civitai_target_dir = gr.Textbox(
+                                label="Download Directory",
+                                value="",
+                                placeholder="Auto-suggested based on model type"
+                            )
+
+                            civitai_download_btn = gr.Button(
+                                "⬇️ Download Selected File",
+                                variant="primary"
+                            )
+
+                            civitai_download_status = gr.Markdown(visible=False)
+
             # Info section
             with gr.Row():
                 gr.Markdown(f"""
@@ -1932,6 +2016,63 @@ class ComfyUIGradioApp:
                 inputs=[],
                 outputs=[],
                 js=send_history_to_photopea_js(None)
+            )
+
+            # Civitai browser event handlers
+            civitai_save_key_btn.click(
+                fn=civitai_browser.save_api_key,
+                inputs=[civitai_api_key],
+                outputs=[civitai_key_status]
+            )
+
+            civitai_search_btn.click(
+                fn=civitai_browser.search_models,
+                inputs=[
+                    civitai_query,
+                    civitai_type,
+                    civitai_sort,
+                    gr.Number(value=1),  # page
+                    gr.Number(value=20),  # per_page
+                    civitai_nsfw,
+                    civitai_api_key
+                ],
+                outputs=[
+                    civitai_search_status,
+                    civitai_results_state,
+                    civitai_results_dropdown
+                ]
+            )
+
+            civitai_results_dropdown.change(
+                fn=civitai_browser.select_model,
+                inputs=[civitai_results_dropdown, civitai_results_state],
+                outputs=[
+                    civitai_model_details,
+                    civitai_preview_gallery,
+                    civitai_version_dropdown,
+                    civitai_file_dropdown,
+                    civitai_target_dir
+                ]
+            )
+
+            civitai_version_dropdown.change(
+                fn=civitai_browser.select_version,
+                inputs=[civitai_version_dropdown, civitai_results_state],
+                outputs=[
+                    civitai_file_dropdown,
+                    civitai_target_dir
+                ]
+            )
+
+            civitai_download_btn.click(
+                fn=civitai_browser.download_file,
+                inputs=[
+                    civitai_version_dropdown,
+                    civitai_file_dropdown,
+                    civitai_target_dir,
+                    civitai_api_key
+                ],
+                outputs=[civitai_download_status]
             )
 
         return app
