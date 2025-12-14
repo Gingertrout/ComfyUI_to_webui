@@ -350,6 +350,16 @@ class ExecutionEngine:
                     inputs["denoise"] = user_values["denoise"]
                     injected.append(f"{node_id}.denoise")
 
+            # Inject dimensions into EmptyLatentImage and similar nodes
+            if class_type in {"EmptyLatentImage", "EmptySD3LatentImage", "LoadAndResizeImage"}:
+                if user_values.get("width") is not None and "width" in inputs:
+                    inputs["width"] = user_values["width"]
+                    injected.append(f"{node_id}.width")
+
+                if user_values.get("height") is not None and "height" in inputs:
+                    inputs["height"] = user_values["height"]
+                    injected.append(f"{node_id}.height")
+
         # Third pass: inject model selections using TARGETED approach
         # Only inject into the specific nodes we discovered to avoid cross-contamination
         if discovered_loaders:
@@ -391,29 +401,64 @@ class ExecutionEngine:
                     if category == "lora":
                         class_type = target_node.get("class_type", "")
 
-                        # Power Lora Loader (rgthree) uses a special dict format
+                        # Power Lora Loader (rgthree) uses BOTH inputs AND _meta!
                         if "Power Lora Loader" in class_type:
-                            # rgthree expects UPPERCASE parameter names with dict values
-                            # Format: LORA_01 = {'on': True, 'lora': 'filename.safetensors', 'strength': 1.0}
-
-                            # Remove the lowercase string value we just added
-                            if target_param in inputs:
-                                lora_filename = inputs.pop(target_param)
-                            else:
-                                lora_filename = user_values[value_key]
-
-                            # Get strength from user values (default to 1.0 if not provided)
+                            lora_filename = user_values[value_key]
                             lora_strength = user_values.get("lora_strength", 1.0)
 
-                            # Add it back in the proper format
-                            uppercase_param = target_param.upper()  # e.g., lora_01 -> LORA_01
-                            inputs[uppercase_param] = {
-                                'on': True,
-                                'lora': lora_filename,
-                                'strength': float(lora_strength),
-                                'strengthTwo': None  # Optional: separate clip strength
-                            }
-                            print(f"[ExecutionEngine]   Formatted for rgthree: {uppercase_param} = {inputs[uppercase_param]}")
+                            # Update the _meta.info.unused_widget_values structure
+                            meta = target_node.setdefault("_meta", {})
+                            info = meta.setdefault("info", {})
+                            widget_values = info.setdefault("unused_widget_values", [])
+
+                            # Find existing LoRA entries and turn them all OFF
+                            updated = False
+                            selected_index = None
+                            for i, item in enumerate(widget_values):
+                                if isinstance(item, dict) and "lora" in item:
+                                    # Turn off all LoRAs first
+                                    item["on"] = False
+                                    # If this matches the user's selection, turn it ON
+                                    if item.get("lora") == lora_filename:
+                                        item["on"] = True
+                                        item["strength"] = float(lora_strength)
+                                        updated = True
+                                        selected_index = i
+                                        print(f"[ExecutionEngine]   ✓ Enabled existing LoRA in Power Lora Loader slot {i}: {lora_filename}")
+
+                            # If the LoRA wasn't found in existing entries, add it to the first empty slot
+                            if not updated:
+                                for i, item in enumerate(widget_values):
+                                    if isinstance(item, dict) and not item.get("on") and "lora" in item:
+                                        item["on"] = True
+                                        item["lora"] = lora_filename
+                                        item["strength"] = float(lora_strength)
+                                        item["strengthTwo"] = None
+                                        updated = True
+                                        selected_index = i
+                                        print(f"[ExecutionEngine]   ✓ Added LoRA to Power Lora Loader slot {i}: {lora_filename}")
+                                        break
+
+                            if not updated:
+                                print(f"[ExecutionEngine]   ⚠️ WARNING: Could not inject LoRA into Power Lora Loader (no empty slots)")
+                            else:
+                                # ALSO add to inputs using the rgthree format
+                                # Power Lora Loader expects UPPERCASE params: LORA_01, LORA_02, etc.
+                                if selected_index is not None:
+                                    # Calculate the uppercase param name based on slot index
+                                    # Slot 2 (index 2) in widget_values = LORA_01
+                                    # Slot 3 (index 3) = LORA_02, etc.
+                                    # (indices 0-1 are header/widget type, actual LoRA slots start at index 2)
+                                    if selected_index >= 2:
+                                        lora_number = selected_index - 1  # offset by 1 (index 2 = LORA_01)
+                                        uppercase_param = f"LORA_{lora_number:02d}"  # e.g., LORA_01, LORA_02
+                                        inputs[uppercase_param] = {
+                                            'on': True,
+                                            'lora': lora_filename,
+                                            'strength': float(lora_strength),
+                                            'strengthTwo': None
+                                        }
+                                        print(f"[ExecutionEngine]   ✓ Also added to inputs: {uppercase_param} = {inputs[uppercase_param]}")
 
                         # Standard LoRA loaders use strength_model and strength_clip
                         else:

@@ -41,3 +41,4 @@ plugin_settings.json
 temp/
 output/
 *.log
+ComfyUI_to_webui_v2/last_successful_settings.json

@@ -66,32 +66,85 @@ PHOTOPEA_EMBED_HTML = """
 
 PHOTOPEA_SEND_JS = """
 () => {
+    const showError = (message) => {
+        console.error('[Photopea Send]', message);
+        const buttons = document.querySelectorAll('button');
+        for (let btn of buttons) {
+            if (btn.textContent.includes('Send to Photopea')) {
+                btn.style.background = '#ef4444';
+                setTimeout(() => btn.style.background = '', 2000);
+                break;
+            }
+        }
+    };
+
     if (!window.photopeaWindow) {
         const iframe = document.querySelector('#photopea-iframe');
         if (iframe) window.photopeaWindow = iframe.contentWindow;
     }
 
     if (!window.photopeaWindow) {
-        alert("Photopea not ready");
+        showError("Photopea not ready. Make sure the Photopea accordion is open.");
         return;
     }
 
     const container = document.querySelector('#image-upload');
     if (!container) {
-        alert("Upload field not found");
+        showError("Image input field not found");
         return;
     }
 
-    const sourceCanvas = container.querySelector('canvas');
+    console.log('[Photopea Send] Searching for image in ImageEditor...');
+
+    // Strategy 1: Try to find canvas element
+    let sourceCanvas = container.querySelector('canvas');
     if (!sourceCanvas) {
-        alert("No image. Upload one first.");
+        sourceCanvas = container.querySelector('.image-container canvas');
+    }
+    if (!sourceCanvas) {
+        sourceCanvas = container.querySelector('[data-testid="image"] canvas');
+    }
+
+    let dataUrl = null;
+
+    // If canvas found, get data from it
+    if (sourceCanvas) {
+        console.log('[Photopea Send] Found canvas, extracting image data');
+        dataUrl = sourceCanvas.toDataURL('image/png');
+    } else {
+        // Strategy 2: Try to find img element and convert it to canvas
+        console.log('[Photopea Send] No canvas found, looking for img element');
+        let imgElement = container.querySelector('img');
+        if (!imgElement) {
+            imgElement = container.querySelector('.image-container img');
+        }
+        if (!imgElement) {
+            imgElement = container.querySelector('[data-testid="image"] img');
+        }
+
+        if (imgElement && imgElement.src) {
+            console.log('[Photopea Send] Found img element, converting to canvas');
+            // Create a temporary canvas to convert img to data URL
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = imgElement.naturalWidth || imgElement.width;
+            tempCanvas.height = imgElement.naturalHeight || imgElement.height;
+            const ctx = tempCanvas.getContext('2d');
+            ctx.drawImage(imgElement, 0, 0);
+            dataUrl = tempCanvas.toDataURL('image/png');
+        }
+    }
+
+    if (!dataUrl) {
+        console.error('[Photopea Send] No image found. DOM structure:', container.innerHTML.substring(0, 500));
+        showError("No image loaded. Upload or generate an image first, then try again.");
         return;
     }
 
-    const dataUrl = sourceCanvas.toDataURL('image/png');
+    console.log('[Photopea Send] Image data URL length:', dataUrl.length);
     window.photopeaWindow.postMessage('app.open("' + dataUrl + '", null, true);', "*");
+    console.log('[Photopea Send] Image sent successfully');
 
-    // Success feedback
+    // Success feedback (green flash)
     setTimeout(() => {
         const buttons = document.querySelectorAll('button');
         for (let btn of buttons) {
@@ -107,90 +160,95 @@ PHOTOPEA_SEND_JS = """
 
 PHOTOPEA_EXPORT_JS = """
 () => {
+    const showError = (message) => {
+        console.error('[Photopea Export]', message);
+        alert(message);
+        const buttons = document.querySelectorAll('button');
+        for (let btn of buttons) {
+            if (btn.textContent.includes('Export from Photopea')) {
+                btn.style.background = '#ef4444';
+                setTimeout(() => btn.style.background = '', 2000);
+                break;
+            }
+        }
+    };
+
     if (!window.photopeaWindow) {
         const iframe = document.querySelector('#photopea-iframe');
         if (iframe) window.photopeaWindow = iframe.contentWindow;
     }
 
     if (!window.photopeaWindow) {
-        alert("Photopea not ready");
-        return;
+        showError("Photopea not ready. Make sure the Photopea accordion is open.");
+        return null;
     }
 
-    // Get dimensions and export image
-    let dimensionResponses = [];
-    const dimensionHandler = (e) => {
-        dimensionResponses.push(e.data);
-        if (e.data === "done") {
-            window.removeEventListener("message", dimensionHandler);
+    console.log('[Photopea Export] Starting export...');
 
-            // Parse dimensions
-            if (dimensionResponses && dimensionResponses[0]) {
-                const dims = String(dimensionResponses[0]).split(',');
-                if (dims.length === 2) {
-                    const width = parseInt(dims[0]);
-                    const height = parseInt(dims[1]);
-                    console.log('[Photopea Export] Canvas dimensions:', width, 'x', height);
+    // Return a promise that resolves with the image data
+    return new Promise((resolve, reject) => {
+        let responses = [];
+        const handler = (e) => {
+            // Photopea sends ArrayBuffer responses, then "done" string
+            if (e.data === "done") {
+                window.removeEventListener("message", handler);
+
+                if (!responses || !responses[0]) {
+                    showError("No image data received from Photopea");
+                    reject("No data");
+                    return;
                 }
-            }
 
-            // Export image
-            let responses = [];
-            const handler = (e) => {
-                responses.push(e.data);
-                if (e.data === "done") {
-                    window.removeEventListener("message", handler);
+                console.log('[Photopea Export] Received data, creating blob...');
 
-                    if (!responses || !responses[0]) {
-                        alert("No data");
-                        return;
-                    }
-                    const arrayBuffer = responses[0];
-                    const bytes = new Uint8Array(arrayBuffer);
-                    let binary = '';
-                    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-                    const blob = new Blob([new Uint8Array(atob(btoa(binary)).split('').map(c => c.charCodeAt(0)))], {type: 'image/png'});
+                // Convert ArrayBuffer to base64 for Python backend
+                const arrayBuffer = responses[0];
+                const bytes = new Uint8Array(arrayBuffer);
+                let binary = '';
+                for (let i = 0; i < bytes.length; i++) {
+                    binary += String.fromCharCode(bytes[i]);
+                }
+                const base64 = btoa(binary);
 
-                    const container = document.querySelector('#image-upload');
-                    if (!container) {
-                        alert("Upload field not found");
-                        return;
-                    }
-                    const fileInput = container.querySelector('input[type="file"]');
-                    if (!fileInput) {
-                        alert("File input not found");
-                        return;
-                    }
+                console.log('[Photopea Export] Converted to base64, length:', base64.length);
+                console.log('[Photopea Export] ✓ Export complete - returning data to Python backend');
 
-                    const file = new File([blob], "photopea_export.png", {type: "image/png"});
-                    const dt = new DataTransfer();
-                    dt.items.add(file);
-                    fileInput.files = dt.files;
-                    fileInput.dispatchEvent(new Event('change', {bubbles: true}));
-
-                    // Success feedback
-                    setTimeout(() => {
-                        const buttons = document.querySelectorAll('button');
-                        for (let btn of buttons) {
-                            if (btn.textContent.includes('Export from Photopea')) {
-                                btn.style.background = '#10b981';
-                                setTimeout(() => btn.style.background = '', 1500);
-                                break;
-                            }
+                // Flash button green
+                setTimeout(() => {
+                    const buttons = document.querySelectorAll('button');
+                    for (let btn of buttons) {
+                        if (btn.textContent.includes('Export from Photopea')) {
+                            btn.style.background = '#10b981';
+                            setTimeout(() => btn.style.background = '', 1500);
+                            break;
                         }
-                    }, 100);
-                }
-            };
+                    }
+                }, 100);
 
-            window.addEventListener("message", handler);
-            setTimeout(() => { window.removeEventListener("message", handler); }, 10000);
-            window.photopeaWindow.postMessage('app.activeDocument.saveToOE("png");', "*");
-        }
-    };
+                // Return base64 data
+                resolve(base64);
+            } else {
+                // Collect ArrayBuffer responses
+                responses.push(e.data);
+                console.log('[Photopea Export] Received data chunk:', e.data.byteLength, 'bytes');
+            }
+        };
 
-    window.addEventListener("message", dimensionHandler);
-    setTimeout(() => { window.removeEventListener("message", dimensionHandler); }, 10000);
-    window.photopeaWindow.postMessage('app.activeDocument.width + "," + app.activeDocument.height;', "*");
+        window.addEventListener("message", handler);
+
+        // Timeout after 10 seconds
+        setTimeout(() => {
+            window.removeEventListener("message", handler);
+            if (responses.length === 0) {
+                console.error('[Photopea Export] Timeout - no response from Photopea');
+                reject("Timeout");
+            }
+        }, 10000);
+
+        // Request export from Photopea
+        window.photopeaWindow.postMessage('app.activeDocument.saveToOE("png");', "*");
+        console.log('[Photopea Export] Export request sent to Photopea');
+    });
 }
 """
 
@@ -219,10 +277,14 @@ class ComfyUIGradioApp:
         self.current_workflow: Optional[Dict[str, Any]] = None
         self.current_ui: Optional[GeneratedUI] = None
         self.current_loaders: Dict[str, Dict[str, Any]] = {}  # Track discovered loaders
+        self.current_workflow_name: str = "None"  # Track current workflow name
 
         # Scan for available workflows in ComfyUI workflows directory
         self.workflows_dir = self._find_workflows_directory()
         self.available_workflows = self._scan_workflows()
+
+        # Settings checkpoint file path
+        self.settings_checkpoint_file = Path(__file__).parent / "last_successful_settings.json"
 
     def _find_workflows_directory(self) -> Optional[Path]:
         """Find the ComfyUI workflows directory"""
@@ -338,54 +400,89 @@ class ComfyUIGradioApp:
             for category, patterns in LOADER_PATTERNS.items():
                 for pattern_type, param_name in patterns:
                     if class_type == pattern_type and param_name in inputs:
+                        # Extract actual value (handle both direct values and links)
+                        raw_value = inputs[param_name]
+                        if isinstance(raw_value, str):
+                            current_value = raw_value
+                        elif isinstance(raw_value, list):
+                            # This is a link to another node, we can't resolve it
+                            # Leave as None so dropdown shows available choices
+                            current_value = None
+                        else:
+                            current_value = None
+
                         loaders[category] = {
                             "node_id": node_id,
                             "class_type": class_type,
                             "param": param_name,
-                            "current_value": inputs[param_name]
+                            "current_value": current_value
                         }
+                        print(f"[GradioApp] Discovered {category} loader: node {node_id}, param={param_name}, value={current_value}")
                         break
 
             # DYNAMIC DISCOVERY: Catch any loader we missed
             # Look for nodes with "Lora" or "LoRA" in name that have model parameters
             if "lora" not in loaders and ("lora" in class_type.lower() or "LoRA" in class_type):
-                # Power Lora Loader (rgthree) uses dynamic inputs like lora_01, lora_02, etc.
-                # Look for any parameter that looks like a LoRA
                 lora_param = None
                 lora_value = None
 
-                for param_name, param_value in inputs.items():
-                    # Look for parameters that are strings ending in .safetensors
-                    if isinstance(param_value, str) and param_value.endswith(".safetensors"):
-                        lora_param = param_name
-                        lora_value = param_value
-                        print(f"[GradioApp] Found LoRA parameter in {class_type}: {param_name} = {param_value}")
-                        break
-                    # Also look for parameters that start with "lora" (like lora_01, lora_name, etc.)
-                    elif isinstance(param_value, str) and "lora" in param_name.lower():
-                        lora_param = param_name
-                        lora_value = param_value
-                        print(f"[GradioApp] Found LoRA-like parameter in {class_type}: {param_name} = {param_value}")
-                        break
+                # Special handling for Power Lora Loader (rgthree)
+                # It stores LoRAs in _meta.info.unused_widget_values, NOT in inputs!
+                if "Power Lora Loader" in class_type:
+                    print(f"[GradioApp] Detected Power Lora Loader (node {node_id})")
+                    meta = node_data.get("_meta", {})
+                    info = meta.get("info", {})
+                    widget_values = info.get("unused_widget_values", [])
 
-                # Even if no LoRA is loaded, mark the node as a LoRA loader
-                # This handles Power Lora Loader nodes that exist but have no LoRAs selected
-                if lora_param or "Power Lora Loader" in class_type:
-                    print(f"[GradioApp] Found LoRA loader: {class_type} (node {node_id})")
-                    loaders["lora"] = {
-                        "node_id": node_id,
-                        "class_type": class_type,
-                        "param": lora_param or "lora_01",  # Default param name for Power Lora Loader
-                        "current_value": lora_value or ""
-                    }
-                elif lora_param:
-                    print(f"[GradioApp] Found unknown LoRA loader: {class_type} with param {lora_param}")
+                    # Find active LoRAs (on: True)
+                    active_loras = []
+                    for item in widget_values:
+                        if isinstance(item, dict) and item.get("on") and item.get("lora"):
+                            active_loras.append(item["lora"])
+
+                    if active_loras:
+                        # Show the first active LoRA in the dropdown
+                        lora_value = active_loras[0]
+                        lora_param = "lora_01"  # Power Lora Loader uses lora_01, lora_02, etc.
+                        print(f"[GradioApp] Found {len(active_loras)} active LoRAs: {active_loras}")
+                        print(f"[GradioApp] Using first active LoRA: {lora_value}")
+                    else:
+                        print(f"[GradioApp] Power Lora Loader found but no active LoRAs")
+                        lora_param = "lora_01"
+                        lora_value = None
+
                     loaders["lora"] = {
                         "node_id": node_id,
                         "class_type": class_type,
                         "param": lora_param,
-                        "current_value": lora_value
+                        "current_value": lora_value,
+                        "is_power_lora": True,
+                        "active_loras": active_loras  # Store all active LoRAs for reference
                     }
+                else:
+                    # Standard LoRA loaders - look in inputs
+                    for param_name, param_value in inputs.items():
+                        # Look for parameters that are strings ending in .safetensors
+                        if isinstance(param_value, str) and param_value.endswith(".safetensors"):
+                            lora_param = param_name
+                            lora_value = param_value
+                            print(f"[GradioApp] Found LoRA parameter in {class_type}: {param_name} = {param_value}")
+                            break
+                        # Also look for parameters that start with "lora" (like lora_01, lora_name, etc.)
+                        elif isinstance(param_value, str) and "lora" in param_name.lower():
+                            lora_param = param_name
+                            lora_value = param_value
+                            print(f"[GradioApp] Found LoRA-like parameter in {class_type}: {param_name} = {param_value}")
+                            break
+
+                    if lora_param:
+                        print(f"[GradioApp] Found LoRA loader: {class_type} with param {lora_param}")
+                        loaders["lora"] = {
+                            "node_id": node_id,
+                            "class_type": class_type,
+                            "param": lora_param,
+                            "current_value": lora_value
+                        }
 
         print(f"[GradioApp] Discovered loaders: {list(loaders.keys())}")
         for category, info in loaders.items():
@@ -501,10 +598,14 @@ class ComfyUIGradioApp:
                     # Add "None" option for optional loaders
                     if category in ["lora", "vae", "clip"]:
                         choices = ["None"] + models
-                        value = current_value if current_value else "None"
+                        # Keep current value if it's in choices, otherwise "None"
+                        if current_value and current_value in choices:
+                            value = current_value
+                        else:
+                            value = "None"
                     else:
                         choices = models
-                        value = current_value if current_value in models else (models[0] if models else None)
+                        value = current_value if current_value and current_value in models else (models[0] if models else None)
 
                     print(f"[GradioApp]   Returning choices: {len(choices)} items, value: {value}")
                     return choices, value
@@ -541,11 +642,15 @@ class ComfyUIGradioApp:
             Tuple of (markdown_summary, positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae)
         """
         if not workflow_path or workflow_path == "None":
+            self.current_workflow_name = "None"
             return ("", "", "", -1, 20, 7.0, 1.0, None, "None", 1.0, "None")
 
         try:
             # Load workflow
             self.current_workflow = load_workflow_from_file(workflow_path)
+
+            # Track workflow name (extract from path)
+            self.current_workflow_name = Path(workflow_path).stem
 
             # Discover loaders dynamically
             self.current_loaders = self.discover_loaders_in_workflow()
@@ -674,11 +779,15 @@ class ComfyUIGradioApp:
             Tuple of (markdown_summary, positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae)
         """
         if not workflow_file:
+            self.current_workflow_name = "None"
             return ("", "", "", -1, 20, 7.0, 1.0, None, "None", 1.0, "None")
 
         try:
             # Load workflow (auto-converts from workflow format to API format)
             self.current_workflow = load_workflow_from_file(workflow_file)
+
+            # Track workflow name (extract from uploaded file)
+            self.current_workflow_name = Path(workflow_file).stem
 
             # Generate UI metadata
             self.current_ui = self.ui_generator.generate_ui_for_workflow(
@@ -724,6 +833,8 @@ class ComfyUIGradioApp:
         self,
         positive_prompt: str,
         negative_prompt: str,
+        width: float,
+        height: float,
         seed: float,
         steps: float,
         cfg: float,
@@ -732,13 +843,15 @@ class ComfyUIGradioApp:
         lora: str,
         lora_strength: float,
         vae: str
-    ) -> tuple[str, list]:
+    ) -> tuple[str, list, list]:
         """
         Execute the currently loaded workflow with user-provided parameters
 
         Args:
             positive_prompt: Positive prompt text
             negative_prompt: Negative prompt text
+            width: Image width in pixels
+            height: Image height in pixels
             seed: Random seed (-1 for random)
             steps: Number of sampling steps
             cfg: CFG scale value
@@ -749,19 +862,21 @@ class ComfyUIGradioApp:
             vae: VAE model name
 
         Returns:
-            Tuple of (status_message, result_images)
+            Tuple of (status_message, result_images, state_data)
         """
         print("[GradioApp] Execute button clicked")
 
         if not self.current_workflow:
             print("[GradioApp] No workflow loaded!")
-            return "❌ No workflow loaded. Please select a workflow first.", []
+            return "❌ No workflow loaded. Please select a workflow first.", [], None
 
         try:
             # Build user values dict
             user_values = {
                 "positive_prompt": positive_prompt,
                 "negative_prompt": negative_prompt,
+                "width": int(width),
+                "height": int(height),
                 "seed": int(seed) if seed >= 0 else None,  # None means randomize
                 "steps": int(steps),
                 "cfg": float(cfg),
@@ -795,8 +910,8 @@ class ComfyUIGradioApp:
                         f"- Node {nid}: {err}"
                         for nid, err in exec_result.node_errors.items()
                     )
-                    return f"❌ **Execution Failed**\n\n{error_msg}\n\n**Node Errors:**\n{error_details}", []
-                return f"❌ **Execution Failed**\n\n{error_msg}", []
+                    return f"❌ **Execution Failed**\n\n{error_msg}\n\n**Node Errors:**\n{error_details}", [], None
+                return f"❌ **Execution Failed**\n\n{error_msg}", [], None
 
             # Wait for results
             status_msg = f"⏳ **Executing workflow...**\n\nPrompt ID: `{exec_result.prompt_id}`"
@@ -812,7 +927,7 @@ class ComfyUIGradioApp:
             print(f"[GradioApp] Retrieval result: success={retrieval_result.success}")
 
             if not retrieval_result.success:
-                return f"❌ **Result Retrieval Failed**\n\n{retrieval_result.error}", []
+                return f"❌ **Result Retrieval Failed**\n\n{retrieval_result.error}", [], None
 
             # Success!
             num_images = len(retrieval_result.images)
@@ -823,13 +938,30 @@ class ComfyUIGradioApp:
             status_msg += f"- **Videos**: {num_videos}\n"
             status_msg += f"- **Prompt ID**: `{exec_result.prompt_id}`"
 
-            # Return images for gallery
+            # Save settings checkpoint on successful generation
+            self.save_settings_checkpoint(
+                self.current_workflow_name,
+                positive_prompt,
+                negative_prompt,
+                width,
+                height,
+                seed,
+                steps,
+                cfg,
+                denoise,
+                checkpoint,
+                lora,
+                lora_strength,
+                vae
+            )
+
+            # Return images for gallery and state
             all_results = retrieval_result.images + retrieval_result.videos
 
-            return status_msg, all_results
+            return status_msg, all_results, all_results
 
         except Exception as e:
-            return f"❌ **Unexpected Error**\n\n```\n{str(e)}\n```", []
+            return f"❌ **Unexpected Error**\n\n```\n{str(e)}\n```", [], None
 
     def interrupt_generation(self) -> str:
         """
@@ -887,54 +1019,229 @@ class ComfyUIGradioApp:
 
         return preview_image, status_text
 
-    def send_gallery_to_input(self, gallery_data):
+    def send_gallery_to_input(self, gallery_data, state_data):
         """
-        Send selected gallery image to input field for iterative editing
+        Send gallery image to input field for iterative editing with auto-dimension detection
 
         Args:
-            gallery_data: Gallery selection data from Gradio
+            gallery_data: Gallery data from Gradio (list of results)
+            state_data: State variable tracking results
 
         Returns:
-            Image to populate the input field
+            Tuple of (image, width, height) to populate input field and dimension controls
         """
         from PIL import Image
 
-        if not gallery_data:
-            print("[GradioApp] No gallery data provided")
-            return None
-
-        print(f"[GradioApp] Gallery data type: {type(gallery_data)}")
         print(f"[GradioApp] Gallery data: {gallery_data}")
+        print(f"[GradioApp] State data: {state_data}")
 
-        # Handle different Gradio gallery data formats
+        # Try state data first (from last generation)
+        data_to_use = state_data if state_data else gallery_data
+
+        if not data_to_use:
+            print("[GradioApp] No image data available")
+            return None, 512, 512
+
         try:
-            # Gallery data is typically a list of file paths or tuples
-            if isinstance(gallery_data, list) and len(gallery_data) > 0:
-                first_item = gallery_data[0]
+            pil_image = None
 
-                # Handle tuple format: (image_path, caption)
-                if isinstance(first_item, tuple):
+            # Handle list of image paths or file objects
+            if isinstance(data_to_use, list) and len(data_to_use) > 0:
+                first_item = data_to_use[0]
+
+                print(f"[GradioApp] First item type: {type(first_item)}, value: {first_item}")
+
+                # If it's already a PIL Image, use it
+                if isinstance(first_item, Image.Image):
+                    print("[GradioApp] Using PIL Image directly")
+                    pil_image = first_item
+
+                # Extract path from tuple (path, caption)
+                elif isinstance(first_item, tuple) and len(first_item) > 0:
                     image_path = first_item[0]
-                # Handle dict format: {'name': path, ...}
-                elif isinstance(first_item, dict):
-                    image_path = first_item.get('name') or first_item.get('path')
-                # Handle string format: direct path
-                elif isinstance(first_item, str):
-                    image_path = first_item
-                else:
-                    print(f"[GradioApp] Unknown gallery item type: {type(first_item)}")
-                    return None
+                    if image_path and isinstance(image_path, str):
+                        print(f"[GradioApp] Loading from tuple path: {image_path}")
+                        pil_image = Image.open(image_path)
 
-                if image_path:
-                    print(f"[GradioApp] Loading image from: {image_path}")
-                    return Image.open(image_path)
+                # Extract from dict
+                elif isinstance(first_item, dict):
+                    image_path = first_item.get('name') or first_item.get('path') or first_item.get('image')
+                    if image_path and isinstance(image_path, str):
+                        print(f"[GradioApp] Loading from dict path: {image_path}")
+                        pil_image = Image.open(image_path)
+
+                # Direct string path
+                elif isinstance(first_item, str):
+                    print(f"[GradioApp] Loading from string path: {first_item}")
+                    pil_image = Image.open(first_item)
+
+                else:
+                    print(f"[GradioApp] Unknown format: {type(first_item)}")
+                    return None, 512, 512
+
+            # Auto-detect dimensions from image
+            if pil_image:
+                img_width, img_height = pil_image.size
+                print(f"[GradioApp] Auto-detected dimensions: {img_width}x{img_height}")
+                return pil_image, img_width, img_height
 
         except Exception as e:
-            print(f"[GradioApp] Error loading image: {e}")
+            print(f"[GradioApp] Error: {e}")
             import traceback
             traceback.print_exc()
 
-        return None
+        return None, 512, 512
+
+    def save_settings_checkpoint(
+        self,
+        workflow_name: str,
+        positive_prompt: str,
+        negative_prompt: str,
+        width: float,
+        height: float,
+        seed: float,
+        steps: float,
+        cfg: float,
+        denoise: float,
+        checkpoint: str,
+        lora: str,
+        lora_strength: float,
+        vae: str
+    ):
+        """
+        Save current settings to checkpoint file
+
+        Args:
+            All current UI values
+        """
+        import json
+        from datetime import datetime
+
+        settings = {
+            "saved_at": datetime.now().isoformat(),
+            "workflow_name": workflow_name,
+            "positive_prompt": positive_prompt,
+            "negative_prompt": negative_prompt,
+            "width": int(width),
+            "height": int(height),
+            "seed": int(seed),
+            "steps": int(steps),
+            "cfg": float(cfg),
+            "denoise": float(denoise),
+            "checkpoint": checkpoint,
+            "lora": lora,
+            "lora_strength": float(lora_strength),
+            "vae": vae
+        }
+
+        try:
+            with open(self.settings_checkpoint_file, 'w') as f:
+                json.dump(settings, f, indent=2)
+            print(f"[GradioApp] ✓ Settings saved: steps={settings['steps']}, cfg={settings['cfg']}, denoise={settings['denoise']}")
+            print(f"[GradioApp] ✓ Settings saved: pos_prompt={settings['positive_prompt'][:50]}..., lora={settings['lora']}")
+        except Exception as e:
+            print(f"[GradioApp] Failed to save settings: {e}")
+
+    def restore_settings_checkpoint(self):
+        """
+        Restore settings from checkpoint file
+
+        Returns:
+            Tuple of (workflow_name, restore_mode_flag)
+        """
+        import json
+
+        if not self.settings_checkpoint_file.exists():
+            print("[GradioApp] No saved settings found")
+            return "None", False
+
+        try:
+            with open(self.settings_checkpoint_file, 'r') as f:
+                settings = json.load(f)
+
+            print(f"[GradioApp] ✓ Restoring settings from {settings['saved_at']}")
+
+            # Return workflow name and set restore mode to True
+            return settings.get("workflow_name", "None"), True
+
+        except Exception as e:
+            print(f"[GradioApp] Failed to restore settings: {e}")
+            return "None", False
+
+    def restore_settings_checkpoint_step2(self):
+        """
+        Restore settings from checkpoint file - Step 2: Restore parameters
+
+        Returns:
+            Tuple of parameter settings to override workflow defaults
+        """
+        import json
+
+        if not self.settings_checkpoint_file.exists():
+            return ("", "", 512, 512, -1, 20, 7.0, 1.0, None, "None", 1.0, "None")
+
+        try:
+            with open(self.settings_checkpoint_file, 'r') as f:
+                settings = json.load(f)
+
+            print(f"[GradioApp] ✓ Restored all parameters from checkpoint")
+
+            # Step 2: Return all parameters (workflow already loaded in step 1)
+            return (
+                settings.get("positive_prompt", ""),
+                settings.get("negative_prompt", ""),
+                settings.get("width", 512),
+                settings.get("height", 512),
+                settings.get("seed", -1),
+                settings.get("steps", 20),
+                settings.get("cfg", 7.0),
+                settings.get("denoise", 1.0),
+                settings.get("checkpoint"),
+                settings.get("lora", "None"),
+                settings.get("lora_strength", 1.0),
+                settings.get("vae", "None")
+            )
+
+        except Exception as e:
+            print(f"[GradioApp] Failed to restore parameters: {e}")
+            return ("", "", 512, 512, -1, 20, 7.0, 1.0, None, "None", 1.0, "None")
+
+    def process_photopea_export(self, base64_data: str):
+        """
+        Process exported image data from Photopea
+
+        Args:
+            base64_data: Base64-encoded PNG image data from Photopea
+
+        Returns:
+            PIL Image for the ImageEditor component
+        """
+        import base64
+        import io
+        from PIL import Image
+
+        if not base64_data or base64_data == "null" or base64_data == "":
+            print("[GradioApp] No Photopea data received")
+            return None
+
+        try:
+            print(f"[GradioApp] Processing Photopea export ({len(base64_data)} chars)")
+
+            # Decode base64 to bytes
+            image_bytes = base64.b64decode(base64_data)
+            print(f"[GradioApp] Decoded {len(image_bytes)} bytes")
+
+            # Convert to PIL Image
+            pil_image = Image.open(io.BytesIO(image_bytes))
+            print(f"[GradioApp] ✓ Photopea image loaded: {pil_image.size[0]}x{pil_image.size[1]}")
+
+            return pil_image
+
+        except Exception as e:
+            print(f"[GradioApp] Error processing Photopea export: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def create_interface(self) -> gr.Blocks:
         """
@@ -1007,19 +1314,35 @@ class ComfyUIGradioApp:
                     Both ComfyUI workflow JSON and API JSON formats are supported.
                     """)
 
+                    gr.Markdown("**— OR —**")
+
+                    # Restore last successful settings button
+                    restore_settings_btn = gr.Button(
+                        "🔄 Restore Last Successful Settings",
+                        variant="secondary",
+                        size="sm"
+                    )
+                    gr.Markdown("*Restores all parameters from the last successful generation*")
+
             # Editable Parameters Section
             with gr.Row():
                 with gr.Column(scale=1):
                     gr.Markdown("### 2. Edit Parameters")
 
                     # Common editable parameters
-                    with gr.Accordion("🖼️ Image Input (Optional)", open=False):
+                    with gr.Accordion("🖼️ Image Input (Optional)", open=True):
                         gr.Markdown("Upload an image for img2img, inpainting, or editing in Photopea")
-                        image_upload = gr.Image(
+                        image_upload = gr.ImageEditor(
                             label="Input Image",
                             type="pil",
+                            image_mode="RGBA",
                             sources=["upload", "clipboard"],
-                            elem_id="image-upload"
+                            elem_id="image-upload",
+                            brush=gr.Brush(default_size=56, color_mode="fixed", colors=["#ffffffff"], default_color="#ffffffff"),
+                            eraser=gr.Eraser(default_size=48),
+                            layers=True,
+                            transforms=(),
+                            canvas_size=None
                         )
 
                     with gr.Accordion("📝 Prompts", open=True):
@@ -1080,6 +1403,25 @@ class ComfyUIGradioApp:
 
                     with gr.Accordion("🎲 Sampling Parameters", open=True):
                         with gr.Row():
+                            width = gr.Number(
+                                label="Width",
+                                value=512,
+                                minimum=64,
+                                maximum=2048,
+                                step=64,
+                                precision=0,
+                                elem_id="width-input"
+                            )
+                            height = gr.Number(
+                                label="Height",
+                                value=512,
+                                minimum=64,
+                                maximum=2048,
+                                step=64,
+                                precision=0,
+                                elem_id="height-input"
+                            )
+                        with gr.Row():
                             seed = gr.Number(
                                 label="Seed (-1 for random)",
                                 value=-1,
@@ -1135,12 +1477,22 @@ class ComfyUIGradioApp:
                                 variant="primary"
                             )
 
+                        # Hidden state to hold Photopea export data
+                        photopea_data = gr.Textbox(
+                            value="",
+                            visible=False,
+                            elem_id="photopea-data-hidden"
+                        )
+
                     # Workflow summary (read-only info)
                     with gr.Accordion("ℹ️ Workflow Details", open=False):
                         dynamic_ui_container = gr.Markdown(
                             value="",
                             label="Workflow Analysis"
                         )
+
+            # Hidden state for restore settings mode (top-level)
+            restore_mode = gr.State(value=False)
 
             # Execution section
             with gr.Row():
@@ -1194,9 +1546,12 @@ class ComfyUIGradioApp:
                                 height="auto"
                             )
 
+                            # Hidden state to track selected gallery image
+                            selected_gallery_image = gr.State(value=None)
+
                             # Button to send result back to input for iterative editing
                             send_to_input_btn = gr.Button(
-                                "📤 Send Selected to Input",
+                                "📤 Use Result as Input",
                                 variant="secondary",
                                 size="sm"
                             )
@@ -1234,16 +1589,64 @@ class ComfyUIGradioApp:
 
             # Wire up event handlers
             # Dropdown selection - populate defaults when workflow is selected
-            def on_dropdown_change(workflow_name):
+            def on_dropdown_change(workflow_name, is_restore_mode):
                 if workflow_name == "None" or not workflow_name:
-                    return ("", "", "", -1, 20, 7.0, 1.0, None, "None", 1.0, "None")
+                    return ("", "", "", 512, 512, -1, 20, 7.0, 1.0, None, "None", 1.0, "None", False)
+
                 workflow_path = self.available_workflows.get(workflow_name)
-                return self.generate_ui_from_workflow_path(workflow_path)
+                result = self.generate_ui_from_workflow_path(workflow_path)
+
+                # If in restore mode, override with saved settings
+                if is_restore_mode:
+                    print("[GradioApp] Restore mode active - applying saved settings after workflow load")
+                    saved_settings = self.restore_settings_checkpoint_step2()
+                    print(f"[GradioApp] Saved settings: width={saved_settings[2]}, height={saved_settings[3]}, steps={saved_settings[5]}")
+                    print(f"[GradioApp] Saved settings: pos_prompt={saved_settings[0][:50]}..., lora={saved_settings[9]}")
+                    # Replace workflow defaults with saved settings
+                    result = (
+                        result[0],  # Keep workflow summary
+                        saved_settings[0],  # positive_prompt
+                        saved_settings[1],  # negative_prompt
+                        saved_settings[2],  # width
+                        saved_settings[3],  # height
+                        saved_settings[4],  # seed
+                        saved_settings[5],  # steps
+                        saved_settings[6],  # cfg
+                        saved_settings[7],  # denoise
+                        saved_settings[8],  # checkpoint
+                        saved_settings[9],  # lora
+                        saved_settings[10], # lora_strength
+                        saved_settings[11], # vae
+                        False  # Reset restore mode
+                    )
+                    print(f"[GradioApp] Result tuple: width={result[3]}, height={result[4]}, steps={result[6]}")
+                else:
+                    # Normal workflow loading - INSERT width, height at correct position
+                    # result = (summary, pos_prompt, neg_prompt, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae)
+                    # outputs = (summary, pos_prompt, neg_prompt, width, height, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae, restore_mode)
+                    result = (
+                        result[0],  # summary
+                        result[1],  # positive_prompt
+                        result[2],  # negative_prompt
+                        512,        # width (default)
+                        512,        # height (default)
+                        result[3],  # seed
+                        result[4],  # steps
+                        result[5],  # cfg
+                        result[6],  # denoise
+                        result[7],  # checkpoint
+                        result[8],  # lora
+                        result[9],  # lora_strength
+                        result[10], # vae
+                        False       # restore_mode
+                    )
+
+                return result
 
             workflow_dropdown.change(
                 fn=on_dropdown_change,
-                inputs=[workflow_dropdown],
-                outputs=[dynamic_ui_container, positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae]
+                inputs=[workflow_dropdown, restore_mode],
+                outputs=[dynamic_ui_container, positive_prompt, negative_prompt, width, height, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae, restore_mode]
             )
 
             # File upload - populate defaults when workflow is uploaded
@@ -1253,15 +1656,23 @@ class ComfyUIGradioApp:
                 outputs=[dynamic_ui_container, positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae]
             )
 
-            # Generate button - pass editable parameters including models
-            generate_btn.click(
-                fn=self.execute_current_workflow,
-                inputs=[positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae],
-                outputs=[execution_status, result_gallery]
+            # Restore last successful settings
+            # Sets workflow dropdown and restore_mode flag
+            # The dropdown.change handler will apply saved settings when restore_mode is True
+            restore_settings_btn.click(
+                fn=self.restore_settings_checkpoint,
+                inputs=[],
+                outputs=[workflow_dropdown, restore_mode]
             )
 
-            # Live preview polling - updates every 200ms
-            # Using polling instead of generator for better Gradio 4.x compatibility
+            # Generate button - pass editable parameters including models and dimensions
+            generate_btn.click(
+                fn=self.execute_current_workflow,
+                inputs=[positive_prompt, negative_prompt, width, height, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae],
+                outputs=[execution_status, result_gallery, selected_gallery_image]
+            )
+
+            # Live preview polling - polls every 200ms for preview updates
             preview_event = app.load(
                 fn=self.get_preview_update,
                 inputs=[],
@@ -1284,18 +1695,26 @@ class ComfyUIGradioApp:
                 js=PHOTOPEA_SEND_JS
             )
 
+            # Photopea export - JS populates textbox, textbox change triggers Python
             photopea_export_btn.click(
-                None,
+                fn=None,
                 inputs=[],
-                outputs=[],
+                outputs=[photopea_data],
                 js=PHOTOPEA_EXPORT_JS
             )
 
-            # Send gallery result to input for iterative editing
+            # When textbox changes (JS populates it), automatically process the image
+            photopea_data.change(
+                fn=self.process_photopea_export,
+                inputs=[photopea_data],
+                outputs=[image_upload]
+            )
+
+            # Send gallery result to input for iterative editing (with auto-dimension detection)
             send_to_input_btn.click(
                 fn=self.send_gallery_to_input,
-                inputs=[result_gallery],
-                outputs=[image_upload]
+                inputs=[result_gallery, selected_gallery_image],
+                outputs=[image_upload, width, height]
             )
 
         return app
