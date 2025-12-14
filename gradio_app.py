@@ -38,17 +38,8 @@ from .core.execution_engine import ExecutionEngine
 from .core.result_retriever import ResultRetriever
 from .utils.workflow_utils import load_workflow_from_file
 
-# Import from sibling package (kelnel_ui is at same level as ComfyUI_to_webui_v2)
-try:
-    from kelnel_ui.k_Preview import ComfyUIPreviewer
-except ImportError:
-    # Fallback for standalone testing - try relative import from parent
-    import sys
-    from pathlib import Path
-    parent_dir = Path(__file__).parent.parent
-    if str(parent_dir) not in sys.path:
-        sys.path.insert(0, str(parent_dir))
-    from kelnel_ui.k_Preview import ComfyUIPreviewer
+# Import live preview feature
+from .features.live_preview import ComfyUIPreviewer
 from .config import (
     COMFYUI_BASE_URL,
     GRADIO_PORTS,

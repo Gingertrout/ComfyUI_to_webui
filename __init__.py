@@ -1,13 +1,12 @@
 """
 ComfyUI_to_webui V2 - ComfyUI Plugin Registration
 
-This module is loaded by ComfyUI on startup.
-For Phase 1, it provides manual launch capability.
-Future phases will add auto-launch and custom node registration.
+This module is loaded by ComfyUI on startup and auto-launches the Gradio interface.
 """
 
 import os
 import sys
+import threading
 from pathlib import Path
 
 # Add parent directory to Python path for relative imports
@@ -26,68 +25,60 @@ __description__ = "Dynamic Gradio interface for ComfyUI workflows"
 
 
 # ============================================================================
-# Custom Node Mappings (Future)
+# Custom Node Mappings
 # ============================================================================
 
-# Phase 1: No custom nodes
-# Future phases may add custom output nodes if needed
-
+# V2 doesn't require custom Hua nodes - it works with standard ComfyUI workflows
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
 
 
 # ============================================================================
-# Plugin Initialization
+# Auto-Launch Gradio Interface
 # ============================================================================
 
-def initialize_plugin():
+def auto_launch_gradio():
     """
-    Initialize the plugin
-
-    Phase 1: Just print info message
-    Future: Auto-launch Gradio server
+    Launch Gradio interface in a background thread
     """
-    print("\n" + "=" * 70)
-    print(f"  {PROJECT_NAME} - {VERSION}")
-    print("=" * 70)
-    print("  Phase 1 MVP: Dynamic UI Generation")
-    print("")
-    print("  Status: Loaded successfully!")
-    print("")
-    print("  To launch the Gradio interface:")
-    print("    1. Open a terminal")
-    print("    2. Navigate to:", str(PLUGIN_DIR))
-    print("    3. Run: python -m ComfyUI_to_webui_v2.gradio_app")
-    print("")
-    print("  OR run from Python:")
-    print("    >>> from ComfyUI_to_webui_v2.gradio_app import main")
-    print("    >>> main()")
-    print("=" * 70)
-    print("")
+    try:
+        from .gradio_app import ComfyUIGradioApp
 
+        print("\n" + "=" * 70)
+        print(f"  {PROJECT_NAME} - {VERSION}")
+        print("=" * 70)
+        print("  🚀 Starting Gradio interface...")
+        print("=" * 70)
+        print("")
 
-# ============================================================================
-# Manual Launch Function
-# ============================================================================
+        app = ComfyUIGradioApp()
+        app.launch(inbrowser=False)  # Don't auto-open browser
+
+    except Exception as e:
+        print(f"❌ Failed to launch Gradio interface: {e}")
+        print("  You can still launch manually:")
+        print(f"    cd {PLUGIN_DIR}")
+        print("    python gradio_app.py")
+
 
 def launch_gradio_interface():
     """
-    Manually launch the Gradio interface
+    Manually launch the Gradio interface in a new thread
 
     Usage:
-        >>> import ComfyUI_to_webui_v2
-        >>> ComfyUI_to_webui_v2.launch_gradio_interface()
+        >>> import ComfyUI_to_webui
+        >>> ComfyUI_to_webui.launch_gradio_interface()
     """
-    from .gradio_app import main
-    main()
+    thread = threading.Thread(target=auto_launch_gradio, daemon=True)
+    thread.start()
 
 
 # ============================================================================
 # ComfyUI Plugin Entry Point
 # ============================================================================
 
-# Initialize plugin when ComfyUI loads this module
-initialize_plugin()
+# Auto-launch Gradio when ComfyUI loads this module
+launch_gradio_interface()
 
 
 # Export for external use
