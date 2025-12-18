@@ -1,16 +1,8 @@
 {
-  "saved_at": "2025-12-13T21:59:11.402669",
-  "workflow_name": "Z-Image",
-  "positive_prompt": "three-quarters view of Bowsette, pale skin, white horns, cow horns, pointed ears, black hair, short hair, highlights, galaxy eyes, red eyes makeup, freckles, blemishes, goosebumps, peachfuzz hairs,\n\nblack pinafore, spiked choker, spiked armbands, sunny field,",
-  "negative_prompt": "3D, CG, bad fingers, watermark",
-  "width": 480,
-  "height": 800,
-  "seed": -1,
-  "steps": 5,
-  "cfg": 1.0,
-  "denoise": 1.0,
-  "checkpoint": "komposto_zitANI.safetensors",
-  "lora": "None",
-  "lora_strength": 1.0,
-  "vae": "ae.safetensors"
+  "saved_at": "2025-12-18T09:32:47.154101",
+  "workflow_name": "UnstableDiffusion-Mask",
+  "positive_prompt": "futanari, pubic hair, 3heads, apart, lying on back on sofa, pose, masturbating, cum, ahegao, shock, green eyes closed, living room",
+  "negative_prompt": "3d, cg, perfect skin, watermark, AI",
+  "width": 1024,
+  "height": 1280
 }

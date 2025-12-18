@@ -136,6 +136,13 @@ def convert_workflow_to_prompt(workflow_data: dict) -> dict:
                 title = meta_entry.get("title")
         if title:
             prompt_entry["_meta"] = {"title": title}
+
+        # Preserve position data for spatial sorting of nodes (fixes image input ordering)
+        if "pos" in node:
+            pos = node["pos"]
+            if isinstance(pos, list) and len(pos) >= 2:
+                prompt_entry.setdefault("_meta", {})["pos"] = pos
+
         if extra_widget_values:
             prompt_entry.setdefault("_meta", {}).setdefault("info", {})[
                 "unused_widget_values"

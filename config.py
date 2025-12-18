@@ -43,7 +43,7 @@ class ComfyUIEndpoints:
 class TimeoutConfig:
     """Timeout and polling interval configuration"""
     # Prompt execution timeout (seconds)
-    prompt_execution: float = 300.0
+    prompt_execution: float = 900.0
 
     # History API polling interval (seconds)
     history_poll_interval: float = 0.75
@@ -86,6 +86,8 @@ IMAGE_INPUT_NODE_TYPES: Set[str] = {
     "LoadImage",
     "LoadAndResizeImage",
     "ImageInput",
+    "LoadImageOutput",
+    "LoadImageMask",
 }
 
 # Video input node types

@@ -45,6 +45,10 @@ if __name__ == "__main__" and __package__ is None:
     from ComfyUI_to_webui.core.execution_engine import ExecutionEngine
     from ComfyUI_to_webui.core.result_retriever import ResultRetriever
     from ComfyUI_to_webui.utils.workflow_utils import load_workflow_from_file
+    from ComfyUI_to_webui.utils.image_utils import (
+        extract_image_and_mask,
+        save_pil_image_to_input
+    )
     from ComfyUI_to_webui.features.live_preview import ComfyUIPreviewer
     from ComfyUI_to_webui.features import civitai_browser
     from ComfyUI_to_webui.utils.settings import get_setting
@@ -62,6 +66,10 @@ else:
     from .core.execution_engine import ExecutionEngine
     from .core.result_retriever import ResultRetriever
     from .utils.workflow_utils import load_workflow_from_file
+    from .utils.image_utils import (
+        extract_image_and_mask,
+        save_pil_image_to_input
+    )
     from .features.live_preview import ComfyUIPreviewer
     from .features import civitai_browser
     from .utils.settings import get_setting
@@ -454,11 +462,17 @@ class ComfyUIGradioApp:
                     info = meta.get("info", {})
                     widget_values = info.get("unused_widget_values", [])
 
-                    # Find active LoRAs (on: True)
-                    active_loras = []
+                    # Capture all LoRA slots (on/off, name, strength)
+                    power_loras = []
                     for item in widget_values:
-                        if isinstance(item, dict) and item.get("on") and item.get("lora"):
-                            active_loras.append(item["lora"])
+                        if isinstance(item, dict) and "lora" in item:
+                            power_loras.append({
+                                "lora": item.get("lora"),
+                                "enabled": bool(item.get("on")),
+                                "strength": float(item.get("strength", 1.0)) if item.get("strength") is not None else 1.0
+                            })
+
+                    active_loras = [slot["lora"] for slot in power_loras if slot["enabled"] and slot.get("lora")]
 
                     if active_loras:
                         # Show the first active LoRA in the dropdown
@@ -477,7 +491,8 @@ class ComfyUIGradioApp:
                         "param": lora_param,
                         "current_value": lora_value,
                         "is_power_lora": True,
-                        "active_loras": active_loras  # Store all active LoRAs for reference
+                        "active_loras": active_loras,  # Store all active LoRAs for reference
+                        "power_loras": power_loras
                     }
                 else:
                     # Standard LoRA loaders - look in inputs
@@ -638,6 +653,43 @@ class ComfyUIGradioApp:
         print(f"[GradioApp] No loader found for category: {categories}")
         return ["None"], "None"
 
+    def _get_lora_slot_defaults(self, lora_choices: list[str]) -> list[dict[str, Any]]:
+        """
+        Build default values for up to three LoRA slots (Power Lora Loader)
+
+        Returns:
+            List of dicts with keys: enabled, value, strength
+        """
+        defaults = []
+        loader_info = self.current_loaders.get("lora", {})
+        power_loras = loader_info.get("power_loras", []) if loader_info.get("is_power_lora") else []
+
+        for idx in range(3):
+            slot_default = {
+                "enabled": False,
+                "value": "None",
+                "strength": 1.0
+            }
+
+            if power_loras and idx < len(power_loras):
+                entry = power_loras[idx]
+                slot_default["enabled"] = bool(entry.get("enabled"))
+                slot_default["value"] = entry.get("lora") if entry.get("lora") else "None"
+                slot_default["strength"] = float(entry.get("strength", 1.0))
+            elif not loader_info.get("is_power_lora") and idx == 0:
+                # Standard LoRA loader fallback - use the single selection if present
+                if loader_info.get("current_value"):
+                    slot_default["enabled"] = True
+                    slot_default["value"] = loader_info["current_value"]
+
+            # Ensure value is in choices
+            if slot_default["value"] not in lora_choices:
+                slot_default["value"] = "None"
+
+            defaults.append(slot_default)
+
+        return defaults
+
     def _get_loader_label(self, *categories) -> str:
         """Get appropriate label for discovered loader"""
         for category in categories:
@@ -659,11 +711,11 @@ class ComfyUIGradioApp:
             workflow_path: Full path to workflow JSON file
 
         Returns:
-            Tuple of (markdown_summary, positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae)
+            Tuple of (markdown_summary, positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora1_enabled, lora1, lora1_strength, lora2_enabled, lora2, lora2_strength, lora3_enabled, lora3, lora3_strength, vae)
         """
         if not workflow_path or workflow_path == "None":
             self.current_workflow_name = "None"
-            return ("", "", "", -1, 20, 7.0, 1.0, None, "None", 1.0, "None")
+            return ("", "", "", -1, 20, 7.0, 1.0, None, False, "None", 1.0, False, "None", 1.0, False, "None", 1.0, "None")
 
         try:
             # Load workflow
@@ -688,7 +740,8 @@ class ComfyUIGradioApp:
 
             # Get available models for discovered loaders
             checkpoint_choices, checkpoint_value = self._get_model_choices_for_loader("checkpoint", "unet")
-            lora_choices, lora_value = self._get_model_choices_for_loader("lora")
+            lora_choices, _ = self._get_model_choices_for_loader("lora")
+            lora_slots = self._get_lora_slot_defaults(lora_choices)
             vae_choices, vae_value = self._get_model_choices_for_loader("vae")
 
             return (
@@ -700,8 +753,15 @@ class ComfyUIGradioApp:
                 defaults["cfg"],
                 defaults["denoise"],
                 gr.update(choices=checkpoint_choices, value=checkpoint_value, label=self._get_loader_label("checkpoint", "unet")),
-                gr.update(choices=lora_choices, value=lora_value),
-                1.0,  # lora_strength default
+                lora_slots[0]["enabled"],
+                gr.update(choices=lora_choices, value=lora_slots[0]["value"]),
+                lora_slots[0]["strength"],
+                lora_slots[1]["enabled"],
+                gr.update(choices=lora_choices, value=lora_slots[1]["value"]),
+                lora_slots[1]["strength"],
+                lora_slots[2]["enabled"],
+                gr.update(choices=lora_choices, value=lora_slots[2]["value"]),
+                lora_slots[2]["strength"],
                 gr.update(choices=vae_choices, value=vae_value)
             )
 
@@ -710,8 +770,15 @@ class ComfyUIGradioApp:
                 f"### ❌ Error Loading Workflow\n\n```\n{str(e)}\n```",
                 "", "", -1, 20, 7.0, 1.0,
                 gr.update(choices=[], value=None),
+                False,
                 gr.update(choices=["None"], value="None"),
-                1.0,  # lora_strength default
+                1.0,
+                False,
+                gr.update(choices=["None"], value="None"),
+                1.0,
+                False,
+                gr.update(choices=["None"], value="None"),
+                1.0,
                 gr.update(choices=["None"], value="None")
             )
 
@@ -796,11 +863,11 @@ class ComfyUIGradioApp:
             workflow_file: File path string (Gradio 4.x type="filepath")
 
         Returns:
-            Tuple of (markdown_summary, positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae)
+            Tuple of (markdown_summary, positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora1_enabled, lora1, lora1_strength, lora2_enabled, lora2, lora2_strength, lora3_enabled, lora3, lora3_strength, vae)
         """
         if not workflow_file:
             self.current_workflow_name = "None"
-            return ("", "", "", -1, 20, 7.0, 1.0, None, "None", 1.0, "None")
+            return ("", "", "", -1, 20, 7.0, 1.0, None, False, "None", 1.0, False, "None", 1.0, False, "None", 1.0, "None")
 
         try:
             # Load workflow (auto-converts from workflow format to API format)
@@ -808,6 +875,9 @@ class ComfyUIGradioApp:
 
             # Track workflow name (extract from uploaded file)
             self.current_workflow_name = Path(workflow_file).stem
+
+            # Discover loaders dynamically
+            self.current_loaders = self.discover_loaders_in_workflow()
 
             # Generate UI metadata
             self.current_ui = self.ui_generator.generate_ui_for_workflow(
@@ -822,7 +892,8 @@ class ComfyUIGradioApp:
 
             # Get available models for discovered loaders
             checkpoint_choices, checkpoint_value = self._get_model_choices_for_loader("checkpoint", "unet")
-            lora_choices, lora_value = self._get_model_choices_for_loader("lora")
+            lora_choices, _ = self._get_model_choices_for_loader("lora")
+            lora_slots = self._get_lora_slot_defaults(lora_choices)
             vae_choices, vae_value = self._get_model_choices_for_loader("vae")
 
             return (
@@ -834,8 +905,15 @@ class ComfyUIGradioApp:
                 defaults["cfg"],
                 defaults["denoise"],
                 gr.update(choices=checkpoint_choices, value=checkpoint_value, label=self._get_loader_label("checkpoint", "unet")),
-                gr.update(choices=lora_choices, value=lora_value),
-                1.0,  # lora_strength default
+                lora_slots[0]["enabled"],
+                gr.update(choices=lora_choices, value=lora_slots[0]["value"]),
+                lora_slots[0]["strength"],
+                lora_slots[1]["enabled"],
+                gr.update(choices=lora_choices, value=lora_slots[1]["value"]),
+                lora_slots[1]["strength"],
+                lora_slots[2]["enabled"],
+                gr.update(choices=lora_choices, value=lora_slots[2]["value"]),
+                lora_slots[2]["strength"],
                 gr.update(choices=vae_choices, value=vae_value)
             )
 
@@ -844,13 +922,23 @@ class ComfyUIGradioApp:
                 f"### ❌ Error Loading Workflow\n\n```\n{str(e)}\n```",
                 "", "", -1, 20, 7.0, 1.0,
                 gr.update(choices=[], value=None),
+                False,
                 gr.update(choices=["None"], value="None"),
-                1.0,  # lora_strength default
+                1.0,
+                False,
+                gr.update(choices=["None"], value="None"),
+                1.0,
+                False,
+                gr.update(choices=["None"], value="None"),
+                1.0,
                 gr.update(choices=["None"], value="None")
             )
 
     def execute_current_workflow(
         self,
+        image_data,
+        invert_mask_flag: bool,
+        image_data_2,
         positive_prompt: str,
         negative_prompt: str,
         width: float,
@@ -860,14 +948,23 @@ class ComfyUIGradioApp:
         cfg: float,
         denoise: float,
         checkpoint: str,
-        lora: str,
-        lora_strength: float,
+        lora1_enabled: bool,
+        lora1: str,
+        lora1_strength: float,
+        lora2_enabled: bool,
+        lora2: str,
+        lora2_strength: float,
+        lora3_enabled: bool,
+        lora3: str,
+        lora3_strength: float,
         vae: str
     ) -> tuple[str, list, list, list]:
         """
         Execute the currently loaded workflow with user-provided parameters
 
         Args:
+            image_data: Gradio ImageEditor payload (contains image + mask)
+            image_data_2: Second Gradio ImageEditor payload (optional)
             positive_prompt: Positive prompt text
             negative_prompt: Negative prompt text
             width: Image width in pixels
@@ -877,8 +974,9 @@ class ComfyUIGradioApp:
             cfg: CFG scale value
             denoise: Denoise strength
             checkpoint: Checkpoint model name
-            lora: LoRA model name
-            lora_strength: LoRA strength/weight (0.0 to 2.0)
+            lora1/lora2/lora3: LoRA model names (optional)
+            lora*_enabled: Whether each LoRA slot should be active
+            lora*_strength: LoRA strength/weight (0.0 to 2.0)
             vae: VAE model name
 
         Returns:
@@ -891,7 +989,86 @@ class ComfyUIGradioApp:
             return "❌ No workflow loaded. Please select a workflow first.", [], None, self.image_history
 
         try:
+            def _process_image_payload(payload, image_prefix: str, mask_prefix: str, label: str):
+                if isinstance(payload, dict):
+                    print(f"[GradioApp] {label} ImageEditor dict keys: {list(payload.keys())}")
+
+                upload_image, upload_mask = extract_image_and_mask(payload)
+                saved_image_path = None
+                saved_mask_path = None
+
+                if upload_image:
+                    print(f"[GradioApp] {label} upload image size: {upload_image.size}, mode: {upload_image.mode}")
+                    if "A" in upload_image.getbands():
+                        print(f"[GradioApp] {label} upload image alpha extrema: {upload_image.getchannel('A').getextrema()}")
+                if upload_mask:
+                    print(f"[GradioApp] {label} upload mask size: {upload_mask.size}, mode: {upload_mask.mode}, extrema: {upload_mask.getextrema()}")
+
+                # If no explicit mask provided but image has alpha, derive mask from alpha channel
+                if upload_mask is None and upload_image and upload_image.mode in {"RGBA", "LA"}:
+                    alpha = upload_image.getchannel("A")
+                    extrema = alpha.getextrema()
+                    if extrema and extrema[0] < 255:
+                        upload_mask = alpha
+
+                # If we have both, embed mask into image alpha so LoadImage emits mask correctly
+                if upload_image and upload_mask:
+                    mask_resized = upload_mask.convert("L").resize(upload_image.size)
+                    base_rgba = upload_image.convert("RGBA")
+                    base_rgba.putalpha(mask_resized)
+                    upload_image = base_rgba
+
+                if upload_image:
+                    upload_ref = self.client.upload_pil_image(upload_image, filename_prefix=image_prefix)
+                    if upload_ref and upload_ref.get("name"):
+                        saved_image_path = upload_ref["name"]
+                        print(f"[GradioApp] ✓ Uploaded {label.lower()} image: {saved_image_path}")
+                    else:
+                        # Fallback to saving locally
+                        saved_image_path = save_pil_image_to_input(upload_image, prefix=image_prefix)
+                        if saved_image_path:
+                            print(f"[GradioApp] ✓ Saved {label.lower()} image to ComfyUI input: {saved_image_path}")
+                        else:
+                            print(f"[GradioApp] ⚠️ Failed to save {label.lower()} image to ComfyUI input directory")
+
+                if upload_mask:
+                    mask_ref = self.client.upload_pil_image(upload_mask.convert("L"), filename_prefix=mask_prefix)
+                    if mask_ref and mask_ref.get("name"):
+                        saved_mask_path = mask_ref["name"]
+                        print(f"[GradioApp] ✓ Uploaded {label.lower()} mask: {saved_mask_path}")
+                    else:
+                        saved_mask_path = save_pil_image_to_input(upload_mask, prefix=mask_prefix)
+                        if saved_mask_path:
+                            print(f"[GradioApp] ✓ Saved {label.lower()} mask to ComfyUI input: {saved_mask_path}")
+                        else:
+                            print(f"[GradioApp] ⚠️ Failed to save {label.lower()} mask to ComfyUI input directory")
+
+                return saved_image_path, saved_mask_path
+
+            # Extract image and mask from ImageEditor payloads
+            saved_image_path, saved_mask_path = _process_image_payload(
+                image_data, "input", "mask", "Input 1"
+            )
+            saved_image_path_2, saved_mask_path_2 = _process_image_payload(
+                image_data_2, "input2", "mask2", "Input 2"
+            )
+
+            print(
+                "[GradioApp] Injection paths — "
+                f"image1: {saved_image_path}, mask1: {saved_mask_path}, "
+                f"image2: {saved_image_path_2}, mask2: {saved_mask_path_2}"
+            )
+
             # Build user values dict
+            lora_slots = [
+                {"name": lora1 if lora1 and lora1 != "None" else None, "enabled": bool(lora1_enabled), "strength": float(lora1_strength)},
+                {"name": lora2 if lora2 and lora2 != "None" else None, "enabled": bool(lora2_enabled), "strength": float(lora2_strength)},
+                {"name": lora3 if lora3 and lora3 != "None" else None, "enabled": bool(lora3_enabled), "strength": float(lora3_strength)},
+            ]
+
+            # Pick the first enabled LoRA as a legacy single selection (for standard loaders)
+            first_enabled_lora = next((slot["name"] for slot in lora_slots if slot["enabled"] and slot["name"]), None)
+
             user_values = {
                 "positive_prompt": positive_prompt,
                 "negative_prompt": negative_prompt,
@@ -902,9 +1079,14 @@ class ComfyUIGradioApp:
                 "cfg": float(cfg),
                 "denoise": float(denoise),
                 "checkpoint": checkpoint if checkpoint else None,
-                "lora": lora if lora and lora != "None" else None,
-                "lora_strength": float(lora_strength),
-                "vae": vae if vae and vae != "None" else None
+                "lora": first_enabled_lora,
+                "loras": lora_slots,
+                "lora_strength": float(lora1_strength),  # legacy for standard loaders
+                "vae": vae if vae and vae != "None" else None,
+                "image_path": saved_image_path,
+                "mask_path": saved_mask_path,
+                "image_path_2": saved_image_path_2,
+                "mask_path_2": saved_mask_path_2
             }
 
             print(f"[GradioApp] Executing workflow with {len(self.current_workflow)} nodes")
@@ -941,7 +1123,7 @@ class ComfyUIGradioApp:
                 exec_result.prompt_id,
                 exec_result.client_id,
                 self.current_workflow,
-                timeout=30  # Reduced timeout for debugging
+                timeout=self.client.timeout_config.prompt_execution
             )
 
             print(f"[GradioApp] Retrieval result: success={retrieval_result.success}")
@@ -970,8 +1152,15 @@ class ComfyUIGradioApp:
                 cfg,
                 denoise,
                 checkpoint,
-                lora,
-                lora_strength,
+                lora1_enabled,
+                lora1,
+                lora1_strength,
+                lora2_enabled,
+                lora2,
+                lora2_strength,
+                lora3_enabled,
+                lora3,
+                lora3_strength,
                 vae
             )
 
@@ -981,7 +1170,7 @@ class ComfyUIGradioApp:
             # Add to image history
             self.add_to_image_history(all_results)
 
-            return status_msg, all_results, all_results, self.image_history
+            return status_msg, all_results, None, self.image_history
 
         except Exception as e:
             return f"❌ **Unexpected Error**\n\n```\n{str(e)}\n```", [], None, self.image_history
@@ -1058,6 +1247,46 @@ class ComfyUIGradioApp:
         print(f"[GradioApp] Gallery data: {gallery_data}")
         print(f"[GradioApp] State data: {state_data}")
 
+        def resolve_image(obj):
+            """
+            Resolve an image from mixed gallery/state formats.
+            Returns either a PIL.Image.Image or a filesystem/URL string.
+            """
+            if obj is None:
+                return None
+
+            if isinstance(obj, Image.Image):
+                return obj
+
+            # Handle lists/tuples by checking the first meaningful entry
+            if isinstance(obj, (list, tuple)):
+                for entry in obj:
+                    resolved = resolve_image(entry)
+                    if resolved is not None:
+                        return resolved
+                return None
+
+            # Handle dict payloads (Gradio file data or our own structures)
+            if isinstance(obj, dict):
+                # Some payloads nest under the "image" key
+                if "image" in obj:
+                    resolved = resolve_image(obj.get("image"))
+                    if resolved is not None:
+                        return resolved
+
+                # Common fields for file-like objects
+                for key in ("path", "name", "url"):
+                    val = obj.get(key)
+                    if isinstance(val, str) and val:
+                        return val
+
+                return None
+
+            if isinstance(obj, str):
+                return obj
+
+            return None
+
         # Try state data first (from last generation)
         data_to_use = state_data if state_data else gallery_data
 
@@ -1066,54 +1295,33 @@ class ComfyUIGradioApp:
             return None, 512, 512
 
         try:
-            pil_image = None
+            resolved = resolve_image(data_to_use)
+            if resolved is None and gallery_data:
+                resolved = resolve_image(gallery_data)
 
-            # Handle list of image paths or file objects
-            if isinstance(data_to_use, list) and len(data_to_use) > 0:
-                first_item = data_to_use[0]
+            if resolved is None:
+                print("[GradioApp] Could not resolve image path/object from data")
+                return None, 512, 512
 
-                print(f"[GradioApp] First item type: {type(first_item)}, value: {first_item}")
-
-                # If it's already a PIL Image, use it
-                if isinstance(first_item, Image.Image):
-                    print("[GradioApp] Using PIL Image directly")
-                    pil_image = first_item
-
-                # Extract path from tuple (path, caption)
-                elif isinstance(first_item, tuple) and len(first_item) > 0:
-                    image_path = first_item[0]
-                    if image_path and isinstance(image_path, str):
-                        print(f"[GradioApp] Loading from tuple path: {image_path}")
-                        pil_image = Image.open(image_path)
-
-                # Extract from dict
-                elif isinstance(first_item, dict):
-                    image_path = first_item.get('name') or first_item.get('path') or first_item.get('image')
-                    if image_path and isinstance(image_path, str):
-                        print(f"[GradioApp] Loading from dict path: {image_path}")
-                        pil_image = Image.open(image_path)
-
-                # Direct string path
-                elif isinstance(first_item, str):
-                    print(f"[GradioApp] Loading from string path: {first_item}")
-                    pil_image = Image.open(first_item)
-
-                else:
-                    print(f"[GradioApp] Unknown format: {type(first_item)}")
-                    return None, 512, 512
+            if isinstance(resolved, Image.Image):
+                pil_image = resolved
+            else:
+                print(f"[GradioApp] Resolved image path: {resolved}")
+                pil_image = Image.open(resolved)
 
             # Auto-detect dimensions from image
             if pil_image:
                 img_width, img_height = pil_image.size
                 print(f"[GradioApp] Auto-detected dimensions: {img_width}x{img_height}")
-                return pil_image, img_width, img_height
+                target_height = min(max(img_height, 512), 1400)
+                return gr.update(value=pil_image, height=target_height), img_width, img_height
 
         except Exception as e:
             print(f"[GradioApp] Error: {e}")
             import traceback
             traceback.print_exc()
 
-        return None, 512, 512
+        return gr.update(value=None), 512, 512
 
     def save_settings_checkpoint(
         self,
@@ -1127,50 +1335,47 @@ class ComfyUIGradioApp:
         cfg: float,
         denoise: float,
         checkpoint: str,
-        lora: str,
-        lora_strength: float,
+        lora1_enabled: bool,
+        lora1: str,
+        lora1_strength: float,
+        lora2_enabled: bool,
+        lora2: str,
+        lora2_strength: float,
+        lora3_enabled: bool,
+        lora3: str,
+        lora3_strength: float,
         vae: str
     ):
         """
         Save current settings to checkpoint file
 
         Args:
-            All current UI values
+            All current UI values (sampling/model values are accepted for compatibility but not persisted)
         """
         import json
         from datetime import datetime
 
+        # Only persist prompts and dimensions to avoid overriding sampling/model selections on restore
         settings = {
             "saved_at": datetime.now().isoformat(),
             "workflow_name": workflow_name,
             "positive_prompt": positive_prompt,
             "negative_prompt": negative_prompt,
             "width": int(width),
-            "height": int(height),
-            "seed": int(seed),
-            "steps": int(steps),
-            "cfg": float(cfg),
-            "denoise": float(denoise),
-            "checkpoint": checkpoint,
-            "lora": lora,
-            "lora_strength": float(lora_strength),
-            "vae": vae
+            "height": int(height)
         }
 
         try:
             with open(self.settings_checkpoint_file, 'w') as f:
                 json.dump(settings, f, indent=2)
-            print(f"[GradioApp] ✓ Settings saved: steps={settings['steps']}, cfg={settings['cfg']}, denoise={settings['denoise']}")
-            print(f"[GradioApp] ✓ Settings saved: pos_prompt={settings['positive_prompt'][:50]}..., lora={settings['lora']}")
+            print("[GradioApp] ✓ Settings saved (sampling/model params skipped)")
+            print(f"[GradioApp] ✓ Settings saved: pos_prompt={settings['positive_prompt'][:50]}...")
         except Exception as e:
             print(f"[GradioApp] Failed to save settings: {e}")
 
     def restore_settings_checkpoint(self):
         """
-        Restore settings from checkpoint file
-
-        Returns:
-            Tuple of (workflow_name, restore_mode_flag)
+        Legacy workflow restore hook (kept for compatibility, no longer used to switch workflows)
         """
         import json
 
@@ -1194,6 +1399,10 @@ class ComfyUIGradioApp:
     def restore_settings_checkpoint_step2(self):
         """
         Restore settings from checkpoint file - Step 2: Restore parameters
+        (used directly for parameter restoration without changing workflow)
+
+        Sampling-related controls (seed/steps/cfg/denoise) are intentionally left unchanged.
+        Model selections (checkpoint/LoRA/VAE) are also left unchanged.
 
         Returns:
             Tuple of parameter settings to override workflow defaults
@@ -1201,13 +1410,21 @@ class ComfyUIGradioApp:
         import json
 
         if not self.settings_checkpoint_file.exists():
-            return ("", "", 512, 512, -1, 20, 7.0, 1.0, None, "None", 1.0, "None")
+            return (
+                "", "", 512, 512,
+                gr.update(), gr.update(), gr.update(), gr.update(),
+                gr.update(),  # checkpoint
+                gr.update(), gr.update(), gr.update(),  # lora1 enabled, value, strength
+                gr.update(), gr.update(), gr.update(),  # lora2 enabled, value, strength
+                gr.update(), gr.update(), gr.update(),  # lora3 enabled, value, strength
+                gr.update()  # vae
+            )
 
         try:
             with open(self.settings_checkpoint_file, 'r') as f:
                 settings = json.load(f)
 
-            print(f"[GradioApp] ✓ Restored all parameters from checkpoint")
+            print(f"[GradioApp] ✓ Restored prompts and dimensions from checkpoint (sampling/model params left untouched)")
 
             # Step 2: Return all parameters (workflow already loaded in step 1)
             return (
@@ -1215,19 +1432,45 @@ class ComfyUIGradioApp:
                 settings.get("negative_prompt", ""),
                 settings.get("width", 512),
                 settings.get("height", 512),
-                settings.get("seed", -1),
-                settings.get("steps", 20),
-                settings.get("cfg", 7.0),
-                settings.get("denoise", 1.0),
-                settings.get("checkpoint"),
-                settings.get("lora", "None"),
-                settings.get("lora_strength", 1.0),
-                settings.get("vae", "None")
+                gr.update(),  # keep current seed
+                gr.update(),  # keep current steps
+                gr.update(),  # keep current cfg
+                gr.update(),  # keep current denoise
+                gr.update(),  # keep current checkpoint
+                gr.update(),  # keep current lora1 enabled
+                gr.update(),  # keep current lora1
+                gr.update(),  # keep current lora1 strength
+                gr.update(),  # keep current lora2 enabled
+                gr.update(),  # keep current lora2
+                gr.update(),  # keep current lora2 strength
+                gr.update(),  # keep current lora3 enabled
+                gr.update(),  # keep current lora3
+                gr.update(),  # keep current lora3 strength
+                gr.update()   # keep current vae
             )
 
         except Exception as e:
             print(f"[GradioApp] Failed to restore parameters: {e}")
-            return ("", "", 512, 512, -1, 20, 7.0, 1.0, None, "None", 1.0, "None")
+            return (
+                "", "", 512, 512,
+                gr.update(), gr.update(), gr.update(), gr.update(),
+                gr.update(),  # checkpoint
+                gr.update(), gr.update(), gr.update(),
+                gr.update(), gr.update(), gr.update(),
+                gr.update(), gr.update(), gr.update(),
+                gr.update()
+            )
+
+    def restore_settings_parameters(self):
+        """
+        Restore saved parameters without changing the current workflow selection.
+
+        Sampling and model controls remain untouched to avoid overriding ComfyUI defaults.
+
+        Returns:
+            Tuple of parameter settings to populate UI controls
+        """
+        return self.restore_settings_checkpoint_step2()
 
     def _load_image_history(self) -> list:
         """
@@ -1286,48 +1529,22 @@ class ComfyUIGradioApp:
 
         print(f"[GradioApp] ✓ Added {len(image_paths)} images to history (total: {len(self.image_history)})")
 
-    def send_history_to_input(self, history_selection):
+
+    def send_history_to_input(self, history_gallery, history_selection):
         """
-        Send selected history image to input field
+        Send selected history image to input field (with gallery fallback)
 
         Args:
+            history_gallery: Current gallery contents from the client
             history_selection: Gallery selection event data
 
         Returns:
             Tuple of (image, width, height)
         """
-        from PIL import Image
-
         print(f"[GradioApp] History selection: {history_selection}")
 
-        if not history_selection:
-            print("[GradioApp] No history image selected")
-            return None, 512, 512
-
-        try:
-            # history_selection is the evt.value from gallery.select()
-            # It's a SelectData object with .value containing the selected image path
-            image_path = history_selection
-
-            if isinstance(image_path, dict):
-                image_path = image_path.get('image') or image_path.get('name') or image_path.get('path')
-
-            if not image_path or not isinstance(image_path, str):
-                print(f"[GradioApp] Invalid image path: {image_path}")
-                return None, 512, 512
-
-            print(f"[GradioApp] Loading history image: {image_path}")
-            pil_image = Image.open(image_path)
-            img_width, img_height = pil_image.size
-            print(f"[GradioApp] Auto-detected dimensions: {img_width}x{img_height}")
-
-            return pil_image, img_width, img_height
-
-        except Exception as e:
-            print(f"[GradioApp] Error loading history image: {e}")
-            import traceback
-            traceback.print_exc()
-            return None, 512, 512
+        # Reuse the gallery helper so we can fall back to the gallery contents
+        return self.send_gallery_to_input(history_gallery, history_selection)
 
     def process_photopea_export(self, base64_data: str):
         """
@@ -1383,22 +1600,8 @@ class ComfyUIGradioApp:
             # {PROJECT_NAME} 🚀
             {PROJECT_DESCRIPTION}
 
-            **Version:** {VERSION}
-            **Phase 2:** Dynamic UI Generation + Workflow Execution
-
             ---
 
-            ## Instructions
-            1. **Select workflow** from dropdown or upload JSON file
-            2. **Review** the detected parameters in the analysis section
-            3. **Click Generate** to execute the workflow
-            4. **View results** in the gallery below
-
-            **Phase 2 Features:**
-            - ✅ Dynamic UI generation (any workflow)
-            - ✅ Workflow execution via ComfyUI API
-            - ✅ Result retrieval from SaveImage nodes
-            - ✅ Image/video gallery display
             """)
 
             # Workflow selection
@@ -1438,23 +1641,13 @@ class ComfyUIGradioApp:
                     Both ComfyUI workflow JSON and API JSON formats are supported.
                     """)
 
-                    gr.Markdown("**— OR —**")
-
-                    # Restore last successful settings button
-                    restore_settings_btn = gr.Button(
-                        "🔄 Restore Last Successful Settings",
-                        variant="secondary",
-                        size="sm"
-                    )
-                    gr.Markdown("*Restores all parameters from the last successful generation*")
-
             # Editable Parameters Section
             with gr.Row():
                 with gr.Column(scale=1):
                     gr.Markdown("### 2. Edit Parameters")
 
                     # Common editable parameters
-                    with gr.Accordion("🖼️ Image Input (Optional)", open=True):
+                    with gr.Accordion("🖼️ Image Input 1 (Optional)", open=True):
                         gr.Markdown("Upload an image for img2img, inpainting, or editing in Photopea")
                         image_upload = gr.ImageEditor(
                             label="Input Image",
@@ -1462,25 +1655,34 @@ class ComfyUIGradioApp:
                             image_mode="RGBA",
                             sources=["upload", "clipboard"],
                             elem_id="image-upload",
+                            height=720,
                             brush=gr.Brush(default_size=56, color_mode="fixed", colors=["#ffffffff"], default_color="#ffffffff"),
                             eraser=gr.Eraser(default_size=48),
                             layers=True,
                             transforms=(),
                             canvas_size=None
                         )
-
-                    with gr.Accordion("📝 Prompts", open=True):
-                        positive_prompt = gr.Textbox(
-                            label="Positive Prompt",
-                            placeholder="Enter positive prompt...",
-                            lines=3,
-                            value=""
+                        invert_mask = gr.Checkbox(
+                            label="Invert Mask (white = protect)",
+                            value=False,
+                            interactive=True,
+                            info="Toggle if your workflow expects inverted masks"
                         )
-                        negative_prompt = gr.Textbox(
-                            label="Negative Prompt",
-                            placeholder="Enter negative prompt...",
-                            lines=2,
-                            value=""
+
+                    with gr.Accordion("🖼️ Image Input 2 (Optional)", open=False):
+                        gr.Markdown("Upload a second image for workflows that accept multiple image inputs")
+                        image_upload_2 = gr.ImageEditor(
+                            label="Second Input Image",
+                            type="pil",
+                            image_mode="RGBA",
+                            sources=["upload", "clipboard"],
+                            elem_id="image-upload-2",
+                            height=720,
+                            brush=gr.Brush(default_size=56, color_mode="fixed", colors=["#ffffffff"], default_color="#ffffffff"),
+                            eraser=gr.Eraser(default_size=48),
+                            layers=True,
+                            transforms=(),
+                            canvas_size=None
                         )
 
                     with gr.Accordion("🎨 Models (Dynamic)", open=True):
@@ -1499,23 +1701,79 @@ class ComfyUIGradioApp:
                             interactive=True,
                             visible=True
                         )
-                        lora = gr.Dropdown(
-                            label="LoRA (Optional)",
-                            choices=["None"],
-                            value="None",
-                            allow_custom_value=True,
-                            interactive=True,
-                            visible=True
-                        )
-                        lora_strength = gr.Slider(
-                            label="LoRA Strength",
-                            minimum=0.0,
-                            maximum=2.0,
-                            value=1.0,
-                            step=0.05,
-                            interactive=True,
-                            visible=True
-                        )
+                        gr.Markdown("Power Lora Loader slots (up to three):")
+                        with gr.Row():
+                            lora1_enabled = gr.Checkbox(
+                                label="Enable LoRA 1",
+                                value=False,
+                                interactive=True,
+                                visible=True
+                            )
+                            lora1 = gr.Dropdown(
+                                label="LoRA 1",
+                                choices=["None"],
+                                value="None",
+                                allow_custom_value=True,
+                                interactive=True,
+                                visible=True
+                            )
+                            lora1_strength = gr.Slider(
+                                label="Strength 1",
+                                minimum=0.0,
+                                maximum=2.0,
+                                value=1.0,
+                                step=0.05,
+                                interactive=True,
+                                visible=True
+                            )
+                        with gr.Row():
+                            lora2_enabled = gr.Checkbox(
+                                label="Enable LoRA 2",
+                                value=False,
+                                interactive=True,
+                                visible=True
+                            )
+                            lora2 = gr.Dropdown(
+                                label="LoRA 2",
+                                choices=["None"],
+                                value="None",
+                                allow_custom_value=True,
+                                interactive=True,
+                                visible=True
+                            )
+                            lora2_strength = gr.Slider(
+                                label="Strength 2",
+                                minimum=0.0,
+                                maximum=2.0,
+                                value=1.0,
+                                step=0.05,
+                                interactive=True,
+                                visible=True
+                            )
+                        with gr.Row():
+                            lora3_enabled = gr.Checkbox(
+                                label="Enable LoRA 3",
+                                value=False,
+                                interactive=True,
+                                visible=True
+                            )
+                            lora3 = gr.Dropdown(
+                                label="LoRA 3",
+                                choices=["None"],
+                                value="None",
+                                allow_custom_value=True,
+                                interactive=True,
+                                visible=True
+                            )
+                            lora3_strength = gr.Slider(
+                                label="Strength 3",
+                                minimum=0.0,
+                                maximum=2.0,
+                                value=1.0,
+                                step=0.05,
+                                interactive=True,
+                                visible=True
+                            )
                         vae = gr.Dropdown(
                             label="VAE (Optional)",
                             choices=["None"],
@@ -1574,6 +1832,27 @@ class ComfyUIGradioApp:
                                 step=0.05
                             )
 
+                    with gr.Accordion("📝 Prompts", open=True):
+                        positive_prompt = gr.Textbox(
+                            label="Positive Prompt",
+                            placeholder="Enter positive prompt...",
+                            lines=3,
+                            value=""
+                        )
+                        negative_prompt = gr.Textbox(
+                            label="Negative Prompt",
+                            placeholder="Enter negative prompt...",
+                            lines=2,
+                            value=""
+                        )
+                        # Restore last successful settings button (does not change workflow)
+                        restore_settings_btn = gr.Button(
+                            "🔄 Restore Last Successful Settings",
+                            variant="secondary",
+                            size="sm"
+                        )
+                        gr.Markdown("*Restores prompts and dimensions from the last successful generation without changing the selected workflow. Sampling and model selections are left as-is.*")
+
                     # Photopea Integration (Phase 3)
                     with gr.Accordion("🎨 Photopea Editor", open=False):
                         gr.Markdown("""
@@ -1618,32 +1897,10 @@ class ComfyUIGradioApp:
             # Hidden state for restore settings mode (top-level)
             restore_mode = gr.State(value=False)
 
-            # Execution section
-            with gr.Row():
-                with gr.Column(scale=1):
-                    gr.Markdown("### 3. Generate")
-
-                    with gr.Row():
-                        generate_btn = gr.Button(
-                            "🚀 Generate",
-                            variant="primary",
-                            scale=3
-                        )
-                        stop_btn = gr.Button(
-                            "⏹️ Stop",
-                            variant="stop",
-                            scale=1
-                        )
-
-                    execution_status = gr.Markdown(
-                        value="",
-                        label="Status"
-                    )
-
             # Results section
             with gr.Row():
                 with gr.Column(scale=1):
-                    gr.Markdown("### 4. Results")
+                    gr.Markdown("### 3. Results")
 
                     # Tabbed interface for Live Preview and Final Results
                     with gr.Tabs():
@@ -1654,11 +1911,26 @@ class ComfyUIGradioApp:
                                 interactive=False,
                                 height=512
                             )
+                            with gr.Row():
+                                generate_btn = gr.Button(
+                                    "🚀 Generate",
+                                    variant="primary",
+                                    scale=3
+                                )
+                                stop_btn = gr.Button(
+                                    "⏹️ Stop",
+                                    variant="stop",
+                                    scale=1
+                                )
                             live_preview_status = gr.Textbox(
                                 label="Preview Status",
                                 value="Waiting for generation...",
                                 interactive=False,
                                 max_lines=1
+                            )
+                            execution_status = gr.Markdown(
+                                value="",
+                                label="Status"
                             )
 
                         with gr.Tab("✅ Final Results"):
@@ -1668,7 +1940,8 @@ class ComfyUIGradioApp:
                                 show_label=False,
                                 columns=3,
                                 object_fit="contain",
-                                height="auto"
+                                height="auto",
+                                elem_id="result-gallery"
                             )
 
                             # Hidden state to track selected gallery image
@@ -1740,12 +2013,12 @@ class ComfyUIGradioApp:
                                 civitai_sort = gr.Dropdown(
                                     label="Sort By",
                                     choices=["Highest Rated", "Most Downloaded", "Newest"],
-                                    value="Highest Rated"
+                                    value=get_setting("civitai_sort", "Highest Rated")
                                 )
                                 civitai_nsfw = gr.Dropdown(
                                     label="NSFW",
                                     choices=["Hide", "Show", "Only"],
-                                    value="Hide"
+                                    value=get_setting("civitai_nsfw", "Hide")
                                 )
                                 civitai_search_btn = gr.Button("🔍 Search", variant="primary")
 
@@ -1756,6 +2029,14 @@ class ComfyUIGradioApp:
                                 label="Search Results",
                                 choices=[],
                                 value=None
+                            )
+                            civitai_results_gallery = gr.Gallery(
+                                label="Search Results",
+                                show_label=False,
+                                columns=3,
+                                height=320,
+                                visible=False,
+                                elem_id="civitai-results-gallery"
                             )
 
                             civitai_model_details = gr.Markdown(visible=False)
@@ -1797,38 +2078,75 @@ class ComfyUIGradioApp:
             with gr.Row():
                 gr.Markdown(f"""
                 ---
-                ### About This Demo
-
-                This is **ComfyUI_to_webui V2** - now in **Phase 3**!
-
-                **Completed Features:**
-                - ✅ **Phase 1:** Schema-driven dynamic UI generation
-                - ✅ **Phase 2:** Workflow execution, result retrieval, model loaders
-                - ✅ **Phase 3:** WebSocket live preview (active now!)
-
-                **What's Different from V1:**
-                - ❌ No hardcoded node types (Hua_Output, GradioTextOk, etc.)
-                - ❌ No fixed component pools (MAX_DYNAMIC_COMPONENTS=20)
-                - ❌ No custom output nodes required
-                - ✅ Works with ANY ComfyUI workflow
-                - ✅ Unlimited dynamic components
-                - ✅ Auto-detects node types via /object_info API
-                - ✅ Live preview during generation
-
-                **Coming in Future Phases:**
-                - Phase 4: UI polish, component grouping, model scanner
-                - Phase 5: Civitai browser, batch processing
+                This is **ComfyUI_to_webui V2**
 
                 **Development Info:**
                 - Branch: `v2-dynamic-rewrite`
                 - ComfyUI Server: {COMFYUI_BASE_URL}
                 """)
+                # Ensure galleries default to newest at the start and allow scrolling back
+                gr.HTML(
+                    """
+                    <style>
+                        /* Ensure all galleries are left-aligned and fully scrollable */
+                        #result-gallery [data-testid="gallery"],
+                        #history-gallery [data-testid="gallery"],
+                        #civitai-results-gallery [data-testid="gallery"] {
+                            justify-content: flex-start !important;
+                            overflow-x: auto !important;
+                        }
+                        #result-gallery [data-testid="gallery"] .grid-container,
+                        #history-gallery [data-testid="gallery"] .grid-container,
+                        #civitai-results-gallery [data-testid="gallery"] .grid-container {
+                            justify-content: flex-start !important;
+                            width: 100% !important;
+                            margin: 0 !important;
+                        }
+                        /* Target Gradio's thumbnail container explicitly */
+                        .thumbnails.scroll-hide {
+                            justify-content: flex-start !important;
+                            overflow-x: auto !important;
+                            width: 100% !important;
+                        }
+                    </style>
+                    <script>
+                    (function() {
+                        const snapThumbnails = () => {
+                            document.querySelectorAll('.thumbnails.scroll-hide').forEach((el) => {
+                                el.style.overflowX = 'auto';
+                                el.dir = 'ltr';
+                                el.scrollLeft = 0;
+                            });
+                        };
+                        if (document.readyState === "complete" || document.readyState === "interactive") {
+                            snapThumbnails();
+                        } else {
+                            window.addEventListener("DOMContentLoaded", snapThumbnails);
+                        }
+                        setTimeout(snapThumbnails, 300);
+                        setTimeout(snapThumbnails, 900);
+                    })();
+                    </script>
+                    """,
+                    visible=False,
+                    elem_id="gallery-scroll-helper"
+                )
 
             # Wire up event handlers
             # Dropdown selection - populate defaults when workflow is selected
             def on_dropdown_change(workflow_name, is_restore_mode):
                 if workflow_name == "None" or not workflow_name:
-                    return ("", "", "", 512, 512, -1, 20, 7.0, 1.0, None, "None", 1.0, "None", False)
+                    return (
+                        "", "", "",
+                        512, 512,
+                        -1, 20, 7.0, 1.0,
+                        gr.update(choices=[], value=None),
+                        False, gr.update(choices=["None"], value="None"), 1.0,
+                        False, gr.update(choices=["None"], value="None"), 1.0,
+                        False, gr.update(choices=["None"], value="None"), 1.0,
+                        gr.update(choices=["None"], value="None"),
+                        False
+                    )
 
                 workflow_path = self.available_workflows.get(workflow_name)
                 result = self.generate_ui_from_workflow_path(workflow_path)
@@ -1837,8 +2155,8 @@ class ComfyUIGradioApp:
                 if is_restore_mode:
                     print("[GradioApp] Restore mode active - applying saved settings after workflow load")
                     saved_settings = self.restore_settings_checkpoint_step2()
-                    print(f"[GradioApp] Saved settings: width={saved_settings[2]}, height={saved_settings[3]}, steps={saved_settings[5]}")
-                    print(f"[GradioApp] Saved settings: pos_prompt={saved_settings[0][:50]}..., lora={saved_settings[9]}")
+                    print(f"[GradioApp] Saved settings: width={saved_settings[2]}, height={saved_settings[3]}")
+                    print(f"[GradioApp] Saved settings: pos_prompt={saved_settings[0][:50]}...")
                     # Replace workflow defaults with saved settings
                     result = (
                         result[0],  # Keep workflow summary
@@ -1851,16 +2169,23 @@ class ComfyUIGradioApp:
                         saved_settings[6],  # cfg
                         saved_settings[7],  # denoise
                         saved_settings[8],  # checkpoint
-                        saved_settings[9],  # lora
-                        saved_settings[10], # lora_strength
-                        saved_settings[11], # vae
+                        saved_settings[9],  # lora1 enabled
+                        saved_settings[10], # lora1
+                        saved_settings[11], # lora1 strength
+                        saved_settings[12], # lora2 enabled
+                        saved_settings[13], # lora2
+                        saved_settings[14], # lora2 strength
+                        saved_settings[15], # lora3 enabled
+                        saved_settings[16], # lora3
+                        saved_settings[17], # lora3 strength
+                        saved_settings[18], # vae
                         False  # Reset restore mode
                     )
-                    print(f"[GradioApp] Result tuple: width={result[3]}, height={result[4]}, steps={result[6]}")
+                    print(f"[GradioApp] Result tuple: width={result[3]}, height={result[4]}")
                 else:
                     # Normal workflow loading - INSERT width, height at correct position
-                    # result = (summary, pos_prompt, neg_prompt, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae)
-                    # outputs = (summary, pos_prompt, neg_prompt, width, height, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae, restore_mode)
+                    # result = (summary, pos_prompt, neg_prompt, seed, steps, cfg, denoise, checkpoint, lora1_enabled, lora1, lora1_strength, lora2_enabled, lora2, lora2_strength, lora3_enabled, lora3, lora3_strength, vae)
+                    # outputs = (summary, pos_prompt, neg_prompt, width, height, seed, steps, cfg, denoise, checkpoint, lora1_enabled, lora1, lora1_strength, lora2_enabled, lora2, lora2_strength, lora3_enabled, lora3, lora3_strength, vae, restore_mode)
                     result = (
                         result[0],  # summary
                         result[1],  # positive_prompt
@@ -1872,9 +2197,16 @@ class ComfyUIGradioApp:
                         result[5],  # cfg
                         result[6],  # denoise
                         result[7],  # checkpoint
-                        result[8],  # lora
-                        result[9],  # lora_strength
-                        result[10], # vae
+                        result[8],  # lora1 enabled
+                        result[9],  # lora1
+                        result[10], # lora1 strength
+                        result[11], # lora2 enabled
+                        result[12], # lora2
+                        result[13], # lora2 strength
+                        result[14], # lora3 enabled
+                        result[15], # lora3
+                        result[16], # lora3 strength
+                        result[17], # vae
                         False       # restore_mode
                     )
 
@@ -1883,30 +2215,56 @@ class ComfyUIGradioApp:
             workflow_dropdown.change(
                 fn=on_dropdown_change,
                 inputs=[workflow_dropdown, restore_mode],
-                outputs=[dynamic_ui_container, positive_prompt, negative_prompt, width, height, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae, restore_mode]
+                outputs=[
+                    dynamic_ui_container, positive_prompt, negative_prompt, width, height,
+                    seed, steps, cfg, denoise, checkpoint,
+                    lora1_enabled, lora1, lora1_strength,
+                    lora2_enabled, lora2, lora2_strength,
+                    lora3_enabled, lora3, lora3_strength,
+                    vae, restore_mode
+                ]
             )
 
             # File upload - populate defaults when workflow is uploaded
             workflow_file.change(
                 fn=self.generate_ui_from_workflow,
                 inputs=[workflow_file],
-                outputs=[dynamic_ui_container, positive_prompt, negative_prompt, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae]
+                outputs=[
+                    dynamic_ui_container, positive_prompt, negative_prompt,
+                    seed, steps, cfg, denoise, checkpoint,
+                    lora1_enabled, lora1, lora1_strength,
+                    lora2_enabled, lora2, lora2_strength,
+                    lora3_enabled, lora3, lora3_strength,
+                    vae
+                ]
             )
 
-            # Restore last successful settings
-            # Sets workflow dropdown and restore_mode flag
-            # The dropdown.change handler will apply saved settings when restore_mode is True
+            # Restore last successful settings (parameters only, keep current workflow)
             restore_settings_btn.click(
-                fn=self.restore_settings_checkpoint,
+                fn=self.restore_settings_parameters,
                 inputs=[],
-                outputs=[workflow_dropdown, restore_mode]
+                outputs=[
+                    positive_prompt, negative_prompt, width, height,
+                    seed, steps, cfg, denoise, checkpoint,
+                    lora1_enabled, lora1, lora1_strength,
+                    lora2_enabled, lora2, lora2_strength,
+                    lora3_enabled, lora3, lora3_strength,
+                    vae
+                ]
             )
 
             # Generate button - pass editable parameters including models and dimensions
             generate_btn.click(
                 fn=self.execute_current_workflow,
-                inputs=[positive_prompt, negative_prompt, width, height, seed, steps, cfg, denoise, checkpoint, lora, lora_strength, vae],
-                outputs=[execution_status, result_gallery, selected_gallery_image, history_gallery]
+                inputs=[
+                    image_upload, invert_mask, image_upload_2, positive_prompt, negative_prompt,
+                    width, height, seed, steps, cfg, denoise, checkpoint,
+                    lora1_enabled, lora1, lora1_strength,
+                    lora2_enabled, lora2, lora2_strength,
+                    lora3_enabled, lora3, lora3_strength,
+                    vae
+                ],
+                outputs=[execution_status, result_gallery, selected_history_image, history_gallery]
             )
 
             # Live preview polling - polls every 200ms for preview updates
@@ -1966,80 +2324,125 @@ class ComfyUIGradioApp:
                 outputs=[selected_history_image]
             )
 
+            def on_result_select(evt: gr.SelectData):
+                """Track selected result image"""
+                print(f"[GradioApp] Result selected: index={evt.index}, value={evt.value}")
+                return evt.value
+
+            result_gallery.select(
+                fn=on_result_select,
+                inputs=[],
+                outputs=[selected_gallery_image]
+            )
+
             # Send history to input
             history_to_input_btn.click(
                 fn=self.send_history_to_input,
-                inputs=[selected_history_image],
+                inputs=[history_gallery, selected_history_image],
                 outputs=[image_upload, width, height]
             )
 
             # Send history to Photopea - use JavaScript with dynamic image path
             # We need a helper function to get the selected image and send it
-            def send_history_to_photopea_js(selected_image_path):
-                """Generate JavaScript to send history image to Photopea"""
-                return f"""
-                () => {{
-                    const showError = (message) => {{
+            history_to_photopea_btn.click(
+                fn=None,
+                inputs=[history_gallery, selected_history_image],
+                outputs=[],
+                js="""
+                async (galleryData, selectedPath) => {
+                    const showError = (message) => {
                         console.error('[History to Photopea]', message);
                         const buttons = document.querySelectorAll('button');
-                        for (let btn of buttons) {{
-                            if (btn.textContent.includes('Send to Photopea')) {{
+                        for (let btn of buttons) {
+                            if (btn.textContent.includes('Send to Photopea')) {
                                 btn.style.background = '#ef4444';
                                 setTimeout(() => btn.style.background = '', 2000);
                                 break;
-                            }}
-                        }}
-                    }};
+                            }
+                        }
+                    };
 
-                    if (!window.photopeaWindow) {{
+                    if (!window.photopeaWindow) {
                         const iframe = document.querySelector('#photopea-iframe');
                         if (iframe) window.photopeaWindow = iframe.contentWindow;
-                    }}
+                    }
 
-                    if (!window.photopeaWindow) {{
+                    if (!window.photopeaWindow) {
                         showError("Photopea not ready. Make sure the Photopea accordion is open.");
                         return;
-                    }}
+                    }
 
-                    // Get the selected image from history gallery
-                    const historyGallery = document.querySelector('#history-gallery');
-                    if (!historyGallery) {{
-                        showError("History gallery not found");
-                        return;
-                    }}
+                    const normalizeSource = (item) => {
+                        if (!item) return "";
+                        if (Array.isArray(item)) {
+                            for (const entry of item) {
+                                const norm = normalizeSource(entry);
+                                if (norm) return norm;
+                            }
+                            return "";
+                        }
+                        if (typeof item === "string") return item;
+                        if (typeof item === "object") {
+                            return item.image || item.name || item.path || item.url || "";
+                        }
+                        return "";
+                    };
 
-                    // Find the selected image (has aria-selected="true")
-                    const selectedImg = historyGallery.querySelector('[aria-selected="true"] img');
-                    if (!selectedImg || !selectedImg.src) {{
+                    // Prefer DOM selection so we get the rendered src (blob/http/data URL)
+                    const galleryEl = document.querySelector('#history-gallery');
+                    const selectedImg = galleryEl?.querySelector('[aria-selected=\"true\"] img') || galleryEl?.querySelector('img');
+                    let src = selectedImg?.src || normalizeSource(selectedPath) || normalizeSource(galleryData);
+
+                    if (!src) {
                         showError("No history image selected. Click an image first.");
                         return;
-                    }}
+                    }
 
-                    console.log('[History to Photopea] Sending image:', selectedImg.src.substring(0, 100) + '...');
+                    // Convert filesystem paths to a fetchable URL for the current Gradio server
+                    const toUrl = (value) => {
+                        if (!value) return "";
+                        if (value.startsWith("http") || value.startsWith("blob:") || value.startsWith("data:")) return value;
+                        if (value.startsWith("/")) return `${window.location.origin}/file=${encodeURIComponent(value)}`;
+                        return value;
+                    };
 
-                    // Send to Photopea
-                    window.photopeaWindow.postMessage('app.open("' + selectedImg.src + '", null, true);', "*");
-                    console.log('[History to Photopea] Image sent successfully');
+                    src = toUrl(src);
 
-                    // Success feedback (green flash)
-                    setTimeout(() => {{
-                        const buttons = document.querySelectorAll('button');
-                        for (let btn of buttons) {{
-                            if (btn.textContent.includes('Send to Photopea')) {{
-                                btn.style.background = '#10b981';
-                                setTimeout(() => btn.style.background = '', 1500);
-                                break;
-                            }}
-                        }}
-                    }}, 100);
-                }}
+                    const toDataUrl = async (url) => {
+                        const response = await fetch(url);
+                        const blob = await response.blob();
+                        return await new Promise((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.onloadend = () => resolve(reader.result);
+                            reader.onerror = reject;
+                            reader.readAsDataURL(blob);
+                        });
+                    };
+
+                    const sendToPhotopea = (dataUrl) => {
+                        window.photopeaWindow.postMessage('app.open(\"' + dataUrl + '\", null, true);', "*");
+                        console.log('[History to Photopea] Sent image:', dataUrl.substring(0, 100) + '...');
+                        setTimeout(() => {
+                            const buttons = document.querySelectorAll('button');
+                            for (let btn of buttons) {
+                                if (btn.textContent.includes('Send to Photopea')) {
+                                    btn.style.background = '#10b981';
+                                    setTimeout(() => btn.style.background = '', 1500);
+                                    break;
+                                }
+                            }
+                        }, 100);
+                    };
+
+                    try {
+                        const dataUrl = src.startsWith("data:") ? src : await toDataUrl(src);
+                        sendToPhotopea(dataUrl);
+                    } catch (err) {
+                        console.error('[History to Photopea] Failed to load image', err);
+                        showError("Failed to load history image. Make sure it still exists.");
+                    }
+                }
                 """
-
-            history_to_photopea_btn.click(
-                fn=None,
-                inputs=[],
-                outputs=[],
-                js=send_history_to_photopea_js(None)
             )
 
             # Civitai browser event handlers
@@ -2067,13 +2470,25 @@ class ComfyUIGradioApp:
                 outputs=[
                     civitai_search_status,
                     civitai_results_state,
-                    civitai_results_dropdown
+                    civitai_results_dropdown,
+                    civitai_results_gallery
                 ]
             )
 
             civitai_results_dropdown.change(
                 fn=civitai_browser.select_model,
                 inputs=[civitai_results_dropdown, civitai_results_state],
+                outputs=[
+                    civitai_model_details,
+                    civitai_preview_gallery,
+                    civitai_version_dropdown,
+                    civitai_file_dropdown,
+                    civitai_target_dir
+                ]
+            )
+            civitai_results_gallery.select(
+                fn=civitai_browser.select_model_by_index,
+                inputs=[civitai_results_state],
                 outputs=[
                     civitai_model_details,
                     civitai_preview_gallery,

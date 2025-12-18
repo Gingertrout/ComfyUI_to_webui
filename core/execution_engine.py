@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 from .comfyui_client import ComfyUIClient
 from .ui_generator import GeneratedUI
+from ..config import IMAGE_INPUT_NODE_TYPES
 
 
 @dataclass
@@ -276,6 +277,13 @@ class ExecutionEngine:
         # Track what we injected
         injected = []
 
+        def is_linked_input(value: Any) -> bool:
+            """Return True if the value is a node link rather than a literal."""
+            return isinstance(value, list) and len(value) == 2 and isinstance(value[0], str)
+
+        width_value = user_values.get("width")
+        height_value = user_values.get("height")
+
         # First pass: collect all CLIPTextEncode nodes and guess which is positive/negative
         clip_nodes = []
         for node_id, node_data in prompt.items():
@@ -351,14 +359,33 @@ class ExecutionEngine:
                     injected.append(f"{node_id}.denoise")
 
             # Inject dimensions into EmptyLatentImage and similar nodes
-            if class_type in {"EmptyLatentImage", "EmptySD3LatentImage", "LoadAndResizeImage"}:
-                if user_values.get("width") is not None and "width" in inputs:
-                    inputs["width"] = user_values["width"]
+            if class_type in {
+                "EmptyLatentImage",
+                "EmptySD3LatentImage",
+                "LoadAndResizeImage",
+                "EmptyFluxLatent",
+                "EmptyFlux2Latent",
+                "EmptyFluxLatentImage",
+                "EmptyFlux2LatentImage",
+            }:
+                if width_value is not None and "width" in inputs:
+                    inputs["width"] = width_value
                     injected.append(f"{node_id}.width")
 
-                if user_values.get("height") is not None and "height" in inputs:
-                    inputs["height"] = user_values["height"]
+                if height_value is not None and "height" in inputs:
+                    inputs["height"] = height_value
                     injected.append(f"{node_id}.height")
+
+            # Fallback: apply dimensions to any unlinked width/height inputs (covers new node types)
+            for dim_name, dim_value in (("width", width_value), ("height", height_value)):
+                if dim_value is None or dim_name not in inputs:
+                    continue
+                if is_linked_input(inputs[dim_name]):
+                    continue
+                if inputs[dim_name] == dim_value:
+                    continue
+                inputs[dim_name] = dim_value
+                injected.append(f"{node_id}.{dim_name} (auto)")
 
         # Third pass: inject model selections using TARGETED approach
         # Only inject into the specific nodes we discovered to avoid cross-contamination
@@ -384,93 +411,130 @@ class ExecutionEngine:
                     "clip": None  # Don't inject CLIP - too many variants
                 }
 
-                value_key = value_map.get(category)
-                if value_key and user_values.get(value_key):
-                    # For LoRA, handle None/empty selection
-                    lora_value = user_values[value_key]
-                    if category == "lora" and lora_value in ["None", "", None]:
+                # Special handling for LoRAs (Power Lora Loader supports multiple slots)
+                if category == "lora":
+                    class_type = target_node.get("class_type", "")
+                    is_power_lora = "Power Lora Loader" in class_type
+
+                    # Collect up to three LoRA selections from the UI
+                    lora_entries = user_values.get("loras", [])
+                    selected_lora = next(
+                        (slot["name"] for slot in lora_entries if slot.get("enabled") and slot.get("name")),
+                        None
+                    )
+                    if selected_lora is None:
+                        selected_lora = user_values.get("lora")
+
+                    if is_power_lora:
+                        # Ensure we always have three slots to sync on/off state
+                        lora_entries = (lora_entries or [])[:3]
+
+                        # Update the _meta.info.unused_widget_values structure
+                        meta = target_node.setdefault("_meta", {})
+                        info = meta.setdefault("info", {})
+                        widget_values = info.setdefault("unused_widget_values", [])
+
+                        # Identify existing LoRA slot indices (skip header entries)
+                        slot_indices = [
+                            idx for idx, item in enumerate(widget_values)
+                            if isinstance(item, dict) and "lora" in item
+                        ]
+
+                        # If there are fewer widget slots than UI entries, append new empty ones
+                        while len(slot_indices) < len(lora_entries):
+                            widget_values.append({
+                                "on": False,
+                                "lora": None,
+                                "strength": 1.0,
+                                "strengthTwo": None
+                            })
+                            slot_indices.append(len(widget_values) - 1)
+
+                        # Turn every slot off before applying user selections
+                        for idx in slot_indices:
+                            if isinstance(widget_values[idx], dict):
+                                widget_values[idx]["on"] = False
+
+                        # Apply up to three LoRAs to corresponding slots
+                        for slot_number, (entry, idx) in enumerate(zip(lora_entries, slot_indices), start=1):
+                            if idx >= len(widget_values) or not isinstance(widget_values[idx], dict):
+                                widget_values.append({
+                                    "on": False,
+                                    "lora": None,
+                                    "strength": 1.0,
+                                    "strengthTwo": None
+                                })
+                                idx = len(widget_values) - 1
+
+                            lora_name = entry.get("name")
+                            enabled = bool(entry.get("enabled") and lora_name)
+                            strength_value = float(entry.get("strength", user_values.get("lora_strength", 1.0)))
+
+                            widget_values[idx]["on"] = enabled
+                            widget_values[idx]["lora"] = lora_name
+                            widget_values[idx]["strength"] = strength_value
+                            widget_values[idx]["strengthTwo"] = widget_values[idx].get("strengthTwo", None)
+
+                            uppercase_param = f"LORA_{slot_number:02d}"
+                            inputs[uppercase_param] = {
+                                "on": enabled,
+                                "lora": lora_name,
+                                "strength": strength_value,
+                                "strengthTwo": widget_values[idx].get("strengthTwo")
+                            }
+                            injected.append(f"{target_node_id}.{uppercase_param}")
+
+                            if enabled:
+                                print(f"[ExecutionEngine]   ✓ Enabled Power Lora slot {slot_number}: {lora_name} (strength {strength_value})")
+                            else:
+                                print(f"[ExecutionEngine]   ⚙️ Slot {slot_number} off (lora={lora_name})")
+
+                        # Explicitly turn off any remaining slots beyond the first three
+                        if len(slot_indices) > len(lora_entries):
+                            for offset, idx in enumerate(slot_indices[len(lora_entries):], start=len(lora_entries) + 1):
+                                if idx >= len(widget_values) or not isinstance(widget_values[idx], dict):
+                                    continue
+                                widget = widget_values[idx]
+                                uppercase_param = f"LORA_{offset:02d}"
+                                inputs[uppercase_param] = {
+                                    "on": False,
+                                    "lora": widget.get("lora"),
+                                    "strength": float(widget.get("strength", 1.0)),
+                                    "strengthTwo": widget.get("strengthTwo")
+                                }
+                                injected.append(f"{target_node_id}.{uppercase_param}")
+                                print(f"[ExecutionEngine]   ⚙️ Slot {offset} off (lora={widget.get('lora')})")
+
+                        continue
+
+                    # Standard LoRA loaders use a single model
+                    if selected_lora in ["None", "", None]:
                         print(f"[ExecutionEngine] Skipping LoRA injection (None selected)")
                         continue
 
+                    inputs[target_param] = selected_lora
+                    injected.append(f"{target_node_id}.{target_param} ({category})")
+                    print(f"[ExecutionEngine] ✓ Injected {category}: {selected_lora[:30]}... into node {target_node_id}")
+
+                    # Standard LoRA loaders use strength_model and strength_clip
+                    lora_strength = user_values.get("lora_strength", 1.0)
+
+                    if "strength_model" not in inputs:
+                        inputs["strength_model"] = float(lora_strength)
+                        print(f"[ExecutionEngine]   Added strength_model = {lora_strength}")
+                    if "strength_clip" not in inputs:
+                        inputs["strength_clip"] = float(lora_strength)
+                        print(f"[ExecutionEngine]   Added strength_clip = {lora_strength}")
+
+                    continue
+
+                # Non-LoRA loader injection
+                value_key = value_map.get(category)
+                if value_key and user_values.get(value_key):
                     # Inject the value (will add parameter if it doesn't exist)
                     inputs[target_param] = user_values[value_key]
                     injected.append(f"{target_node_id}.{target_param} ({category})")
                     print(f"[ExecutionEngine] ✓ Injected {category}: {user_values[value_key][:30]}... into node {target_node_id}")
-
-                    # For LoRA loaders, handle different formats
-                    if category == "lora":
-                        class_type = target_node.get("class_type", "")
-
-                        # Power Lora Loader (rgthree) uses BOTH inputs AND _meta!
-                        if "Power Lora Loader" in class_type:
-                            lora_filename = user_values[value_key]
-                            lora_strength = user_values.get("lora_strength", 1.0)
-
-                            # Update the _meta.info.unused_widget_values structure
-                            meta = target_node.setdefault("_meta", {})
-                            info = meta.setdefault("info", {})
-                            widget_values = info.setdefault("unused_widget_values", [])
-
-                            # Find existing LoRA entries and turn them all OFF
-                            updated = False
-                            selected_index = None
-                            for i, item in enumerate(widget_values):
-                                if isinstance(item, dict) and "lora" in item:
-                                    # Turn off all LoRAs first
-                                    item["on"] = False
-                                    # If this matches the user's selection, turn it ON
-                                    if item.get("lora") == lora_filename:
-                                        item["on"] = True
-                                        item["strength"] = float(lora_strength)
-                                        updated = True
-                                        selected_index = i
-                                        print(f"[ExecutionEngine]   ✓ Enabled existing LoRA in Power Lora Loader slot {i}: {lora_filename}")
-
-                            # If the LoRA wasn't found in existing entries, add it to the first empty slot
-                            if not updated:
-                                for i, item in enumerate(widget_values):
-                                    if isinstance(item, dict) and not item.get("on") and "lora" in item:
-                                        item["on"] = True
-                                        item["lora"] = lora_filename
-                                        item["strength"] = float(lora_strength)
-                                        item["strengthTwo"] = None
-                                        updated = True
-                                        selected_index = i
-                                        print(f"[ExecutionEngine]   ✓ Added LoRA to Power Lora Loader slot {i}: {lora_filename}")
-                                        break
-
-                            if not updated:
-                                print(f"[ExecutionEngine]   ⚠️ WARNING: Could not inject LoRA into Power Lora Loader (no empty slots)")
-                            else:
-                                # ALSO add to inputs using the rgthree format
-                                # Power Lora Loader expects UPPERCASE params: LORA_01, LORA_02, etc.
-                                if selected_index is not None:
-                                    # Calculate the uppercase param name based on slot index
-                                    # Slot 2 (index 2) in widget_values = LORA_01
-                                    # Slot 3 (index 3) = LORA_02, etc.
-                                    # (indices 0-1 are header/widget type, actual LoRA slots start at index 2)
-                                    if selected_index >= 2:
-                                        lora_number = selected_index - 1  # offset by 1 (index 2 = LORA_01)
-                                        uppercase_param = f"LORA_{lora_number:02d}"  # e.g., LORA_01, LORA_02
-                                        inputs[uppercase_param] = {
-                                            'on': True,
-                                            'lora': lora_filename,
-                                            'strength': float(lora_strength),
-                                            'strengthTwo': None
-                                        }
-                                        print(f"[ExecutionEngine]   ✓ Also added to inputs: {uppercase_param} = {inputs[uppercase_param]}")
-
-                        # Standard LoRA loaders use strength_model and strength_clip
-                        else:
-                            # Get strength from user values (default to 1.0 if not provided)
-                            lora_strength = user_values.get("lora_strength", 1.0)
-
-                            if "strength_model" not in inputs:
-                                inputs["strength_model"] = float(lora_strength)
-                                print(f"[ExecutionEngine]   Added strength_model = {lora_strength}")
-                            if "strength_clip" not in inputs:
-                                inputs["strength_clip"] = float(lora_strength)
-                                print(f"[ExecutionEngine]   Added strength_clip = {lora_strength}")
         else:
             # Fallback: Old blanket injection (if loaders not discovered)
             for node_id, node_data in prompt.items():
@@ -484,9 +548,16 @@ class ExecutionEngine:
                     inputs["unet_name"] = user_values["checkpoint"]
                     injected.append(f"{node_id}.unet_name")
 
-                if "lora_name" in inputs and user_values.get("lora"):
-                    inputs["lora_name"] = user_values["lora"]
-                    injected.append(f"{node_id}.lora_name")
+                if "lora_name" in inputs:
+                    fallback_lora = user_values.get("lora")
+                    if not fallback_lora:
+                        fallback_lora = next(
+                            (slot["name"] for slot in user_values.get("loras", []) if slot.get("enabled") and slot.get("name")),
+                            None
+                        )
+                    if fallback_lora:
+                        inputs["lora_name"] = fallback_lora
+                        injected.append(f"{node_id}.lora_name")
 
                 if "vae_name" in inputs and user_values.get("vae"):
                     inputs["vae_name"] = user_values["vae"]
@@ -496,5 +567,185 @@ class ExecutionEngine:
             print(f"[ExecutionEngine] Injected values: {', '.join(injected)}")
         else:
             print(f"[ExecutionEngine] WARNING: No values were injected (workflow might not have compatible nodes)")
+
+        # Fourth pass: attach uploaded image/mask to appropriate nodes
+        prompt = self._inject_images_and_masks(prompt, user_values)
+
+        return prompt
+
+    def _inject_images_and_masks(
+        self,
+        prompt: Dict[str, Any],
+        user_values: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Attach uploaded image and mask paths to workflow nodes.
+
+        Strategy:
+        - If a node is an image loader (LoadImage/ImageInput/etc.), override its
+          primary image parameter.
+        - For any node with an editable input containing "image" or "mask",
+          replace unlinked values with the uploaded path.
+        """
+        image_entries = [
+            {"image": user_values.get("image_path"), "mask": user_values.get("mask_path")},
+            {"image": user_values.get("image_path_2"), "mask": user_values.get("mask_path_2")},
+        ]
+        image_entries = [entry for entry in image_entries if entry.get("image") or entry.get("mask")]
+
+        if not image_entries:
+            return prompt
+
+        print(f"[ExecutionEngine] Image/mask injection starting: {len(image_entries)} input(s)")
+
+        def _is_linked(value: Any) -> bool:
+            return isinstance(value, list) and len(value) == 2 and isinstance(value[0], str)
+
+        replacements = []
+
+        def _smart_image_node_sort_key(item: tuple) -> tuple:
+            """
+            Smart sorting for image input nodes using multiple heuristics:
+            1. Connectivity (connected nodes before disconnected)
+            2. Node type specificity (LoadImageOutput before LoadImage)
+            3. Position (Y-coordinate, then X-coordinate) - top-to-bottom, left-to-right
+            4. Title heuristics (primary/main before secondary/mask/reference)
+            5. Node ID (numeric before alphabetic, then by value)
+
+            Args:
+                item: Tuple of (node_id, node_data)
+
+            Returns:
+                Sort key tuple
+            """
+            node_id, node_data = item
+
+            # Extract metadata
+            meta = node_data.get("_meta", {})
+            title = meta.get("title", "").lower()
+            pos = meta.get("pos", None)
+            class_type = node_data.get("class_type", "")
+
+            # Priority 0: Check if node is connected/used in workflow
+            # A node with no output links is likely unused
+            # This check happens during workflow-to-API conversion where links are removed
+            # So we use a heuristic: if inputs have values (not just links), node is likely active
+            inputs = node_data.get("inputs", {})
+            has_input_values = any(
+                v is not None and not (isinstance(v, list) and len(v) == 2)
+                for v in inputs.values()
+            )
+            is_connected = 1 if not has_input_values else 0  # 0 = connected (higher priority)
+
+            # Priority 1: Node type specificity
+            # LoadImageOutput > LoadAndResizeImage > LoadImage
+            type_priority = 2  # Default
+            if class_type == "LoadImageOutput":
+                type_priority = 0  # Highest priority (most specific)
+            elif class_type == "LoadAndResizeImage":
+                type_priority = 1  # Medium priority
+            elif class_type == "LoadImage":
+                type_priority = 2  # Lowest priority (most generic)
+
+            # Priority 2: Title-based heuristics
+            # Deprioritize nodes with "secondary", "mask", "reference", "controlnet", "depth" in title
+            secondary_keywords = ["secondary", "mask", "reference", "controlnet", "depth", "canny", "pose"]
+            is_secondary = any(keyword in title for keyword in secondary_keywords)
+
+            # Prioritize nodes with "primary", "main", "input", "source" in title
+            primary_keywords = ["primary", "main", "source", "base"]
+            is_primary = any(keyword in title for keyword in primary_keywords)
+
+            if is_primary:
+                title_priority = 1  # High priority
+            elif is_secondary:
+                title_priority = 3  # Low priority
+            else:
+                title_priority = 2  # Medium priority
+
+            # Priority 3: Use position if available (Y-coordinate primary, X-coordinate secondary)
+            if pos and isinstance(pos, list) and len(pos) >= 2:
+                y_pos = float(pos[1])  # Y-coordinate (vertical position)
+                x_pos = float(pos[0])  # X-coordinate (horizontal position)
+                return (is_connected, type_priority, 0, y_pos, x_pos, title_priority, node_id)
+
+            # Priority 4: Node ID as final tiebreaker
+            if isinstance(node_id, str) and node_id.isdigit():
+                return (is_connected, type_priority, 1, 0, 0, title_priority, 0, int(node_id))
+            else:
+                return (is_connected, type_priority, 1, 0, 0, title_priority, 1, str(node_id))
+
+        if len(image_entries) == 1:
+            image_path = image_entries[0].get("image")
+            mask_path = image_entries[0].get("mask")
+
+            print(f"[ExecutionEngine] Image/mask injection paths: image={image_path}, mask={mask_path}")
+
+            for node_id, node_data in prompt.items():
+                if not isinstance(node_data, dict):
+                    continue
+
+                class_type = node_data.get("class_type", "")
+                inputs = node_data.get("inputs", {})
+
+                # Only inject images into known image input nodes
+                if image_path and class_type in IMAGE_INPUT_NODE_TYPES:
+                    if "image" in inputs:
+                        inputs["image"] = image_path
+                        replacements.append(f"{node_id}.image -> {image_path}")
+                    # Also inject mask if loader exposes one
+                    if mask_path and "mask" in inputs:
+                        inputs["mask"] = mask_path
+                        replacements.append(f"{node_id}.mask -> {mask_path}")
+
+                # Heuristic fallback by name for other unlinked image fields
+                for input_name, input_value in inputs.items():
+                    is_linked = _is_linked(input_value)
+
+                    lower_name = input_name.lower()
+
+                    if image_path and ("image" in lower_name) and ("mask" not in lower_name) and not is_linked:
+                        inputs[input_name] = image_path
+                        replacements.append(f"{node_id}.{input_name} -> {image_path} (name)")
+                    if mask_path and "mask" in lower_name and not is_linked:
+                        inputs[input_name] = mask_path
+                        replacements.append(f"{node_id}.{input_name} -> {mask_path} (name)")
+        else:
+            image_nodes = [
+                (node_id, node_data)
+                for node_id, node_data in prompt.items()
+                if isinstance(node_data, dict) and node_data.get("class_type", "") in IMAGE_INPUT_NODE_TYPES
+            ]
+            # Use smart sorting: position-based > title-based > node ID
+            image_nodes.sort(key=_smart_image_node_sort_key)
+
+            # Debug: Log the sorted order
+            print("[ExecutionEngine] Sorted image input nodes:")
+            for idx, (node_id, node_data) in enumerate(image_nodes, 1):
+                meta = node_data.get("_meta", {})
+                title = meta.get("title", f"Node {node_id}")
+                pos = meta.get("pos", None)
+                print(f"  {idx}. Node {node_id}: '{title}' at position {pos}")
+
+            for index, (node_id, node_data) in enumerate(image_nodes):
+                if index >= len(image_entries):
+                    break
+
+                entry = image_entries[index]
+                image_path = entry.get("image")
+                mask_path = entry.get("mask")
+                inputs = node_data.get("inputs", {})
+
+                if image_path and "image" in inputs:
+                    inputs["image"] = image_path
+                    replacements.append(f"{node_id}.image -> {image_path} (slot {index + 1})")
+                if mask_path and "mask" in inputs:
+                    inputs["mask"] = mask_path
+                    replacements.append(f"{node_id}.mask -> {mask_path} (slot {index + 1})")
+
+        if replacements:
+            print(f"[ExecutionEngine] Injected image/mask into nodes: {', '.join(replacements)}")
+        else:
+            print("[ExecutionEngine] WARNING: Uploaded image/mask provided but no matching inputs were found")
 
         return prompt

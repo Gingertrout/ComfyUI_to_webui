@@ -78,13 +78,17 @@ class CivitaiBrowser:
         per_page: int,
         nsfw_setting: str,
         api_key_override: Optional[str] = None
-    ) -> Tuple[str, List, List[str]]:
+    ) -> Tuple[str, List, List[str], List]:
         """
         Search Civitai models
 
         Returns:
-            Tuple of (status_message, results_cache, choices_for_dropdown)
+            Tuple of (status_message, results_cache, choices_for_dropdown, gallery_samples)
         """
+        # Persist user sort/NSFW preferences
+        set_setting("civitai_sort", sort_label)
+        set_setting("civitai_nsfw", nsfw_setting)
+
         api_key = self.get_api_key(api_key_override)
 
         try:
@@ -94,9 +98,13 @@ class CivitaiBrowser:
             page = 1
             per_page = 20
 
-        params = {"page": page, "perPage": per_page}
+        params = {"perPage": per_page}
+        query = (query or "").strip()
         if query:
-            params["query"] = query.strip()
+            params["query"] = query
+        else:
+            # Civitai blocks page+query; allow paging only when no query
+            params["page"] = page
         if model_type:
             params["types"] = model_type.strip()
 
@@ -126,30 +134,47 @@ class CivitaiBrowser:
             self.results_cache = items
 
             if not items:
-                return "ℹ️ No results found.", [], []
+                return "ℹ️ No results found.", [], [], []
 
             # Create dropdown choices
             choices = []
+            gallery = []
             for idx, model in enumerate(items):
                 name = model.get("name", "Unnamed")
                 model_type = model.get("type", "Unknown")
                 stats = model.get("stats", {})
                 downloads = stats.get("downloadCount", 0)
                 choices.append(f"[{idx}] {name} ({model_type}) - {downloads:,} downloads")
+                # Build gallery card (preview + caption)
+                img_url = ""
+                versions = model.get("modelVersions") or []
+                if versions:
+                    images = versions[0].get("images") or []
+                    if images and isinstance(images[0], dict):
+                        img_url = images[0].get("url") or images[0].get("originalUrl") or ""
+                caption_lines = [name]
+                caption_lines.append(model_type or "Unknown")
+                if downloads:
+                    caption_lines.append(f"{downloads:,} dl")
+                gallery.append((img_url, " · ".join([c for c in caption_lines if c])))
 
             message = f"✅ Found {len(items)} results (page {page})"
-            return message, items, choices
+            return message, items, choices, gallery
 
         except requests.RequestException as e:
-            return f"❌ Search failed: {e}", [], []
+            return f"❌ Search failed: {e}", [], [], []
 
-    def select_model(self, selected_label: Optional[str]) -> Tuple[str, List, List[str], List[str], str]:
+    def select_model(self, selected_label: Optional[str], results_cache: Optional[List[Dict]] = None) -> Tuple[str, List[str], List[str], List[str], str]:
         """
         Handle model selection from dropdown
 
         Returns:
             Tuple of (model_details, preview_gallery, version_choices, file_choices, target_dir)
         """
+        # Prefer passed-in cache to align with current UI state
+        if results_cache:
+            self.results_cache = results_cache
+
         if not selected_label or not self.results_cache:
             return "", [], [], [], ""
 
@@ -199,13 +224,16 @@ class CivitaiBrowser:
 
         return details, preview_gallery, version_choices, file_choices, target_dir
 
-    def select_version(self, version_label: Optional[str]) -> Tuple[List[str], str]:
+    def select_version(self, version_label: Optional[str], results_cache: Optional[List[Dict]] = None) -> Tuple[List[str], str]:
         """
         Handle version selection
 
         Returns:
             Tuple of (file_choices, target_dir)
         """
+        if results_cache:
+            self.results_cache = results_cache
+
         if not version_label or not self.selected_model:
             return [], ""
 
@@ -357,36 +385,77 @@ def save_api_key(api_key: str):
 
 def search_models(query, model_type, sort_label, page, per_page, nsfw_setting, api_key_override):
     """Search Civitai models"""
-    status, results, choices = _browser.search_models(
+    status, results, choices, gallery = _browser.search_models(
         query, model_type, sort_label, page, per_page, nsfw_setting, api_key_override
     )
     return (
         gr.update(value=status, visible=True),  # search_status
         results,  # results_state
         gr.update(choices=choices, value=None),  # results_dropdown
+        gr.update(value=gallery, visible=bool(gallery)),  # results_gallery
     )
 
 
 def select_model(selected_label, results_state):
     """Handle model selection"""
-    details, gallery, version_choices, file_choices, target_dir = _browser.select_model(selected_label)
+    details, gallery, version_choices, file_choices, target_dir = _browser.select_model(selected_label, results_state)
+    version_value = version_choices[0] if version_choices else None
+    file_value = file_choices[0] if file_choices else None
     return (
         gr.update(value=details, visible=bool(details)),  # model_details
-        gallery,  # preview_gallery
-        gr.update(choices=version_choices, value=version_choices[0] if version_choices else None, visible=True),  # version_dropdown
-        gr.update(choices=file_choices, value=file_choices[0] if file_choices else None, visible=True),  # file_dropdown
+        gr.update(value=gallery, visible=bool(gallery)),  # preview_gallery
+        gr.update(choices=version_choices, value=version_value, visible=bool(version_choices)),  # version_dropdown
+        gr.update(choices=file_choices, value=file_value, visible=bool(file_choices)),  # file_dropdown
         target_dir,  # target_dir
     )
 
 
-def select_version(version_label, selected_model_state):
-    """Handle version selection"""
-    file_choices, target_dir = _browser.select_version(version_label)
+def select_model_by_index(evt: gr.SelectData, results_state):
+    """Handle selection when user clicks a gallery item"""
+    idx = evt.index if evt else None
+    if idx is None:
+        return (
+            gr.update(value="", visible=False),
+            gr.update(value=[], visible=False),
+            gr.update(choices=[], value=None, visible=False),
+            gr.update(choices=[], value=None, visible=False),
+            ""
+        )
+
+    # Build a faux dropdown label to reuse select_model logic, using cached results
+    results_state = results_state or _browser.results_cache
+    if results_state and idx < len(results_state):
+        name = results_state[idx].get("name", f"Model {idx}")
+        model_type = results_state[idx].get("type", "Unknown")
+        label = f"[{idx}] {name} ({model_type})"
+        details, gallery, version_choices, file_choices, target_dir = _browser.select_model(label, results_state)
+        version_value = version_choices[0] if version_choices else None
+        file_value = file_choices[0] if file_choices else None
+        return (
+            gr.update(value=details, visible=bool(details)),
+            gr.update(value=gallery, visible=bool(gallery)),
+            gr.update(choices=version_choices, value=version_value, visible=bool(version_choices)),
+            gr.update(choices=file_choices, value=file_value, visible=bool(file_choices)),
+            target_dir
+        )
+
     return (
-        gr.update(choices=file_choices, value=file_choices[0] if file_choices else None),  # file_dropdown
-        target_dir,  # target_dir
+        gr.update(value="❌ Invalid selection", visible=True),
+        gr.update(value=[], visible=False),
+        gr.update(choices=[], value=None, visible=False),
+        gr.update(choices=[], value=None, visible=False),
+        ""
     )
 
+
+def select_version(version_label, results_state):
+    """Handle version selection"""
+    file_choices, target_dir = _browser.select_version(version_label, results_state)
+    file_value = file_choices[0] if file_choices else None
+    return (
+        gr.update(choices=file_choices, value=file_value, visible=bool(file_choices)),  # file_dropdown
+        target_dir,  # target_dir
+    )
 
 def download_file(version_label, file_label, target_dir, api_key_override):
     """Download selected file"""

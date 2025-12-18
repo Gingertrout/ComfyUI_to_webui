@@ -392,3 +392,38 @@ class ComfyUIClient:
     def close(self):
         """Close the HTTP session"""
         self.session.close()
+
+    def upload_pil_image(
+        self,
+        image,
+        filename_prefix: str = "upload",
+        image_type: str = "input"
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Upload a PIL image to ComfyUI's /upload/image endpoint.
+
+        Returns a dict with name/subfolder/type on success, or None on failure.
+        """
+        try:
+            import io
+            import time
+
+            buf = io.BytesIO()
+            filename = f"{filename_prefix}_{int(time.time()*1000)}.png"
+            image.save(buf, format="PNG")
+            buf.seek(0)
+
+            files = {"image": (filename, buf, "image/png")}
+            data = {"type": image_type}
+
+            resp = self.session.post(
+                f"{self.base_url}/upload/image",
+                files=files,
+                data=data,
+                timeout=self.timeout_config.http_request
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            print(f"[ComfyUIClient] Failed to upload image: {e}")
+            return None
