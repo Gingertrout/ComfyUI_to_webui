@@ -404,6 +404,7 @@ class ComfyUIGradioApp:
             "unet": [
                 ("UNETLoader", "unet_name"),
                 ("UnetLoader", "unet_name"),
+                ("UnetLoaderGGUF", "unet_name"),  # GGUF quantized UNET models
             ],
             "lora": [
                 ("LoraLoader", "lora_name"),
@@ -416,6 +417,7 @@ class ComfyUIGradioApp:
             ],
             "clip": [
                 ("CLIPLoader", "clip_name"),
+                ("CLIPLoaderGGUF", "clip_name"),  # GGUF quantized CLIP models
                 ("DualCLIPLoader", "clip_name1"),
             ]
         }
@@ -1203,6 +1205,13 @@ class ComfyUIGradioApp:
         """
         import time
 
+        # Debug: Print every 50th call to avoid log spam
+        if not hasattr(self, '_preview_call_count'):
+            self._preview_call_count = 0
+        self._preview_call_count += 1
+        if self._preview_call_count % 50 == 1:
+            print(f"[GradioApp] Preview update called (#{self._preview_call_count}), ws_status: {self.previewer.ws_connection_status}")
+
         # Get current preview image from the previewer
         preview_image = self.previewer.latest_preview_image
 
@@ -1964,7 +1973,7 @@ class ComfyUIGradioApp:
                                 columns=4,
                                 object_fit="contain",
                                 height="auto",
-                                value=self.image_history,
+                                value=[],  # Load on page load to avoid threading issues
                                 elem_id="history-gallery"
                             )
 
@@ -2265,6 +2274,13 @@ class ComfyUIGradioApp:
                     vae
                 ],
                 outputs=[execution_status, result_gallery, selected_history_image, history_gallery]
+            )
+
+            # Load image history on page load (avoids threading issues at init)
+            app.load(
+                fn=lambda: self.image_history,
+                inputs=[],
+                outputs=[history_gallery]
             )
 
             # Live preview polling - polls every 200ms for preview updates

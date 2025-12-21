@@ -193,7 +193,10 @@ class ComfyUIClient:
 
         payload = {
             "prompt": prompt,
-            "client_id": client_id
+            "client_id": client_id,
+            "extra_data": {
+                "preview_method": "taesd"  # Fix for ComfyUI v0.5.1 preview regression (taesd is fast)
+            }
         }
 
         try:

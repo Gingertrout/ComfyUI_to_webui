@@ -124,6 +124,7 @@ CHECKPOINT_NODE_TYPES: Set[str] = {
 UNET_NODE_TYPES: Set[str] = {
     "UNETLoader",
     "UnetLoader",
+    "UnetLoaderGGUF",  # GGUF quantized UNET models
 }
 
 

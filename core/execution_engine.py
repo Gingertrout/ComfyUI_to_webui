@@ -284,38 +284,53 @@ class ExecutionEngine:
         width_value = user_values.get("width")
         height_value = user_values.get("height")
 
-        # First pass: collect all CLIPTextEncode nodes and guess which is positive/negative
+        # First pass: collect all text encoding nodes and guess which is positive/negative
+        # Support multiple node types with different parameter names
+        TEXT_ENCODE_NODE_TYPES = {
+            "CLIPTextEncode": "text",
+            "TextEncodeQwenImageEditPlus": "prompt",
+            "CLIPTextEncodeSDXL": "text",
+            "CLIPTextEncodeFlux": "text",
+        }
+
         clip_nodes = []
         for node_id, node_data in prompt.items():
             class_type = node_data.get("class_type", "")
-            if class_type == "CLIPTextEncode":
+
+            # Check if this is a text encoding node
+            if class_type in TEXT_ENCODE_NODE_TYPES:
+                param_name = TEXT_ENCODE_NODE_TYPES[class_type]
                 node_title = node_data.get("_meta", {}).get("title", "").lower()
-                original_text = node_data.get("inputs", {}).get("text", "").lower()
+                original_text = node_data.get("inputs", {}).get(param_name, "")
+                if isinstance(original_text, str):
+                    original_text = original_text.lower()
+                else:
+                    original_text = ""
 
                 # Guess type based on content and title
                 is_negative = (
                     "negative" in node_title or
-                    any(word in original_text for word in ["bad", "ugly", "worst", "low quality", "watermark", "3d", "cg"])
+                    any(word in original_text for word in ["bad", "ugly", "worst", "low quality", "watermark", "3d", "cg", "blurry"])
                 )
 
-                clip_nodes.append((node_id, node_data, node_title, is_negative, original_text))
-                print(f"[ExecutionEngine] Found CLIPTextEncode node {node_id}: title='{node_title}', is_negative={is_negative}")
+                clip_nodes.append((node_id, node_data, node_title, is_negative, original_text, param_name))
+                print(f"[ExecutionEngine] Found {class_type} node {node_id}: param={param_name}, title='{node_title}', is_negative={is_negative}")
 
         # Sort nodes: positive first, then negative
         clip_nodes.sort(key=lambda x: x[3])  # False (positive) comes before True (negative)
 
-        # Inject prompts into CLIPTextEncode nodes
+        # Inject prompts into text encoding nodes
         positive_injected = False
         negative_injected = False
 
-        for node_id, node_data, node_title, is_negative, original_text in clip_nodes:
+        for node_id, node_data, node_title, is_negative, original_text, param_name in clip_nodes:
             inputs = node_data.get("inputs", {})
 
             # Inject positive prompt to positive node
             if not positive_injected and not is_negative and user_values.get("positive_prompt"):
                 new_text = user_values["positive_prompt"]
-                inputs["text"] = new_text
-                injected.append(f"{node_id}.text (POSITIVE: '{new_text[:30]}...')")
+                inputs[param_name] = new_text
+                injected.append(f"{node_id}.{param_name} (POSITIVE: '{new_text[:30]}...')")
                 positive_injected = True
                 print(f"[ExecutionEngine]   ✓ POSITIVE Node {node_id}: '{original_text[:50]}...' -> '{new_text[:50]}...'")
                 continue
@@ -323,8 +338,8 @@ class ExecutionEngine:
             # Inject negative prompt to negative node
             if not negative_injected and is_negative and user_values.get("negative_prompt") is not None:
                 new_text = user_values["negative_prompt"] if user_values["negative_prompt"] else ""
-                inputs["text"] = new_text
-                injected.append(f"{node_id}.text (NEGATIVE: '{new_text[:30]}...')")
+                inputs[param_name] = new_text
+                injected.append(f"{node_id}.{param_name} (NEGATIVE: '{new_text[:30]}...')")
                 negative_injected = True
                 print(f"[ExecutionEngine]   ✓ NEGATIVE Node {node_id}: '{original_text[:50]}...' -> '{new_text[:50]}...'")
                 continue
@@ -359,10 +374,10 @@ class ExecutionEngine:
                     injected.append(f"{node_id}.denoise")
 
             # Inject dimensions into EmptyLatentImage and similar nodes
+            # CRITICAL FIX: Always set batch_size=1 to prevent VRAM overflow
             if class_type in {
                 "EmptyLatentImage",
                 "EmptySD3LatentImage",
-                "LoadAndResizeImage",
                 "EmptyFluxLatent",
                 "EmptyFlux2Latent",
                 "EmptyFluxLatentImage",
@@ -375,6 +390,39 @@ class ExecutionEngine:
                 if height_value is not None and "height" in inputs:
                     inputs["height"] = height_value
                     injected.append(f"{node_id}.height")
+
+                # CRITICAL: Always force batch_size=1 (prevents corruption to 1024)
+                if "batch_size" in inputs:
+                    inputs["batch_size"] = 1
+                    injected.append(f"{node_id}.batch_size=1 (forced)")
+
+            # Inject dimensions into image resize/scale nodes
+            # This ensures dimensions are consistent throughout the pipeline
+            if class_type in {
+                "LoadAndResizeImage",
+                "ImageResize",
+                "ImageResizeKJ",
+                "ImageResizeKJv2",
+                "ImageScale",
+                "ImageScaleBy",
+            }:
+                if width_value is not None and "width" in inputs:
+                    inputs["width"] = width_value
+                    injected.append(f"{node_id}.width")
+
+                if height_value is not None and "height" in inputs:
+                    inputs["height"] = height_value
+                    injected.append(f"{node_id}.height")
+
+                # For LoadAndResizeImage, disable keep_proportion to ensure exact dimensions
+                if class_type == "LoadAndResizeImage" and "keep_proportion" in inputs:
+                    inputs["keep_proportion"] = False
+                    injected.append(f"{node_id}.keep_proportion=False")
+
+                # For LoadAndResizeImage, enable resize flag
+                if class_type == "LoadAndResizeImage" and "resize" in inputs:
+                    inputs["resize"] = True
+                    injected.append(f"{node_id}.resize=True")
 
             # Fallback: apply dimensions to any unlinked width/height inputs (covers new node types)
             for dim_name, dim_value in (("width", width_value), ("height", height_value)):

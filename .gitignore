@@ -41,5 +41,6 @@ plugin_settings.json
 temp/
 output/
 *.log
-ComfyUI_to_webui_v2/last_successful_settings.json
-ComfyUI_to_webui_v2/image_history.json
+# Local runtime state (generated)
+last_successful_settings.json
+image_history.json
