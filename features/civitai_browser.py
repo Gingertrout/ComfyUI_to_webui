@@ -459,4 +459,5 @@ def select_version(version_label, results_state):
 
 def download_file(version_label, file_label, target_dir, api_key_override):
     """Download selected file"""
-    return _browser.download_file(version_label, file_label, target_dir, api_key_override)
+    message = _browser.download_file(version_label, file_label, target_dir, api_key_override)
+    return gr.update(value=message, visible=True)
