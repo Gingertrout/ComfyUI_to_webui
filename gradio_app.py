@@ -1634,6 +1634,23 @@ class ComfyUIGradioApp:
                     }}
                 }}
 
+                // Update dropdown to match localStorage value
+                function syncDropdown() {{
+                    const dropdown = document.querySelector('#theme-mode-selector');
+                    if (dropdown) {{
+                        // Find the input element within the dropdown
+                        const input = dropdown.querySelector('input');
+                        if (input) {{
+                            // Set the displayed value (capitalize first letter)
+                            const displayValue = themeMode.charAt(0).toUpperCase() + themeMode.slice(1);
+                            input.value = displayValue;
+
+                            // Trigger change event so Gradio knows the value changed
+                            input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        }}
+                    }}
+                }}
+
                 // Try to apply immediately
                 const gradioContainer = document.querySelector('.gradio-container');
                 if (gradioContainer) {{
@@ -1645,6 +1662,9 @@ class ComfyUIGradioApp:
                         applyTheme(container);
                     }}, 100);
                 }}
+
+                // Sync dropdown after a delay to ensure it's rendered
+                setTimeout(syncDropdown, 200);
             }}
             """
         ) as app:
