@@ -1609,8 +1609,9 @@ class ComfyUIGradioApp:
             analytics_enabled=False,
             js=f"""
             function() {{
-                // Set initial theme mode from saved preference
-                const themeMode = '{saved_theme_mode}';
+                // Load theme from localStorage (persists across refreshes)
+                // Fallback to server setting: '{saved_theme_mode}'
+                const themeMode = localStorage.getItem('comfyui_theme_mode') || '{saved_theme_mode}';
 
                 function applyTheme(container) {{
                     if (!container) return;
@@ -2426,6 +2427,9 @@ class ComfyUIGradioApp:
                 (mode) => {
                     const modeLower = mode.toLowerCase();
                     const gradioContainer = document.querySelector('.gradio-container');
+
+                    // Save to localStorage for persistence across page refreshes
+                    localStorage.setItem('comfyui_theme_mode', modeLower);
 
                     function applyTheme(shouldBeDark) {
                         if (shouldBeDark) {
