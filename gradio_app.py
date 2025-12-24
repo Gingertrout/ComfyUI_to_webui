@@ -1934,18 +1934,7 @@ class ComfyUIGradioApp:
             # Results section
             with gr.Row():
                 with gr.Column(scale=1):
-                    # Results header with theme selector
-                    with gr.Row():
-                        gr.Markdown("### 3. Results")
-                        with gr.Column(scale=0, min_width=200):
-                            theme_mode = gr.Radio(
-                                label="Theme",
-                                choices=["Light", "Dark", "System"],
-                                value=saved_theme_mode.capitalize() if saved_theme_mode else "System",
-                                elem_id="theme-mode-selector",
-                                container=False,
-                                scale=0
-                            )
+                    gr.Markdown("### 3. Results")
 
                     # Tabbed interface for Live Preview and Final Results
                     with gr.Tabs():
@@ -2118,6 +2107,25 @@ class ComfyUIGradioApp:
                             )
 
                             civitai_download_status = gr.Markdown(visible=False)
+
+                        with gr.Tab("⚙️ Settings"):
+                            gr.Markdown("### Application Settings")
+
+                            gr.Markdown("#### Theme Mode")
+                            gr.Markdown("Choose between light mode, dark mode, or follow your system preference")
+
+                            theme_mode = gr.Dropdown(
+                                label="Theme",
+                                choices=["Light", "Dark", "System"],
+                                value=saved_theme_mode.capitalize() if saved_theme_mode else "System",
+                                elem_id="theme-mode-selector",
+                                interactive=True
+                            )
+
+                            theme_status = gr.Markdown(
+                                value="",
+                                visible=False
+                            )
 
             # Info section
             with gr.Row():
@@ -2336,15 +2344,16 @@ class ComfyUIGradioApp:
 
             # Theme mode switcher
             def on_theme_change(mode: str):
-                """Save theme preference and return JavaScript to apply theme"""
+                """Save theme preference and return status message"""
                 mode_lower = mode.lower()
-                set_setting("theme_mode", mode_lower)
-                return mode_lower
+                result = set_setting("theme_mode", mode_lower)
+                status_msg = f"✅ Theme changed to **{mode}** mode"
+                return status_msg
 
             theme_mode.change(
                 fn=on_theme_change,
                 inputs=[theme_mode],
-                outputs=[theme_mode],
+                outputs=[theme_status],
                 js="""
                 (mode) => {
                     const modeLower = mode.toLowerCase();
@@ -2363,9 +2372,15 @@ class ComfyUIGradioApp:
                             }
                         }
                     }
-                    return mode;
                 }
                 """
+            )
+
+            # Show theme status after change
+            theme_status.change(
+                fn=lambda x: gr.update(visible=True),
+                inputs=[theme_status],
+                outputs=[theme_status]
             )
 
             # Photopea buttons - image editing integration
