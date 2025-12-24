@@ -27,6 +27,7 @@ Future Phases:
 """
 
 import gradio as gr
+import inspect
 import json
 import os
 import sys
@@ -1798,7 +1799,7 @@ class ComfyUIGradioApp:
                                 label="Width",
                                 value=512,
                                 minimum=64,
-                                maximum=2048,
+                                maximum=4096,
                                 step=64,
                                 precision=0,
                                 elem_id="width-input"
@@ -1807,7 +1808,7 @@ class ComfyUIGradioApp:
                                 label="Height",
                                 value=512,
                                 minimum=64,
-                                maximum=2048,
+                                maximum=4096,
                                 step=64,
                                 precision=0,
                                 elem_id="height-input"
@@ -2537,7 +2538,13 @@ class ComfyUIGradioApp:
         # Initialize queue with proper configuration to prevent Gradio 4.44.0 streaming bug
         # This fixes: AttributeError: 'NoneType' object has no attribute 'wait'
         # Disable API to avoid queue errors, set concurrency limit
-        app.queue(api_open=False, default_concurrency_limit=20)
+        queue_kwargs = {
+            "api_open": False,
+            "default_concurrency_limit": 20
+        }
+        if "client_max_timeout" in inspect.signature(app.queue).parameters:
+            queue_kwargs["client_max_timeout"] = self.client.timeout_config.prompt_execution
+        app.queue(**queue_kwargs)
 
         return app
 

@@ -43,7 +43,7 @@ class ComfyUIEndpoints:
 class TimeoutConfig:
     """Timeout and polling interval configuration"""
     # Prompt execution timeout (seconds)
-    prompt_execution: float = 900.0
+    prompt_execution: float = 3600.0
 
     # History API polling interval (seconds)
     history_poll_interval: float = 0.75
