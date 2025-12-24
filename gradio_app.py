@@ -1611,20 +1611,38 @@ class ComfyUIGradioApp:
             function() {{
                 // Set initial theme mode from saved preference
                 const themeMode = '{saved_theme_mode}';
-                const gradioContainer = document.querySelector('.gradio-container');
-                if (gradioContainer) {{
+
+                function applyTheme(container) {{
+                    if (!container) return;
+
                     if (themeMode === 'dark') {{
-                        gradioContainer.classList.add('dark');
+                        container.classList.add('dark');
+                        document.body.classList.add('dark');
                     }} else if (themeMode === 'light') {{
-                        gradioContainer.classList.remove('dark');
+                        container.classList.remove('dark');
+                        document.body.classList.remove('dark');
                     }} else {{
                         // System - follow OS preference
                         if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {{
-                            gradioContainer.classList.add('dark');
+                            container.classList.add('dark');
+                            document.body.classList.add('dark');
                         }} else {{
-                            gradioContainer.classList.remove('dark');
+                            container.classList.remove('dark');
+                            document.body.classList.remove('dark');
                         }}
                     }}
+                }}
+
+                // Try to apply immediately
+                const gradioContainer = document.querySelector('.gradio-container');
+                if (gradioContainer) {{
+                    applyTheme(gradioContainer);
+                }} else {{
+                    // Wait for container to be available
+                    setTimeout(() => {{
+                        const container = document.querySelector('.gradio-container');
+                        applyTheme(container);
+                    }}, 100);
                 }}
             }}
             """
@@ -2141,6 +2159,56 @@ class ComfyUIGradioApp:
                 gr.HTML(
                     """
                     <style>
+                        /* Dark mode styles */
+                        body.dark,
+                        .gradio-container.dark {
+                            --background-fill-primary: #1a1a1a;
+                            --background-fill-secondary: #2d2d2d;
+                            --body-text-color: #e0e0e0;
+                            --body-text-color-subdued: #b0b0b0;
+                            --border-color-primary: #404040;
+                            --block-background-fill: #2d2d2d;
+                            --block-label-text-color: #e0e0e0;
+                            --input-background-fill: #1a1a1a;
+                            --button-secondary-background-fill: #404040;
+                            --button-secondary-text-color: #e0e0e0;
+                        }
+
+                        body.dark,
+                        body.dark .gradio-container,
+                        .gradio-container.dark {
+                            background-color: #1a1a1a !important;
+                            color: #e0e0e0 !important;
+                        }
+
+                        body.dark .prose,
+                        body.dark label,
+                        body.dark p,
+                        body.dark span,
+                        .gradio-container.dark .prose,
+                        .gradio-container.dark label,
+                        .gradio-container.dark p,
+                        .gradio-container.dark span {
+                            color: #e0e0e0 !important;
+                        }
+
+                        body.dark input,
+                        body.dark textarea,
+                        body.dark select,
+                        .gradio-container.dark input,
+                        .gradio-container.dark textarea,
+                        .gradio-container.dark select {
+                            background-color: #2d2d2d !important;
+                            color: #e0e0e0 !important;
+                            border-color: #404040 !important;
+                        }
+
+                        body.dark .block,
+                        .gradio-container.dark .block {
+                            background-color: #2d2d2d !important;
+                            border-color: #404040 !important;
+                        }
+
                         /* Ensure all galleries are left-aligned and fully scrollable */
                         #result-gallery [data-testid="gallery"],
                         #history-gallery [data-testid="gallery"],
@@ -2348,7 +2416,7 @@ class ComfyUIGradioApp:
                 mode_lower = mode.lower()
                 result = set_setting("theme_mode", mode_lower)
                 status_msg = f"✅ Theme changed to **{mode}** mode"
-                return status_msg
+                return gr.update(value=status_msg, visible=True)
 
             theme_mode.change(
                 fn=on_theme_change,
@@ -2358,29 +2426,30 @@ class ComfyUIGradioApp:
                 (mode) => {
                     const modeLower = mode.toLowerCase();
                     const gradioContainer = document.querySelector('.gradio-container');
-                    if (gradioContainer) {
-                        if (modeLower === 'dark') {
-                            gradioContainer.classList.add('dark');
-                        } else if (modeLower === 'light') {
-                            gradioContainer.classList.remove('dark');
+
+                    function applyTheme(shouldBeDark) {
+                        if (shouldBeDark) {
+                            if (gradioContainer) gradioContainer.classList.add('dark');
+                            document.body.classList.add('dark');
                         } else {
-                            // System - follow OS preference
-                            if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
-                                gradioContainer.classList.add('dark');
-                            } else {
-                                gradioContainer.classList.remove('dark');
-                            }
+                            if (gradioContainer) gradioContainer.classList.remove('dark');
+                            document.body.classList.remove('dark');
                         }
                     }
+
+                    if (modeLower === 'dark') {
+                        applyTheme(true);
+                    } else if (modeLower === 'light') {
+                        applyTheme(false);
+                    } else {
+                        // System - follow OS preference
+                        const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+                        applyTheme(prefersDark);
+                    }
+
+                    return mode;  // Pass mode to Python function
                 }
                 """
-            )
-
-            # Show theme status after change
-            theme_status.change(
-                fn=lambda x: gr.update(visible=True),
-                inputs=[theme_status],
-                outputs=[theme_status]
             )
 
             # Photopea buttons - image editing integration
