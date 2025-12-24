@@ -52,7 +52,7 @@ if __name__ == "__main__" and __package__ is None:
     )
     from ComfyUI_to_webui.features.live_preview import ComfyUIPreviewer
     from ComfyUI_to_webui.features import civitai_browser
-    from ComfyUI_to_webui.utils.settings import get_setting
+    from ComfyUI_to_webui.utils.settings import get_setting, set_setting
     from ComfyUI_to_webui.config import (
         COMFYUI_BASE_URL,
         GRADIO_PORTS,
@@ -73,7 +73,7 @@ else:
     )
     from .features.live_preview import ComfyUIPreviewer
     from .features import civitai_browser
-    from .utils.settings import get_setting
+    from .utils.settings import get_setting, set_setting
     from .config import (
         COMFYUI_BASE_URL,
         GRADIO_PORTS,
@@ -1600,10 +1600,34 @@ class ComfyUIGradioApp:
         Returns:
             Gradio Blocks application
         """
+        # Load theme mode preference (light, dark, or system)
+        saved_theme_mode = get_setting("theme_mode", "system")
+
         with gr.Blocks(
             title=PROJECT_NAME,
             theme=gr.themes.Default(),
-            analytics_enabled=False
+            analytics_enabled=False,
+            js=f"""
+            function() {{
+                // Set initial theme mode from saved preference
+                const themeMode = '{saved_theme_mode}';
+                const gradioContainer = document.querySelector('.gradio-container');
+                if (gradioContainer) {{
+                    if (themeMode === 'dark') {{
+                        gradioContainer.classList.add('dark');
+                    }} else if (themeMode === 'light') {{
+                        gradioContainer.classList.remove('dark');
+                    }} else {{
+                        // System - follow OS preference
+                        if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {{
+                            gradioContainer.classList.add('dark');
+                        }} else {{
+                            gradioContainer.classList.remove('dark');
+                        }}
+                    }}
+                }}
+            }}
+            """
         ) as app:
             # Header
             gr.Markdown(f"""
@@ -1910,7 +1934,18 @@ class ComfyUIGradioApp:
             # Results section
             with gr.Row():
                 with gr.Column(scale=1):
-                    gr.Markdown("### 3. Results")
+                    # Results header with theme selector
+                    with gr.Row():
+                        gr.Markdown("### 3. Results")
+                        with gr.Column(scale=0, min_width=200):
+                            theme_mode = gr.Radio(
+                                label="Theme",
+                                choices=["Light", "Dark", "System"],
+                                value=saved_theme_mode.capitalize() if saved_theme_mode else "System",
+                                elem_id="theme-mode-selector",
+                                container=False,
+                                scale=0
+                            )
 
                     # Tabbed interface for Live Preview and Final Results
                     with gr.Tabs():
@@ -2297,6 +2332,40 @@ class ComfyUIGradioApp:
                 fn=self.interrupt_generation,
                 inputs=[],
                 outputs=[execution_status]
+            )
+
+            # Theme mode switcher
+            def on_theme_change(mode: str):
+                """Save theme preference and return JavaScript to apply theme"""
+                mode_lower = mode.lower()
+                set_setting("theme_mode", mode_lower)
+                return mode_lower
+
+            theme_mode.change(
+                fn=on_theme_change,
+                inputs=[theme_mode],
+                outputs=[theme_mode],
+                js="""
+                (mode) => {
+                    const modeLower = mode.toLowerCase();
+                    const gradioContainer = document.querySelector('.gradio-container');
+                    if (gradioContainer) {
+                        if (modeLower === 'dark') {
+                            gradioContainer.classList.add('dark');
+                        } else if (modeLower === 'light') {
+                            gradioContainer.classList.remove('dark');
+                        } else {
+                            // System - follow OS preference
+                            if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+                                gradioContainer.classList.add('dark');
+                            } else {
+                                gradioContainer.classList.remove('dark');
+                            }
+                        }
+                    }
+                    return mode;
+                }
+                """
             )
 
             # Photopea buttons - image editing integration
